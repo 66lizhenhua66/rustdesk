@@ -42,6 +42,17 @@ gitnexus analyze --index-only --name rustdesk --workers 4
 
 先用 `status` 检查新鲜度，在源码、分支或提交变动后按需刷新。`--index-only` 保留已有 AGENTS.md、CLAUDE.md 和技能文件；`.gitnexus/` 由本机 `.git/info/exclude` 排除，不提交索引数据库。新 clone 需各自建立索引。当前没有生成 embeddings，不能把图查询与全文检索误认为已启用向量语义检索。
 
+## 鸿蒙官方开发知识 MCP
+
+- 服务名：`harmonyos_developer_knowledge`。
+- 地址：`https://connect-api.cloud.huawei.com/api/developerknowledge/mcp`，使用 Streamable HTTP。
+- 项目配置：[.codex/config.toml](../../.codex/config.toml)；使用规则见 [AGENTS.md](../../AGENTS.md)。
+- 已验证的工具：`searchDocuments`、`getDocumentsById`。查询 API 后读取正文，核对 HarmonyOS 6.1 的最低 API、权限与设备形态限制。
+- 当前工作空间入口在仓库外层，因此外层也有同内容的 `.codex/config.toml`；仓库内副本进入 Git，外层副本仅供本机入口加载，不修改全局 MCP 列表。
+- 已在真实用户环境验证当前外层工作空间加载成功（`enabled=true`、`disabled_reason=null`）；单独打开 `rustdesk` 子仓库时，需在 Codex 正常确认信任该仓库，项目配置才能加载。未修改全局项目信任设置。
+- 新增配置不会自动把工具注入已经运行的会话。若工具列表中没有该服务，需在客户端重新加载项目/会话后检查；项目配置是否可用还取决于客户端的项目加载与信任设置。
+- 初始化和工具清单验证不等于 API 内容已核实，也不代替编译和真机测试。服务不可用时查华为官方文档，并明确证据边界。
+
 ## 历史调研
 
 - [开源远控选型（2026-09-29）](research/2026-09-29-remote-desktop-options.md)
