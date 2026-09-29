@@ -1,0 +1,13 @@
+/.hvigor/
+/build/
+/entry/build/
+/entry/.cxx/
+/oh_modules/
+/entry/oh_modules/
+/node_modules/
+/local.properties
+/signing/
+/artifacts/
+/native/rust/target/
+/build-profile.local.json5
+!AppScope/resources/base/media/app_icon.svg

@@ -1,0 +1,8 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "harmony-bridge-probe",
+  "version": "0.1.0",
+  "description": "Isolated ArkUI NAPI Rust bridge verification",
+  "dependencies": {},
+  "devDependencies": {}
+}

@@ -17,6 +17,8 @@
 | [DECISIONS.md](DECISIONS.md) | 已确认方向、提议及其取舍，避免反复讨论 |
 | [specs/001-baseline-and-harmony-feasibility.md](specs/001-baseline-and-harmony-feasibility.md) | 第一阶段范围草案与验收清单 |
 | [specs/002-controller-tech-stack.md](specs/002-controller-tech-stack.md) | 鸿蒙优先的控制端技术栈决策、各层职责与未来平台复用方式 |
+| [plans/2026-09-30-harmony-bridge-probe.md](plans/2026-09-30-harmony-bridge-probe.md) | 已执行的 T0/T1 原生桥接验证计划 |
+| [research/2026-09-30-harmony-bridge-validation.md](research/2026-09-30-harmony-bridge-validation.md) | 双 ABI 构建、模拟器 6/6 与生命周期验证结果及未验证边界 |
 | [research/](research/) | 带日期和来源的调研快照，不代表当前实现能力 |
 
 ## 维护约定
@@ -60,5 +62,6 @@ gitnexus analyze --index-only --name rustdesk --workers 4
 - [RemoteDeskHarmonyOS 完成度（2026-09-29）](research/2026-09-29-remotedeskharmonyos-completeness.md)
 - [当前 RustDesk 认证与权限源码调查（2026-09-30）](research/2026-09-30-auth-permissions-audit.md)
 - [当前 RustDesk 控制端可移植性调查（2026-09-30）](research/2026-09-30-controller-portability-audit.md)
+- [鸿蒙原生桥接验证（2026-09-30）](research/2026-09-30-harmony-bridge-validation.md)
 
 前两份报告由工作空间根目录归档而来，根目录原始文件保留为历史快照；后续维护统一在本目录进行。新增源码调查也直接保存于此，不再双份更新。
