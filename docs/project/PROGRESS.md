@@ -7,7 +7,7 @@
 - 仓库：`git@github.com:66lizhenhua66/rustdesk.git`。
 - 基线：`a7f2260203befb7e9c70b585219f0f0b5ca57703`，清单版本 1.5.0；这是固定源码快照，不据此宣称稳定发行版。
 - 子模块 `libs/hbb_common`：`229b904508364c8997aad0fb5af57effac859f60`。
-- 当前文档分支：`docs/project-foundation`。
+- 当前开发分支：`feat/harmony-controller`，从文档提交 `094caaec6` 创建；`docs/project-foundation` 保留文档基线。
 - 本机 PATH 可发现 cargo、rustc、Flutter、Git；尚未验证版本及完整工具链。PATH 未发现 CMake 不代表系统未安装。
 - 尚未执行 RustDesk 编译、鸿蒙安装、真机远控或性能测量。
 - 用户已确认具备鸿蒙 6.1 真机和开发环境；工具链具体版本、设备型号和调试连接尚未由本次任务核验。
@@ -45,6 +45,7 @@
 - 2026-09-30：读取官方 fork 布局，建立 SPEC、路线、决策和阶段规格草案；开始集中管理文档。
 - 2026-09-30：用户确认有鸿蒙 6.1 真机与环境；只读代码调查确认已有无新帧检测、重复帧过滤、独立光标服务及 VideoQoS，M3 将先测基线。
 - 2026-09-30：文档目录完成相对链接校验与独立只读复核，作为本地文档提交保存；尚未推送远程。
+- 2026-09-30：按用户要求创建并切换到 `feat/harmony-controller`，后续鸿蒙控制端与 M0 验证在此分支推进；保留原有 master 和文档分支。
 
 ## 后续验证记录格式
 
