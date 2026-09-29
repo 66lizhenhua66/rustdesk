@@ -29,6 +29,19 @@
 - 测量/真机证据记录日期、提交 SHA、设备与系统/API、远端版本、网络路径、步骤、结果和日志位置。只提交脱敏摘要；密钥、凭据、设备标识和原始诊断日志不进 Git。
 - 实现方案按阶段细化。不要把全产品路线图当成已经批准的逐文件实现计划。
 
+## 代码索引
+
+本仓库已建立 GitNexus 本地索引，MCP 仓库名为 `rustdesk`。定位调用链、查询符号上下游或评估改动影响时可先使用 GitNexus，再核对当前源码；索引不是完整运行时依赖证明。
+
+在本仓库根目录执行：
+
+```text
+gitnexus status
+gitnexus analyze --index-only --name rustdesk --workers 4
+```
+
+先用 `status` 检查新鲜度，在源码、分支或提交变动后按需刷新。`--index-only` 保留已有 AGENTS.md、CLAUDE.md 和技能文件；`.gitnexus/` 由本机 `.git/info/exclude` 排除，不提交索引数据库。新 clone 需各自建立索引。当前没有生成 embeddings，不能把图查询与全文检索误认为已启用向量语义检索。
+
 ## 历史调研
 
 - [开源远控选型（2026-09-29）](research/2026-09-29-remote-desktop-options.md)
