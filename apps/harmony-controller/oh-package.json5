@@ -1,0 +1,8 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "harmony-controller",
+  "version": "0.1.0",
+  "description": "Native HarmonyOS remote desktop controller foundation",
+  "dependencies": {},
+  "devDependencies": {}
+}

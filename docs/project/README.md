@@ -18,6 +18,8 @@
 | [specs/001-baseline-and-harmony-feasibility.md](specs/001-baseline-and-harmony-feasibility.md) | 第一阶段范围草案与验收清单 |
 | [specs/002-controller-tech-stack.md](specs/002-controller-tech-stack.md) | 鸿蒙优先的控制端技术栈决策、各层职责与未来平台复用方式 |
 | [plans/2026-09-30-harmony-bridge-probe.md](plans/2026-09-30-harmony-bridge-probe.md) | 已执行的 T0/T1 原生桥接验证计划 |
+| [plans/2026-09-30-controller-foundation.md](plans/2026-09-30-controller-foundation.md) | 非媒体控制端基础实施计划及官方会话接入的后续顺序 |
+| [research/2026-09-30-controller-foundation-implementation.md](research/2026-09-30-controller-foundation-implementation.md) | 共享核心、配置 UI、预检、构建/测试与真实未完成项 |
 | [research/2026-09-30-harmony-bridge-validation.md](research/2026-09-30-harmony-bridge-validation.md) | 双 ABI 构建、模拟器 6/6 与生命周期验证结果及未验证边界 |
 | [research/](research/) | 带日期和来源的调研快照，不代表当前实现能力 |
 

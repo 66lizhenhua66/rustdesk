@@ -47,6 +47,8 @@
 
 控制端选型：[002-controller-tech-stack.md](specs/002-controller-tech-stack.md)。M0 优先验证 ArkUI → NAPI → Rust 的最小链路与依赖，再接入会话和媒体；不先适配 Flutter 鸿蒙，也不同时开发 Android/iOS 界面。
 
+2026-09-30 执行调整：用户要求视频解码与真机验证后移。已完成 [非媒体基础](research/2026-09-30-controller-foundation-implementation.md)，先推进配置、共享接口和官方 Session 的无媒体构建接入；M1 的视频与真机项保留到后续，不能把当前可达性预检标作 M1 会话成功。
+
 ## Windows 省流调查结论（基线 a7f226020）
 
 - `libs/scrap/src/dxgi/mod.rs:600` 已使用画面更新时间/累计帧信息判定新帧；`libs/scrap/src/common/mod.rs:122` 有相等帧过滤。具体行为取决于采集后端。
