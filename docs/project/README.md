@@ -5,13 +5,13 @@
 ## 从哪里继续
 
 1. 读 [PROGRESS.md](PROGRESS.md)，了解当前状态和下一步。
-2. 读 [SPEC.md](SPEC.md)，确认产品范围及需求编号。
+2. 读 [SPEC.md](SPEC.md)，确认产品范围、被控端改造、权限/公网安全和多端架构。
 3. 按 [ROADMAP.md](ROADMAP.md) 找到当前阶段，再读对应阶段规格。
 4. 遇到架构取舍时先查 [DECISIONS.md](DECISIONS.md)。
 
 | 文档 | 职责 |
 | --- | --- |
-| [SPEC.md](SPEC.md) | 产品目标、需求编号、平台顺序、约束；不记录每日流水 |
+| [SPEC.md](SPEC.md) | 产品需求与架构主文档：被控改造、认证权限、公网部署、鸿蒙优先的多端架构和验收 |
 | [ROADMAP.md](ROADMAP.md) | 阶段顺序、依赖、退出条件与代码入口 |
 | [PROGRESS.md](PROGRESS.md) | 唯一的当前进度入口，记录结果、证据、阻塞和下一步 |
 | [DECISIONS.md](DECISIONS.md) | 已确认方向、提议及其取舍，避免反复讨论 |
@@ -46,5 +46,7 @@ gitnexus analyze --index-only --name rustdesk --workers 4
 
 - [开源远控选型（2026-09-29）](research/2026-09-29-remote-desktop-options.md)
 - [RemoteDeskHarmonyOS 完成度（2026-09-29）](research/2026-09-29-remotedeskharmonyos-completeness.md)
+- [当前 RustDesk 认证与权限源码调查（2026-09-30）](research/2026-09-30-auth-permissions-audit.md)
+- [当前 RustDesk 控制端可移植性调查（2026-09-30）](research/2026-09-30-controller-portability-audit.md)
 
-这些副本是后续维护入口。工作空间根目录的原始文件保留作为历史快照，不再双份更新。
+前两份报告由工作空间根目录归档而来，根目录原始文件保留为历史快照；后续维护统一在本目录进行。新增源码调查也直接保存于此，不再双份更新。
