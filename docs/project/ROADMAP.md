@@ -1,6 +1,6 @@
 # 改造路线
 
-更新：2026-09-30。状态：与 [产品设计 v0.3](SPEC.md) 配套的建议路线，具体实现按阶段细化。本文件不承载实时进度，见 [PROGRESS.md](PROGRESS.md)。
+更新：2026-09-30。状态：与 [产品设计 v0.4](SPEC.md) 配套的建议路线，鸿蒙原生及核心共享方向已确认，具体实现按阶段细化。本文件不承载实时进度，见 [PROGRESS.md](PROGRESS.md)。
 
 ## 推荐顺序
 
@@ -44,6 +44,8 @@
 - 每阶段只在相关路径改动，记录默认路径与平台回归范围。
 
 第一阶段规格：[001-baseline-and-harmony-feasibility.md](specs/001-baseline-and-harmony-feasibility.md)。
+
+控制端选型：[002-controller-tech-stack.md](specs/002-controller-tech-stack.md)。M0 优先验证 ArkUI → NAPI → Rust 的最小链路与依赖，再接入会话和媒体；不先适配 Flutter 鸿蒙，也不同时开发 Android/iOS 界面。
 
 ## Windows 省流调查结论（基线 a7f226020）
 

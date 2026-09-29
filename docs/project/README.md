@@ -16,6 +16,7 @@
 | [PROGRESS.md](PROGRESS.md) | 唯一的当前进度入口，记录结果、证据、阻塞和下一步 |
 | [DECISIONS.md](DECISIONS.md) | 已确认方向、提议及其取舍，避免反复讨论 |
 | [specs/001-baseline-and-harmony-feasibility.md](specs/001-baseline-and-harmony-feasibility.md) | 第一阶段范围草案与验收清单 |
+| [specs/002-controller-tech-stack.md](specs/002-controller-tech-stack.md) | 鸿蒙优先的控制端技术栈决策、各层职责与未来平台复用方式 |
 | [research/](research/) | 带日期和来源的调研快照，不代表当前实现能力 |
 
 ## 维护约定
