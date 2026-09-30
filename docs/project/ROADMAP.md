@@ -49,6 +49,8 @@
 
 2026-09-30 执行调整：用户要求视频解码与真机验证后移。已完成 [非媒体基础](research/2026-09-30-controller-foundation-implementation.md)，先推进配置、共享接口和官方 Session 的无媒体构建接入；M1 的视频与真机项保留到后续，不能把当前可达性预检标作 M1 会话成功。
 
+后续增量已完成 [严格身份与单次加密登录验证](research/2026-09-30-secure-session-validation.md)，但只是受控对端测试，登录确认后即关闭。真实 Windows 互通、ID/中继通道、2FA 继续会话和明确操作权限仍是 M1 后续工作；未将该验证标作完整 Session 交付。
+
 ## Windows 省流调查结论（基线 a7f226020）
 
 - `libs/scrap/src/dxgi/mod.rs:600` 已使用画面更新时间/累计帧信息判定新帧；`libs/scrap/src/common/mod.rs:122` 有相等帧过滤。具体行为取决于采集后端。

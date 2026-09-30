@@ -20,6 +20,8 @@
 | [plans/2026-09-30-harmony-bridge-probe.md](plans/2026-09-30-harmony-bridge-probe.md) | 已执行的 T0/T1 原生桥接验证计划 |
 | [plans/2026-09-30-controller-foundation.md](plans/2026-09-30-controller-foundation.md) | 非媒体控制端基础实施计划及官方会话接入的后续顺序 |
 | [research/2026-09-30-controller-foundation-implementation.md](research/2026-09-30-controller-foundation-implementation.md) | 共享核心、配置 UI、预检、构建/测试与真实未完成项 |
+| [plans/2026-09-30-secure-session.md](plans/2026-09-30-secure-session.md) | 严格身份、加密握手和非媒体登录的实施任务 |
+| [research/2026-09-30-secure-session-validation.md](research/2026-09-30-secure-session-validation.md) | 38 项测试、双 ABI 构建、登录能力及真实互通限制 |
 | [research/2026-09-30-harmony-bridge-validation.md](research/2026-09-30-harmony-bridge-validation.md) | 双 ABI 构建、模拟器 6/6 与生命周期验证结果及未验证边界 |
 | [research/](research/) | 带日期和来源的调研快照，不代表当前实现能力 |
 

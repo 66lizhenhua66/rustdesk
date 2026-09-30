@@ -28,7 +28,7 @@ fn direct_profile_normalizes_literal_address_and_rejects_secrets() {
     );
     assert_eq!(valid["profile"]["target"], "[::1]:21118");
     assert_eq!(valid["readyForSession"], false);
-    assert_eq!(valid["reason"], "AUTH_BACKEND_NOT_READY");
+    assert_eq!(valid["reason"], "REMOTE_SESSION_NOT_IMPLEMENTED");
     let invalid = validate(
         r#"{"id":"","name":"Office","mode":"direct","target":"127.0.0.1","server":"","serverKey":"","peerFingerprint":"","password":"secret"}"#,
     );
@@ -45,6 +45,23 @@ fn server_key_and_fingerprint_require_valid_public_material() {
         r#"{"id":"a","name":"Office","mode":"direct","target":"127.0.0.1","server":"","serverKey":"","peerFingerprint":"abcd"}"#,
     );
     assert_eq!(bad_fingerprint["ok"], false);
+}
+
+#[test]
+fn direct_profile_preserves_explicit_peer_identity_and_rejects_bad_keys() {
+    let public_key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7u8; 32]);
+    let profile = serde_json::json!({
+        "id":"local", "name":"Pinned", "mode":"direct", "target":"127.0.0.1",
+        "server":"", "serverKey":"", "peerFingerprint":"",
+        "peerId":"123456789", "peerPublicKey":public_key
+    });
+    let valid = validate(&profile.to_string());
+    assert_eq!(valid["ok"], true);
+    assert_eq!(valid["profile"]["peerId"], "123456789");
+    assert_eq!(valid["profile"]["peerPublicKey"], profile["peerPublicKey"]);
+    let mut bad = profile;
+    bad["peerPublicKey"] = "not-a-key".into();
+    assert_eq!(validate(&bad.to_string())["code"], "INVALID_PEER_KEY");
 }
 
 unsafe extern "C" fn collect(json: *const std::ffi::c_char, user: *mut std::ffi::c_void) {

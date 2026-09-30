@@ -9,6 +9,8 @@ interface Profile {
   server: string;
   serverKey: string;
   peerFingerprint: string;
+  peerId?: string;
+  peerPublicKey?: string;
 }
 
 interface ValidationResult {
@@ -39,10 +41,15 @@ struct Index {
   @State private server: string = '';
   @State private serverKey: string = '';
   @State private peerFingerprint: string = '';
+  @State private peerId: string = '';
+  @State private peerPublicKey: string = '';
   @State private formError: string = '';
   @State private selectedId: string = '';
   @State private status: string = '';
   @State private probing: boolean = false;
+  @State private activeKind: string = '';
+  @State private authPromptOpen: boolean = false;
+  @State private sessionPassword: string = '';
   private store?: preferences.Preferences;
   private currentTask: number = 0;
   private epoch: number = 0;
@@ -69,13 +76,16 @@ struct Index {
   }
 
   private stopPage(): void {
-    if (this.probing) { this.status = '网络预检已停止；身份未验证，操作未授权。'; }
+    if (this.probing) { this.status = '检查已停止；操作未授权。'; }
     this.visible = false;
     this.epoch++;
     this.loadId++;
     this.loadActive = false;
     this.currentTask = 0;
     this.probing = false;
+    this.activeKind = '';
+    this.authPromptOpen = false;
+    this.sessionPassword = '';
     controller.dispose();
   }
 
@@ -90,6 +100,10 @@ struct Index {
       case 'INVALID_SERVER': return '服务器地址或端口无效';
       case 'INVALID_SERVER_KEY': return '服务器公钥无效，应为 32 字节密钥的 Base64 编码';
       case 'INVALID_FINGERPRINT': return '对端指纹应为 64 位十六进制字符';
+      case 'INVALID_PEER_ID': return '被控设备 ID 应为 6 至 20 位数字';
+      case 'INVALID_PEER_KEY':
+      case 'INVALID_PEER_PUBLIC_KEY': return '可信公钥应为 32 字节 Ed25519 公钥的 Base64 编码';
+      case 'FINGERPRINT_MISMATCH': return '对端指纹与可信公钥不一致';
       case 'INVALID_MODE': return '连接方式无效';
       case 'INVALID_JSON': return '配置字段缺失、格式错误或含有不支持的字段';
       default: return result.message ?? result.code ?? '配置无效';
@@ -101,12 +115,54 @@ struct Index {
       case 'CONNECTING': return '正在连接目标地址';
       case 'TRANSPORT_OPEN': return 'TCP 连接已建立';
       case 'PROTOCOL_MESSAGE': return '已收到协议消息';
-      case 'AUTH_BACKEND_NOT_READY': return '网络预检结束；认证会话后端尚未接入';
+      case 'AUTHENTICATION_REQUIRED': return '网络预检结束；此检查不验证身份或登录';
       case 'TRANSPORT_FAILED': return '网络连接失败或读取失败，请检查地址与网络';
       case 'INVALID_PROTOCOL': return '目标返回的协议消息无效';
       case 'FRAME_TOO_LARGE': return '目标返回的协议帧无效或过大';
       case 'CANCELLED': return '网络预检已取消';
       default: return `网络预检状态：${event.code}`;
+    }
+  }
+
+  private authenticationMessage(event: ControllerEvent): string {
+    switch (event.code) {
+      case 'CONNECTING': return '正在连接被控设备';
+      case 'TRANSPORT_OPEN': return '传输通道已建立，正在验证身份';
+      case 'IDENTITY_VERIFIED': return '设备签名与预存身份已验证，正在进行加密登录';
+      case 'AUTHENTICATED': return '设备身份与加密登录已确认';
+      case 'AUTHENTICATING': return '加密通道已建立，正在等待登录结果';
+      case 'AWAITING_APPROVAL': return '已发送空密码请求，正在等待被控端确认';
+      case 'MISSING_KEY':
+      case 'MISSING_PEER_KEY':
+      case 'TRUST_MATERIAL_MISSING': return '缺少预先取得的可信设备公钥';
+      case 'TRUST_FAILED':
+      case 'FINGERPRINT_MISMATCH':
+      case 'KEY_MISMATCH': return '设备公钥或指纹与预存信任资料不一致';
+      case 'INVALID_SIGNATURE':
+      case 'SIGNATURE_INVALID':
+      case 'IDENTITY_INVALID': return '设备签名验证失败';
+      case 'IDENTITY_REQUIRED': return '被控入口未提供签名身份；旧明文入口已拒绝';
+      case 'PEER_ID_MISMATCH':
+      case 'INVALID_PEER_ID': return '被控设备 ID 与预存资料不一致';
+      case 'UNSUPPORTED_KX_VERSION':
+      case 'VERSION_MISMATCH':
+      case 'KX_VERSION_UNSUPPORTED': return '对端密钥交换版本不受支持';
+      case 'PLAINTEXT_REJECTED':
+      case 'UNSIGNED_HANDSHAKE': return '对端未提供可信签名握手；旧明文入口已拒绝';
+      case 'INVALID_CIPHERTEXT':
+      case 'DECRYPT_FAILED': return '加密消息验证失败';
+      case 'KEY_EXCHANGE_FAILED': return '无法建立加密会话';
+      case 'INVALID_FRAME': return '对端协议帧无效或过大';
+      case 'PROTOCOL_FAILED': return '加密登录协议未完成';
+      case 'TRANSPORT_FAILED': return '连接或读取失败，请检查目标地址与网络';
+      case 'NONCE_EXHAUSTED': return '加密会话计数耗尽';
+      case 'TIMEOUT': return '加密登录超时';
+      case 'PASSWORD_REJECTED':
+      case 'LOGIN_REJECTED': return '登录未获接受，请检查本次密码或被控端批准状态';
+      case 'SECOND_FACTOR_REQUIRED': return '被控端要求二次验证；当前页面尚未接入后续交互';
+      case 'AUTH_BACKEND_NOT_READY': return '当前目标没有可用的严格认证入口';
+      case 'CANCELLED': return '加密登录验证已取消';
+      default: return `加密登录未完成（${event.code}）`;
     }
   }
 
@@ -180,6 +236,7 @@ struct Index {
 
   private newProfile(): void {
     if (this.loading || this.storeError.length > 0) { return; }
+    this.cancelActive();
     this.editingId = '';
     this.name = '';
     this.mode = 'direct';
@@ -187,12 +244,14 @@ struct Index {
     this.server = '';
     this.serverKey = '';
     this.peerFingerprint = '';
+    this.peerId = '';
+    this.peerPublicKey = '';
     this.formError = '';
     this.formOpen = true;
   }
 
   private editProfile(profile: Profile): void {
-    this.cancelProbe();
+    this.cancelActive();
     this.editingId = profile.id;
     this.name = profile.name;
     this.mode = profile.mode;
@@ -200,6 +259,8 @@ struct Index {
     this.server = profile.server;
     this.serverKey = profile.serverKey;
     this.peerFingerprint = profile.peerFingerprint;
+    this.peerId = profile.peerId ?? '';
+    this.peerPublicKey = profile.peerPublicKey ?? '';
     this.formError = '';
     this.formOpen = true;
   }
@@ -217,7 +278,9 @@ struct Index {
       target: this.target.trim(),
       server: this.server.trim(),
       serverKey: this.serverKey.trim(),
-      peerFingerprint: this.peerFingerprint.trim()
+      peerFingerprint: this.peerFingerprint.trim(),
+      peerId: this.peerId.trim(),
+      peerPublicKey: this.peerPublicKey.trim()
     };
     let result: ValidationResult;
     try {
@@ -235,7 +298,7 @@ struct Index {
       ? this.profiles.map((item: Profile) => item.id === this.editingId ? normalized : item)
       : this.profiles.concat([normalized]);
     if (await this.persist(next)) {
-      this.cancelProbe();
+      this.cancelActive();
       this.selectedId = normalized.id;
       this.formOpen = false;
       this.formError = '';
@@ -246,7 +309,7 @@ struct Index {
   }
 
   private async deleteProfile(profile: Profile): Promise<void> {
-    this.cancelProbe();
+    this.cancelActive();
     const next = this.profiles.filter((item: Profile) => item.id !== profile.id);
     if (await this.persist(next)) {
       if (this.selectedId === profile.id) { this.selectedId = ''; }
@@ -254,16 +317,19 @@ struct Index {
     }
   }
 
-  private cancelProbe(): void {
+  private cancelActive(): void {
     const task = this.currentTask;
     this.epoch++;
     this.currentTask = 0;
     this.probing = false;
+    this.activeKind = '';
+    this.authPromptOpen = false;
+    this.sessionPassword = '';
     if (task > 0) { controller.cancel(task); }
   }
 
   private startProbe(profile: Profile): void {
-    this.cancelProbe();
+    this.cancelActive();
     if (profile.mode !== 'direct') {
       this.status = '会话后端尚未接入。';
       return;
@@ -276,6 +342,7 @@ struct Index {
         this.status = `${this.probeMessage(event)}。诊断不是远程会话；未验证身份、未授权。`;
         if (event.state === 'blocked' || event.state === 'failed' || event.state === 'cancelled') {
           this.probing = false;
+          this.activeKind = '';
           this.currentTask = 0;
           controller.cancel(event.taskId);
         }
@@ -283,9 +350,58 @@ struct Index {
       if (task <= 0) { throw new Error('任务启动失败'); }
       this.currentTask = task;
       this.probing = true;
+      this.activeKind = 'probe';
     } catch (error) {
       this.status = `网络预检无法启动：${String(error)}。请稍后重试。`;
       this.probing = false;
+      this.activeKind = '';
+    }
+  }
+
+  private startAuthentication(profile: Profile): void {
+    const password = this.sessionPassword;
+    this.sessionPassword = '';
+    this.authPromptOpen = false;
+    this.cancelActive();
+    if (profile.mode !== 'direct' || !profile.peerId || !profile.peerPublicKey) {
+      this.status = '请先保存被控设备 ID 和可信公钥。';
+      return;
+    }
+    const request = JSON.stringify({
+      endpoint: profile.target,
+      peerId: profile.peerId,
+      peerPublicKey: profile.peerPublicKey,
+      peerFingerprint: profile.peerFingerprint.length > 0 ? profile.peerFingerprint : null,
+      minimumKxVersion: 1
+    });
+    const ownerEpoch = this.epoch;
+    this.status = '正在验证签名身份并尝试加密登录；操作仍未授权。';
+    try {
+      const task = controller.authenticate(request, password, 10000, (event: ControllerEvent) => {
+        if (!this.visible || ownerEpoch !== this.epoch || event.taskId !== this.currentTask) { return; }
+        if (event.state === 'authentication_confirmed') {
+          this.status = event.verified && event.authenticated && !event.authorized
+            ? '设备签名身份与加密登录已确认；操作仍未授权，无法控制设备。'
+            : '登录状态不一致；操作未授权。';
+        } else {
+          this.status = `${this.authenticationMessage(event)}；操作未授权。`;
+        }
+        if (event.state === 'authentication_confirmed' || event.state === 'failed' ||
+          event.state === 'blocked' || event.state === 'cancelled') {
+          this.probing = false;
+          this.activeKind = '';
+          this.currentTask = 0;
+          controller.cancel(event.taskId);
+        }
+      });
+      if (task <= 0) { throw new Error('任务启动失败'); }
+      this.currentTask = task;
+      this.probing = true;
+      this.activeKind = 'auth';
+    } catch {
+      this.status = '加密登录验证无法启动，请检查目标地址并稍后重试；操作未授权。';
+      this.probing = false;
+      this.activeKind = '';
     }
   }
 
@@ -339,25 +455,50 @@ struct Index {
                   .fontSize(12).fontColor('#176B78')
               }.width('100%')
               if (this.selectedId === profile.id) {
-                Text(profile.mode === 'direct' ? '网络预检仅检查目标可达性与协议响应。' : '会话后端尚未接入。')
+                Text(profile.mode === 'direct'
+                  ? '严格登录需要支持签名握手的被控入口；旧明文入口会被拒绝。'
+                  : '会话后端尚未接入。')
                   .fontSize(13).fontColor('#63777B').width('100%')
                 Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
                   if (profile.mode === 'direct') {
                     Button('网络预检').margin({ right: 8, bottom: 8 })
                       .enabled(!this.probing && !this.saving).onClick(() => this.startProbe(profile))
+                    if (profile.peerId && profile.peerPublicKey) {
+                      Button('验证加密登录').margin({ right: 8, bottom: 8 })
+                        .enabled(!this.probing && !this.saving)
+                        .onClick(() => { this.authPromptOpen = true; this.sessionPassword = ''; })
+                    }
                   }
                   Button('编辑').margin({ right: 8, bottom: 8 }).enabled(!this.saving)
                     .onClick(() => this.editProfile(profile))
                   Button('删除').margin({ right: 8, bottom: 8 }).enabled(!this.saving)
                     .onClick(() => this.deleteProfile(profile))
                   if (this.probing && profile.mode === 'direct') {
-                    Button('取消预检').margin({ bottom: 8 })
-                      .onClick(() => { this.cancelProbe(); this.status = '网络预检已取消。'; })
+                    Button(this.activeKind === 'auth' ? '取消登录验证' : '取消预检').margin({ bottom: 8 })
+                      .onClick(() => { this.cancelActive(); this.status = '检查已取消；操作未授权。'; })
                   }
                 }.width('100%')
+                if (this.authPromptOpen && profile.mode === 'direct') {
+                  Column({ space: 10 }) {
+                    Text('本次登录密码').fontSize(14).fontColor('#29434A').width('100%')
+                    TextInput({ text: this.sessionPassword, placeholder: '可留空，由被控端现场批准' })
+                      .type(InputType.Password).height(46).width('100%').backgroundColor('#F4F7F8')
+                      .onChange((value: string) => { this.sessionPassword = value; })
+                    Row({ space: 10 }) {
+                      Button('开始验证').onClick(() => this.startAuthentication(profile))
+                      Button('取消').onClick(() => { this.sessionPassword = ''; this.authPromptOpen = false; })
+                    }.width('100%')
+                  }.width('100%').alignItems(HorizontalAlign.Start)
+                }
               }
             }.padding(14).width('100%').borderRadius(6).backgroundColor('#FFFFFF')
-              .onClick(() => { this.selectedId = profile.id; })
+              .onClick(() => {
+                if (this.selectedId !== profile.id) {
+                  this.cancelActive();
+                  this.status = '';
+                }
+                this.selectedId = profile.id;
+              })
           }, (profile: Profile) => profile.id)
         }
 
@@ -384,8 +525,14 @@ struct Index {
             if (this.mode !== 'direct') {
               this.field('服务器地址', this.server, '域名或地址', (value: string) => { this.server = value; })
               this.field('服务器公钥', this.serverKey, '可选；请核对可信来源', (value: string) => { this.serverKey = value; })
+            } else {
+              this.field('被控设备 ID', this.peerId, '6 至 20 位数字', (value: string) => { this.peerId = value; })
+              this.field('可信 Ed25519 公钥', this.peerPublicKey, '32 字节公钥的 Base64 编码',
+                (value: string) => { this.peerPublicKey = value; })
+              Text('公钥只能从可信来源取得；网络预检不会自动建立信任。')
+                .fontSize(13).fontColor('#63777B').width('100%')
             }
-            this.field('对端指纹', this.peerFingerprint, '可选；64 位十六进制',
+            this.field('对端 SHA-256 指纹', this.peerFingerprint, '可选；与可信公钥对应的 64 位十六进制',
               (value: string) => { this.peerFingerprint = value; })
             if (this.formError.length > 0) {
               Text(this.formError).fontColor('#B42318').width('100%')
@@ -400,7 +547,7 @@ struct Index {
         if (this.status.length > 0) {
           Text(this.status).fontSize(14).fontColor('#29434A').width('100%')
         }
-        Text('诊断不是远程会话；身份未验证，操作未授权。')
+        Text('操作权限：未授权。身份验证与登录确认不提供远程控制。')
           .fontSize(13).fontColor('#63777B').width('100%')
       }.width('100%').constraintSize({ maxWidth: 760 }).padding({ left: 18, right: 18, top: 24, bottom: 32 })
     }.width('100%').height('100%').backgroundColor('#F4F7F8')

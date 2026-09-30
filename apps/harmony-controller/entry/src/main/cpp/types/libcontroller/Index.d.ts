@@ -4,6 +4,7 @@ export interface ControllerEvent {
   code: string;
   message: string;
   verified: boolean;
+  authenticated: boolean;
   authorized: boolean;
 }
 
@@ -11,6 +12,7 @@ declare const controller: {
   version(): string;
   validateProfile(json: string): string;
   probeEndpoint(endpoint: string, timeoutMs: number, callback: (event: ControllerEvent) => void): number;
+  authenticate(requestJson: string, password: string, timeoutMs: number, callback: (event: ControllerEvent) => void): number;
   cancel(taskId: number): boolean;
   dispose(): void;
 };

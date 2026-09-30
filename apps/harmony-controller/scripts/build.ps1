@@ -14,9 +14,28 @@ foreach ($controllerRequired in @($controllerCore, $controllerNode, $controllerH
 $env:DEVECO_SDK_HOME = $controllerSdk
 $env:JAVA_HOME = Join-Path $DevEcoRoot 'jbr'
 $env:PATH = (Join-Path $DevEcoRoot 'tools\node') + ';' + (Join-Path $env:JAVA_HOME 'bin') + ';' + $env:PATH
-foreach ($controllerTarget in @('x86_64-unknown-linux-ohos', 'aarch64-unknown-linux-ohos')) {
-  & cargo build --manifest-path $controllerCore --target $controllerTarget --release --locked
-  if ($LASTEXITCODE -ne 0) { throw "Shared controller build failed: $controllerTarget" }
+$sodiumScript = Join-Path $repositoryRoot 'libs\controller-core\native\build-libsodium-ohos.ps1'
+& $sodiumScript -SdkNative (Join-Path $controllerSdk 'default\openharmony\native')
+$savedSodium = @{}
+foreach ($sodiumVariable in @('SODIUM_LIB_DIR', 'SODIUM_SHARED', 'SODIUM_STATIC', 'SODIUM_USE_PKG_CONFIG')) {
+  $savedSodium[$sodiumVariable] = [Environment]::GetEnvironmentVariable($sodiumVariable, 'Process')
+  Remove-Item -LiteralPath "Env:$sodiumVariable" -ErrorAction SilentlyContinue
+}
+try {
+  foreach ($controllerTarget in @('x86_64-unknown-linux-ohos', 'aarch64-unknown-linux-ohos')) {
+    $sodiumAbi = if ($controllerTarget.StartsWith('x86_64')) { 'x86_64' } else { 'arm64-v8a' }
+    $env:SODIUM_LIB_DIR = Join-Path $repositoryRoot "libs\controller-core\artifacts\build-$sodiumAbi"
+    & cargo build --manifest-path $controllerCore --target $controllerTarget --release --locked
+    if ($LASTEXITCODE -ne 0) { throw "Shared controller build failed: $controllerTarget" }
+  }
+} finally {
+  foreach ($sodiumVariable in $savedSodium.Keys) {
+    if ($null -eq $savedSodium[$sodiumVariable]) {
+      Remove-Item -LiteralPath "Env:$sodiumVariable" -ErrorAction SilentlyContinue
+    } else {
+      Set-Item -LiteralPath "Env:$sodiumVariable" -Value $savedSodium[$sodiumVariable]
+    }
+  }
 }
 Push-Location $controllerRoot
 try {

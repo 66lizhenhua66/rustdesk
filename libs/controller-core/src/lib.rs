@@ -1,9 +1,11 @@
 pub mod meta;
+pub mod session;
+pub mod upstream_crypto;
 
 #[path = "../../hbb_common/src/bytes_codec.rs"]
 mod bytes_codec;
 
-mod protos {
+pub mod protos {
     include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
 }
 
@@ -33,6 +35,10 @@ struct Profile {
     server: String,
     server_key: String,
     peer_fingerprint: String,
+    #[serde(default)]
+    peer_id: String,
+    #[serde(default)]
+    peer_public_key: String,
 }
 
 struct ProfileError(&'static str, &'static str);
@@ -50,6 +56,23 @@ fn normalized_profile(mut p: Profile) -> Result<Profile, ProfileError> {
     p.server = p.server.trim().to_owned();
     p.server_key = p.server_key.trim().to_owned();
     p.peer_fingerprint = p.peer_fingerprint.trim().to_ascii_lowercase();
+    p.peer_id = p.peer_id.trim().to_owned();
+    p.peer_public_key = p.peer_public_key.trim().to_owned();
+    if !p.peer_id.is_empty()
+        && (!(6..=20).contains(&p.peer_id.len()) || !p.peer_id.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(ProfileError("INVALID_PEER_ID", "Invalid expected peer ID"));
+    }
+    if !p.peer_public_key.is_empty()
+        && STANDARD
+            .decode(&p.peer_public_key)
+            .map_or(true, |bytes| bytes.len() != 32)
+    {
+        return Err(ProfileError(
+            "INVALID_PEER_KEY",
+            "Invalid trusted peer public key",
+        ));
+    }
 
     match p.mode.as_str() {
         "direct" => p.target = direct_address(&p.target)?.to_string(),
@@ -155,7 +178,7 @@ fn json_string(value: serde_json::Value) -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn controller_version() -> *const c_char {
-    c"0.1.0".as_ptr()
+    c"0.2.0".as_ptr()
 }
 
 #[no_mangle]
@@ -172,9 +195,13 @@ pub extern "C" fn controller_validate_profile(profile_json: *const c_char) -> *m
             .and_then(normalized_profile)
     };
     match result {
-        Ok(profile) => json_string(
-            json!({"ok":true,"profile":profile,"readyForSession":false,"reason":"AUTH_BACKEND_NOT_READY"}),
-        ),
+        Ok(profile) => {
+            let authentication_available = profile.mode == "direct"
+                && !profile.peer_id.is_empty()
+                && !profile.peer_public_key.is_empty();
+            json_string(json!({"ok":true,"profile":profile,"readyForSession":false,
+                "authenticationAvailable":authentication_available,"reason":"REMOTE_SESSION_NOT_IMPLEMENTED"}))
+        }
         Err(ProfileError(code, message)) => {
             json_string(json!({"ok":false,"code":code,"message":message}))
         }
@@ -232,7 +259,7 @@ fn emit(
     message: &str,
 ) {
     if let Some(callback) = callback {
-        let value = json!({"state":state,"code":code,"message":message,"verified":false,"authorized":false});
+        let value = json!({"state":state,"code":code,"message":message,"verified":false,"authenticated":false,"authorized":false});
         if let Ok(value) = CString::new(value.to_string()) {
             // SAFETY: callback and user are supplied by caller; value lives for this call.
             unsafe {
@@ -365,8 +392,8 @@ fn run_probe(task: &ControllerProbe, callback: Option<ControllerProbeCallback>, 
                             callback,
                             user,
                             "blocked",
-                            "AUTH_BACKEND_NOT_READY",
-                            "Authenticated session backend is unavailable",
+                            "AUTHENTICATION_REQUIRED",
+                            "Network preflight does not authenticate peers",
                         );
                         return;
                     }
@@ -402,8 +429,8 @@ fn run_probe(task: &ControllerProbe, callback: Option<ControllerProbeCallback>, 
             callback,
             user,
             "blocked",
-            "AUTH_BACKEND_NOT_READY",
-            "Authenticated session backend is unavailable",
+            "AUTHENTICATION_REQUIRED",
+            "Network preflight does not authenticate peers",
         );
     }
 }

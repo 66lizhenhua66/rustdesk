@@ -8,15 +8,24 @@
 #include <thread>
 
 #include "controller.h"
+#include "session.h"
 
 namespace {
 struct Job : std::enable_shared_from_this<Job> {
     uint32_t id = 0;
     ControllerProbe *probe = nullptr;
+    ControllerSession *session = nullptr;
     napi_threadsafe_function tsfn = nullptr;
     std::atomic<bool> closing{false};
     std::mutex delivery;
-    ~Job() { controller_probe_destroy(probe); }
+    ~Job() {
+        controller_probe_destroy(probe);
+        controller_session_destroy(session);
+    }
+    void Cancel() {
+        if (session != nullptr) { controller_session_cancel(session); }
+        else { controller_probe_cancel(probe); }
+    }
 };
 
 struct Event {
@@ -69,7 +78,7 @@ void Close(State *state) {
     if (!job) { return; }
     std::lock_guard<std::mutex> guard(job->delivery);
     job->closing = true;
-    controller_probe_cancel(job->probe);
+    job->Cancel();
     // The worker retains its own TSFN reference until its bounded socket operation ends.
     napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
 }
@@ -111,7 +120,7 @@ void OnEvent(const char *json, void *user) {
             event.release();
         }
     } catch (...) {
-        controller_probe_cancel(job->probe);
+        job->Cancel();
     }
 }
 
@@ -190,6 +199,70 @@ napi_value Start(napi_env env, napi_callback_info info) {
     return result;
 }
 
+struct WipeString {
+    std::string &value;
+    ~WipeString() {
+        volatile char *bytes = value.empty() ? nullptr : &value[0];
+        for (size_t i = 0; i < value.size(); ++i) { bytes[i] = 0; }
+    }
+};
+
+napi_value Authenticate(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value args[4] = {};
+    std::string request, password;
+    WipeString wipe{password};
+    double timeout = 0;
+    napi_valuetype callback_type;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 4 ||
+        !ReadString(env, args[0], request, 16384) || !ReadString(env, args[1], password, 512) ||
+        napi_get_value_double(env, args[2], &timeout) != napi_ok ||
+        !(timeout >= 100 && timeout <= 30000) || timeout != static_cast<uint32_t>(timeout) ||
+        napi_typeof(env, args[3], &callback_type) != napi_ok || callback_type != napi_function) {
+        Error(env, "INVALID_ARGUMENT", "Expected trusted peer configuration, password, timeout, and callback");
+        return nullptr;
+    }
+    auto *state = GetState(env);
+    if (!state) { Error(env, "NATIVE_FAILURE", "Controller unavailable"); return nullptr; }
+    if (state->workers->load() >= 4) {
+        Error(env, "BUSY", "Previous network operations are still closing"); return nullptr;
+    }
+    auto *session = controller_session_create(request.c_str(), password.c_str(), static_cast<uint32_t>(timeout));
+    if (!session) { Error(env, "INVALID_TRUST_CONFIG", "Expected a pinned public key, peer ID, and valid IP endpoint"); return nullptr; }
+    Close(state);
+    auto job = std::make_shared<Job>();
+    job->session = session;
+    job->id = state->next_id++;
+    if (job->id == 0) { job->id = state->next_id++; }
+    napi_value name = nullptr, result = nullptr;
+    auto *holder = new (std::nothrow) std::shared_ptr<Job>(job);
+    if (holder == nullptr ||
+        napi_create_string_utf8(env, "ControllerAuthentication", NAPI_AUTO_LENGTH, &name) != napi_ok ||
+        napi_create_uint32(env, job->id, &result) != napi_ok ||
+        napi_create_threadsafe_function(env, args[3], nullptr, name, 32, 2, holder,
+                                       Finalize, nullptr, CallJs, &job->tsfn) != napi_ok) {
+        delete holder;
+        Error(env, "NATIVE_FAILURE", "Unable to create authentication event bridge"); return nullptr;
+    }
+    auto count = state->workers;
+    count->fetch_add(1);
+    try {
+        std::thread([job, count]() {
+            controller_session_run(job->session, OnEvent, job.get());
+            count->fetch_sub(1);
+            napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
+        }).detach();
+    } catch (...) {
+        count->fetch_sub(1);
+        job->closing = true;
+        napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
+        napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
+        Error(env, "NATIVE_FAILURE", "Unable to start authentication worker"); return nullptr;
+    }
+    state->active = job;
+    return result;
+}
+
 napi_value Cancel(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value arg = nullptr, result = nullptr;
@@ -230,6 +303,7 @@ napi_value Init(napi_env env, napi_value exports) {
         {"version", nullptr, Version, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"validateProfile", nullptr, Validate, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"probeEndpoint", nullptr, Start, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"authenticate", nullptr, Authenticate, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"dispose", nullptr, Dispose, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
