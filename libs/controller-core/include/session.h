@@ -17,6 +17,14 @@ typedef void (*ControllerSessionCallback)(const char *event_json, void *user);
  * return. Cancel may run on another thread. Destroy only after run returns.
  */
 ControllerSession *controller_session_create(const char *request_json, const char *password, uint32_t timeout_ms);
+/* Persistent isolated demo connection; handshake_ms must be 100..60000.
+ * The event includes confirmationCode while awaiting approval, and x/y/textLength
+ * for demo_status. Input is accepted only after explicit Keyboard permission.
+ */
+ControllerSession *controller_connection_create(const char *request_json, const char *password, uint32_t handshake_ms);
+/* 0 queued, 1 disconnected, 2 input not authorized, 3 invalid argument, 4 queue full. */
+int32_t controller_session_send_pointer(ControllerSession *task, uint32_t x, uint32_t y);
+int32_t controller_session_send_text(ControllerSession *task, const char *utf8);
 void controller_session_run(ControllerSession *task, ControllerSessionCallback callback, void *user);
 void controller_session_cancel(ControllerSession *task);
 void controller_session_destroy(ControllerSession *task);

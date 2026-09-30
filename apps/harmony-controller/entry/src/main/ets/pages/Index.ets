@@ -50,12 +50,27 @@ struct Index {
   @State private activeKind: string = '';
   @State private authPromptOpen: boolean = false;
   @State private sessionPassword: string = '';
+  @State private importOpen: boolean = false;
+  @State private importJson: string = '';
+  @State private importPreview: Profile | undefined = undefined;
+  @State private importError: string = '';
+  @State private demoConnected: boolean = false;
+  @State private demoAuthorized: boolean = false;
+  @State private confirmationCode: string = '';
+  @State private demoX: number = 0;
+  @State private demoY: number = 0;
+  @State private demoTextLength: number = 0;
+  @State private demoText: string = '';
+  @State private demoInputStatus: string = '';
   private store?: preferences.Preferences;
   private currentTask: number = 0;
   private epoch: number = 0;
   private visible: boolean = true;
   private loadId: number = 0;
   private loadActive: boolean = false;
+  private padWidth: number = 0;
+  private padHeight: number = 0;
+  private lastPointerAt: number = 0;
 
   aboutToAppear(): void {
     this.visible = true;
@@ -84,6 +99,15 @@ struct Index {
     this.currentTask = 0;
     this.probing = false;
     this.activeKind = '';
+    this.demoConnected = false;
+    this.demoAuthorized = false;
+    this.confirmationCode = '';
+    this.demoX = 0;
+    this.demoY = 0;
+    this.demoTextLength = 0;
+    this.demoText = '';
+    this.demoInputStatus = '';
+    this.lastPointerAt = 0;
     this.authPromptOpen = false;
     this.sessionPassword = '';
     controller.dispose();
@@ -237,6 +261,8 @@ struct Index {
   private newProfile(): void {
     if (this.loading || this.storeError.length > 0) { return; }
     this.cancelActive();
+    this.importOpen = false;
+    this.importPreview = undefined;
     this.editingId = '';
     this.name = '';
     this.mode = 'direct';
@@ -248,6 +274,58 @@ struct Index {
     this.peerPublicKey = '';
     this.formError = '';
     this.formOpen = true;
+  }
+
+  private openImport(): void {
+    if (this.loading || this.storeError.length > 0) { return; }
+    this.cancelActive();
+    this.formOpen = false;
+    this.importJson = '';
+    this.importPreview = undefined;
+    this.importError = '';
+    this.importOpen = true;
+  }
+
+  private previewImport(): void {
+    this.importPreview = undefined;
+    this.importError = '';
+    try {
+      const parsed: Object = JSON.parse(this.importJson) as Object;
+      const result = this.validate(parsed as Profile);
+      if (!result.ok || !result.profile) {
+        this.importError = this.validationMessage(result);
+        return;
+      }
+      this.importPreview = result.profile;
+    } catch (error) {
+      this.importError = `公开配置无法解析：${String(error)}`;
+    }
+  }
+
+  private async saveImport(): Promise<void> {
+    if (!this.importPreview) { return; }
+    const imported = this.importPreview;
+    const profile: Profile = this.profiles.some((item: Profile) => item.id === imported.id)
+      ? {
+        id: this.generateUnusedId(),
+        name: imported.name,
+        mode: imported.mode,
+        target: imported.target,
+        server: imported.server,
+        serverKey: imported.serverKey,
+        peerFingerprint: imported.peerFingerprint,
+        peerId: imported.peerId,
+        peerPublicKey: imported.peerPublicKey
+      } : imported;
+    if (await this.persist(this.profiles.concat([profile]))) {
+      this.selectedId = profile.id;
+      this.importOpen = false;
+      this.importPreview = undefined;
+      this.importJson = '';
+      this.status = '公开配置已保存。请核对设备 ID、公钥和目标地址后主动连接。';
+    } else {
+      this.importError = this.formError || this.storeError;
+    }
   }
 
   private editProfile(profile: Profile): void {
@@ -268,6 +346,12 @@ struct Index {
   private generateId(): string {
     profileCounter++;
     return `${Date.now().toString(36)}-${profileCounter.toString(36)}`;
+  }
+
+  private generateUnusedId(): string {
+    let id = this.generateId();
+    while (this.profiles.some((item: Profile) => item.id === id)) { id = this.generateId(); }
+    return id;
   }
 
   private async saveForm(): Promise<void> {
@@ -323,6 +407,15 @@ struct Index {
     this.currentTask = 0;
     this.probing = false;
     this.activeKind = '';
+    this.demoConnected = false;
+    this.demoAuthorized = false;
+    this.confirmationCode = '';
+    this.demoX = 0;
+    this.demoY = 0;
+    this.demoTextLength = 0;
+    this.demoText = '';
+    this.demoInputStatus = '';
+    this.lastPointerAt = 0;
     this.authPromptOpen = false;
     this.sessionPassword = '';
     if (task > 0) { controller.cancel(task); }
@@ -405,6 +498,111 @@ struct Index {
     }
   }
 
+  private startDemo(profile: Profile): void {
+    this.cancelActive();
+    if (profile.mode !== 'direct' || !profile.peerId || !profile.peerPublicKey) {
+      this.status = '请先保存被控设备 ID 和可信公钥。';
+      return;
+    }
+    const request = JSON.stringify({
+      endpoint: profile.target,
+      peerId: profile.peerId,
+      peerPublicKey: profile.peerPublicKey,
+      peerFingerprint: profile.peerFingerprint.length > 0 ? profile.peerFingerprint : null,
+      minimumKxVersion: 1
+    });
+    const ownerEpoch = this.epoch;
+    this.status = '正在连接 Windows 演示端；操作尚未授权。';
+    try {
+      const task = controller.connectDemo(request, '', 60000, (event: ControllerEvent) => {
+        if (!this.visible || ownerEpoch !== this.epoch || event.taskId !== this.currentTask) { return; }
+        if (event.confirmationCode) { this.confirmationCode = event.confirmationCode; }
+        if (event.state === 'connected') {
+          this.demoConnected = event.verified && event.authenticated;
+          this.status = this.demoConnected
+            ? '已登录 Windows 演示端，等待允许输入；当前只读。'
+            : '登录状态不一致；操作未授权。';
+        } else if (event.state === 'permissions_changed') {
+          this.demoAuthorized = this.demoConnected && event.authorized;
+          this.status = this.demoAuthorized ? 'Windows 演示端已允许输入。' : '输入权限已撤销；当前只读。';
+        } else if (event.state === 'demo_status') {
+          if (event.x !== undefined) { this.demoX = event.x; }
+          if (event.y !== undefined) { this.demoY = event.y; }
+          if (event.textLength !== undefined) { this.demoTextLength = event.textLength; }
+          this.demoInputStatus = '演示端状态已更新。';
+        } else if (event.state === 'closed' || event.state === 'cancelled' ||
+          event.state === 'failed' || event.state === 'blocked') {
+          this.demoAuthorized = false;
+          this.demoConnected = false;
+          this.status = event.state === 'closed' || event.code === 'DISCONNECTED'
+            ? '演示连接已关闭；操作未授权。'
+            : `${this.authenticationMessage(event)}；演示连接已结束，操作未授权。`;
+          this.probing = false;
+          this.activeKind = '';
+          this.currentTask = 0;
+          controller.cancel(event.taskId);
+        } else if (event.code === 'AWAITING_APPROVAL') {
+          this.status = '等待 Windows 演示端现场批准；请核对两端配对码。';
+        } else {
+          this.status = `${this.authenticationMessage(event)}；操作仍未授权。`;
+        }
+      });
+      if (task <= 0) { throw new Error('任务启动失败'); }
+      this.currentTask = task;
+      this.probing = true;
+      this.activeKind = 'demo';
+    } catch {
+      this.status = '演示连接无法启动，请检查目标地址后重试；操作未授权。';
+      this.probing = false;
+      this.activeKind = '';
+    }
+  }
+
+  private sendDemoPointer(x: number, y: number): void {
+    if (!this.demoAuthorized || !this.demoConnected || this.activeKind !== 'demo' || this.currentTask <= 0 ||
+      this.padWidth <= 0 || this.padHeight <= 0) { return; }
+    const now = Date.now();
+    if (now - this.lastPointerAt < 50) { return; }
+    this.lastPointerAt = now;
+    const demoX = Math.max(0, Math.min(799, Math.floor(x * 800 / this.padWidth)));
+    const demoY = Math.max(0, Math.min(449, Math.floor(y * 450 / this.padHeight)));
+    if (controller.sendPointer(this.currentTask, demoX, demoY)) {
+      this.demoInputStatus = '坐标已排队；以演示端状态为准。';
+    } else {
+      this.demoInputStatus = '坐标未发送；请检查连接和输入权限。';
+    }
+  }
+
+  private utf8Length(value: string): number {
+    let length = 0;
+    for (let index = 0; index < value.length; index++) {
+      const unit = value.charCodeAt(index);
+      if (unit < 0x80) { length++; }
+      else if (unit < 0x800) { length += 2; }
+      else if (unit >= 0xD800 && unit <= 0xDBFF && index + 1 < value.length &&
+        value.charCodeAt(index + 1) >= 0xDC00 && value.charCodeAt(index + 1) <= 0xDFFF) {
+        length += 4;
+        index++;
+      } else if (unit >= 0xD800 && unit <= 0xDFFF) { return 513; }
+      else { length += 3; }
+    }
+    return length;
+  }
+
+  private sendDemoText(): void {
+    if (!this.demoAuthorized || !this.demoConnected || this.currentTask <= 0) { return; }
+    if (this.demoText.length === 0 || this.utf8Length(this.demoText) > 512) {
+      this.demoInputStatus = '文本需为 1 至 512 字节 UTF-8。';
+      return;
+    }
+    if (controller.sendText(this.currentTask, this.demoText)) {
+      this.demoInputStatus = '文本已排队；以演示端状态为准。';
+      this.demoText = '';
+    } else {
+      this.demoInputStatus = '文本未发送；请检查连接和输入权限。';
+    }
+  }
+
   @Builder
   private field(label: string, value: string, hint: string, change: (value: string) => void) {
     Column({ space: 5 }) {
@@ -424,8 +622,12 @@ struct Index {
             Text('设备').fontSize(14).fontColor('#63777B')
           }.alignItems(HorizontalAlign.Start)
           Blank()
-          Button('添加设备').enabled(!this.loading && this.storeError.length === 0 && !this.saving)
-            .onClick(() => this.newProfile())
+          Column({ space: 6 }) {
+            Button('添加设备').enabled(!this.loading && this.storeError.length === 0 && !this.saving)
+              .onClick(() => this.newProfile())
+            Button('导入公开配置').enabled(!this.loading && this.storeError.length === 0 && !this.saving)
+              .onClick(() => this.openImport())
+          }
         }.width('100%')
 
         if (this.loading) {
@@ -438,7 +640,7 @@ struct Index {
           }.width('100%').alignItems(HorizontalAlign.Start)
         }
 
-        if (!this.loading && this.storeError.length === 0 && !this.formOpen) {
+        if (!this.loading && this.storeError.length === 0 && !this.formOpen && !this.importOpen) {
           if (this.profiles.length === 0) {
             Text('暂无设备').fontSize(18).fontColor('#63777B').margin({ top: 28, bottom: 28 })
           }
@@ -467,6 +669,8 @@ struct Index {
                       Button('验证加密登录').margin({ right: 8, bottom: 8 })
                         .enabled(!this.probing && !this.saving)
                         .onClick(() => { this.authPromptOpen = true; this.sessionPassword = ''; })
+                      Button('连接演示端').margin({ right: 8, bottom: 8 })
+                        .enabled(!this.probing && !this.saving).onClick(() => this.startDemo(profile))
                     }
                   }
                   Button('编辑').margin({ right: 8, bottom: 8 }).enabled(!this.saving)
@@ -474,8 +678,9 @@ struct Index {
                   Button('删除').margin({ right: 8, bottom: 8 }).enabled(!this.saving)
                     .onClick(() => this.deleteProfile(profile))
                   if (this.probing && profile.mode === 'direct') {
-                    Button(this.activeKind === 'auth' ? '取消登录验证' : '取消预检').margin({ bottom: 8 })
-                      .onClick(() => { this.cancelActive(); this.status = '检查已取消；操作未授权。'; })
+                    Button(this.activeKind === 'demo' ? '断开演示连接' :
+                      this.activeKind === 'auth' ? '取消登录验证' : '取消预检').margin({ bottom: 8 })
+                      .onClick(() => { this.cancelActive(); this.status = '连接或检查已取消；操作未授权。'; })
                   }
                 }.width('100%')
                 if (this.authPromptOpen && profile.mode === 'direct') {
@@ -490,6 +695,49 @@ struct Index {
                     }.width('100%')
                   }.width('100%').alignItems(HorizontalAlign.Start)
                 }
+                if (this.activeKind === 'demo' && profile.mode === 'direct') {
+                  Column({ space: 10 }) {
+                    if (this.confirmationCode.length > 0) {
+                      Text(`配对码 ${this.confirmationCode}`).fontSize(18).fontWeight(FontWeight.Bold)
+                        .fontColor('#17343B').width('100%')
+                      Text(this.demoConnected
+                        ? '配对码已用于本次连接核对；输入权限由 Windows 演示端单独授予。'
+                        : '请与 Windows 演示端显示的配对码核对，并等待现场批准。')
+                        .fontSize(13).fontColor('#63777B').width('100%')
+                    }
+                    Text(this.demoAuthorized ? '允许输入' : this.demoConnected ? '只读，等待允许输入' : '等待连接和批准')
+                      .fontSize(14).fontColor(this.demoAuthorized ? '#176B78' : '#63777B').width('100%')
+                    Text('操作只影响 Windows 演示窗口；尚无视频画面。')
+                      .fontSize(13).fontColor('#63777B').width('100%')
+                    Stack() {
+                      Text(this.demoAuthorized ? '演示操作区' : '演示操作区 · 只读')
+                        .fontSize(14).fontColor('#63777B')
+                    }.width('100%').aspectRatio(800 / 450).backgroundColor('#E4ECEE')
+                      .border({ width: 1, color: '#B6C9CD' })
+                      .onAreaChange((oldArea: Area, area: Area) => {
+                        this.padWidth = parseFloat(String(area.width));
+                        this.padHeight = parseFloat(String(area.height));
+                      })
+                      .onTouch((event: TouchEvent) => {
+                        if (event.type === TouchType.Down || event.type === TouchType.Move) {
+                          if (event.touches.length > 0) {
+                            this.sendDemoPointer(event.touches[0].x, event.touches[0].y);
+                          }
+                        }
+                      })
+                    Text(`演示端反馈：坐标 (${this.demoX}, ${this.demoY}) · 文本长度 ${this.demoTextLength}`)
+                      .fontSize(13).fontColor('#29434A').width('100%')
+                    TextInput({ text: this.demoText, placeholder: '输入发送到演示窗口的文字' })
+                      .height(46).width('100%').backgroundColor('#F4F7F8')
+                      .enabled(this.demoAuthorized)
+                      .onChange((value: string) => { this.demoText = value; })
+                    Button('发送文本').enabled(this.demoAuthorized && this.demoText.length > 0)
+                      .onClick(() => this.sendDemoText())
+                    if (this.demoInputStatus.length > 0) {
+                      Text(this.demoInputStatus).fontSize(13).fontColor('#63777B').width('100%')
+                    }
+                  }.width('100%').alignItems(HorizontalAlign.Start)
+                }
               }
             }.padding(14).width('100%').borderRadius(6).backgroundColor('#FFFFFF')
               .onClick(() => {
@@ -500,6 +748,40 @@ struct Index {
                 this.selectedId = profile.id;
               })
           }, (profile: Profile) => profile.id)
+        }
+
+        if (this.importOpen && !this.loading && this.storeError.length === 0) {
+          Column({ space: 12 }) {
+            Text('导入公开配置').fontSize(19).fontWeight(FontWeight.Medium).fontColor('#17343B')
+              .width('100%')
+            TextArea({ text: this.importJson, placeholder: '粘贴 Windows 演示端导出的公开 profile JSON' })
+              .height(150).width('100%').backgroundColor('#FFFFFF')
+              .onChange((value: string) => {
+                this.importJson = value;
+                this.importPreview = undefined;
+                this.importError = '';
+              })
+            Button('验证并预览').enabled(!this.saving && this.importJson.length > 0)
+              .onClick(() => this.previewImport())
+            if (this.importPreview) {
+              Text(`名称：${this.importPreview.name}`).width('100%')
+              Text(`目标地址：${this.importPreview.target}`).width('100%')
+              Text(`设备 ID：${this.importPreview.peerId ?? ''}`).width('100%')
+              Text(`可信公钥：${this.importPreview.peerPublicKey ?? ''}`).width('100%')
+              Text(`指纹：${this.importPreview.peerFingerprint}`).width('100%')
+              Text('仅保存公开资料；请自行核对可信来源。保存后不会自动连接。')
+                .fontSize(13).fontColor('#63777B').width('100%')
+              Button('确认保存').enabled(!this.saving).onClick(() => this.saveImport())
+            }
+            if (this.importError.length > 0) {
+              Text(this.importError).fontColor('#B42318').width('100%')
+            }
+            Button('取消').enabled(!this.saving).onClick(() => {
+              this.importOpen = false;
+              this.importPreview = undefined;
+              this.importJson = '';
+            })
+          }.width('100%').alignItems(HorizontalAlign.Start)
         }
 
         if (this.formOpen && !this.loading && this.storeError.length === 0) {
@@ -547,7 +829,8 @@ struct Index {
         if (this.status.length > 0) {
           Text(this.status).fontSize(14).fontColor('#29434A').width('100%')
         }
-        Text('操作权限：未授权。身份验证与登录确认不提供远程控制。')
+        Text(this.demoAuthorized ? '操作权限：仅 Windows 演示窗口允许输入。' :
+          '操作权限：未授权。身份验证与登录确认不提供远程控制。')
           .fontSize(13).fontColor('#63777B').width('100%')
       }.width('100%').constraintSize({ maxWidth: 760 }).padding({ left: 18, right: 18, top: 24, bottom: 32 })
     }.width('100%').height('100%').backgroundColor('#F4F7F8')

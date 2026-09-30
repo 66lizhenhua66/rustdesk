@@ -1,5 +1,6 @@
 #include <napi/native_api.h>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -15,6 +16,7 @@ struct Job : std::enable_shared_from_this<Job> {
     uint32_t id = 0;
     ControllerProbe *probe = nullptr;
     ControllerSession *session = nullptr;
+    bool persistent = false;
     napi_threadsafe_function tsfn = nullptr;
     std::atomic<bool> closing{false};
     std::mutex delivery;
@@ -112,6 +114,26 @@ void CallJs(napi_env env, napi_value callback, void *, void *data) {
 
 void OnEvent(const char *json, void *user) {
     auto *job = static_cast<Job *>(user);
+    if (job->persistent) {
+        if (json == nullptr) { return; }
+        try {
+            auto event = std::make_unique<Event>(Event{job->shared_from_this(), json});
+            while (!job->closing) {
+                {
+                    std::lock_guard<std::mutex> guard(job->delivery);
+                    if (job->closing) { return; }
+                    const auto status = napi_call_threadsafe_function(job->tsfn, event.get(), napi_tsfn_nonblocking);
+                    if (status == napi_ok) { event.release(); return; }
+                    if (status != napi_queue_full) { job->Cancel(); return; }
+                }
+                // Preserve permission/close ordering without blocking the UI's cancellation lock.
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        } catch (...) {
+            job->Cancel();
+        }
+        return;
+    }
     std::lock_guard<std::mutex> guard(job->delivery);
     if (job->closing || json == nullptr) { return; }
     try {
@@ -263,6 +285,109 @@ napi_value Authenticate(napi_env env, napi_callback_info info) {
     return result;
 }
 
+napi_value ConnectDemo(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value args[4] = {};
+    std::string request, password;
+    WipeString wipe{password};
+    double timeout = 0;
+    napi_valuetype callback_type;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 4 ||
+        !ReadString(env, args[0], request, 16384) || !ReadString(env, args[1], password, 512) ||
+        napi_get_value_double(env, args[2], &timeout) != napi_ok ||
+        !(timeout >= 100 && timeout <= 60000) || timeout != static_cast<uint32_t>(timeout) ||
+        napi_typeof(env, args[3], &callback_type) != napi_ok || callback_type != napi_function) {
+        Error(env, "INVALID_ARGUMENT", "Expected trusted peer configuration, password, timeout, and callback");
+        return nullptr;
+    }
+    auto *state = GetState(env);
+    if (!state) { Error(env, "NATIVE_FAILURE", "Controller unavailable"); return nullptr; }
+    if (state->workers->load() >= 4) {
+        Error(env, "BUSY", "Previous network operations are still closing"); return nullptr;
+    }
+    auto *session = controller_connection_create(request.c_str(), password.c_str(), static_cast<uint32_t>(timeout));
+    if (!session) { Error(env, "INVALID_TRUST_CONFIG", "Expected a pinned public key, peer ID, and valid IP endpoint"); return nullptr; }
+    Close(state);
+    auto job = std::make_shared<Job>();
+    job->persistent = true;
+    job->session = session;
+    job->id = state->next_id++;
+    if (job->id == 0) { job->id = state->next_id++; }
+    napi_value name = nullptr, result = nullptr;
+    auto *holder = new (std::nothrow) std::shared_ptr<Job>(job);
+    if (holder == nullptr ||
+        napi_create_string_utf8(env, "ControllerDemoConnection", NAPI_AUTO_LENGTH, &name) != napi_ok ||
+        napi_create_uint32(env, job->id, &result) != napi_ok ||
+        napi_create_threadsafe_function(env, args[3], nullptr, name, 32, 2, holder,
+                                       Finalize, nullptr, CallJs, &job->tsfn) != napi_ok) {
+        delete holder;
+        Error(env, "NATIVE_FAILURE", "Unable to create authentication event bridge"); return nullptr;
+    }
+    auto count = state->workers;
+    count->fetch_add(1);
+    try {
+        std::thread([job, count]() {
+            controller_session_run(job->session, OnEvent, job.get());
+            count->fetch_sub(1);
+            napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
+        }).detach();
+    } catch (...) {
+        count->fetch_sub(1);
+        job->closing = true;
+        napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
+        napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
+        Error(env, "NATIVE_FAILURE", "Unable to start authentication worker"); return nullptr;
+    }
+    state->active = job;
+    return result;
+}
+
+bool ReadBoundedInteger(napi_env env, napi_value value, uint32_t minimum, uint32_t maximum, uint32_t &out) {
+    double number = 0;
+    if (napi_get_value_double(env, value, &number) != napi_ok ||
+        !(number >= minimum && number <= maximum) || number != static_cast<uint32_t>(number)) { return false; }
+    out = static_cast<uint32_t>(number);
+    return true;
+}
+
+std::shared_ptr<Job> ActiveSession(napi_env env, uint32_t id) {
+    auto *state = GetState(env);
+    if (!state || !state->active || state->active->id != id || state->active->closing ||
+        !state->active->session) { return nullptr; }
+    return state->active;
+}
+
+napi_value SendPointer(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3] = {}, result = nullptr;
+    uint32_t id = 0, x = 0, y = 0;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 3 ||
+        !ReadBoundedInteger(env, args[0], 1, UINT32_MAX, id) ||
+        !ReadBoundedInteger(env, args[1], 0, 799, x) || !ReadBoundedInteger(env, args[2], 0, 449, y)) {
+        Error(env, "INVALID_ARGUMENT", "Expected task ID and demo coordinates 0..799, 0..449"); return nullptr;
+    }
+    auto job = ActiveSession(env, id);
+    bool queued = job && controller_session_send_pointer(job->session, x, y) == 0;
+    napi_get_boolean(env, queued, &result);
+    return result;
+}
+
+napi_value SendText(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {}, result = nullptr;
+    uint32_t id = 0;
+    std::string text;
+    WipeString wipe{text};
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 2 ||
+        !ReadBoundedInteger(env, args[0], 1, UINT32_MAX, id) || !ReadString(env, args[1], text, 512) || text.empty()) {
+        Error(env, "INVALID_ARGUMENT", "Expected task ID and nonempty text up to 512 UTF-8 bytes"); return nullptr;
+    }
+    auto job = ActiveSession(env, id);
+    bool queued = job && controller_session_send_text(job->session, text.c_str()) == 0;
+    napi_get_boolean(env, queued, &result);
+    return result;
+}
+
 napi_value Cancel(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value arg = nullptr, result = nullptr;
@@ -304,6 +429,9 @@ napi_value Init(napi_env env, napi_value exports) {
         {"validateProfile", nullptr, Validate, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"probeEndpoint", nullptr, Start, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"authenticate", nullptr, Authenticate, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"connectDemo", nullptr, ConnectDemo, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"sendPointer", nullptr, SendPointer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"sendText", nullptr, SendText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"dispose", nullptr, Dispose, nullptr, nullptr, nullptr, napi_default, nullptr},
     };

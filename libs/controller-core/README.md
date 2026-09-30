@@ -1,7 +1,7 @@
 # Controller core
 
 This independent Rust workspace builds configuration validation, read-only
-network preflight, and strict single-login verification. It directly compiles the upstream
+network preflight, strict single-login verification, and an isolated persistent DEMO session. It directly compiles the upstream
 `../hbb_common/src/bytes_codec.rs` and generates Rust from the upstream
 `../base/protos/message.proto` and the rendezvous definitions at build time. Those protocol sources are not
 copied into this crate.
@@ -10,8 +10,17 @@ The C ABI is declared in `include/controller.h` and `include/session.h`.
 Preflight never authenticates. Strict login requires an explicitly pinned peer ID
 and Ed25519 public key, validates the signed ephemeral key, requires key exchange
 v1, and accepts only encrypted challenges/results. A successful login reports
-`authenticated:true` and immediately closes. Every path keeps `authorized:false`;
-there is no input, file transfer, video decoder or persistent remote session.
+`authenticated:true` and immediately closes. This original single-login API keeps
+`authorized:false`.
+
+The separate `controller_connection_create` API requires the explicit DEMO
+capability marker and remains connected. Input starts disabled and is enabled
+only by an encrypted Keyboard permission update. It accepts a bounded queue of
+800x450 pointer positions and UTF-8 text up to 512 bytes, exclusively for
+`apps/windows-demo-host`. Cancellation and revocation clear pending input.
+Queue acceptance does not mean execution; encrypted `demo_status` events report
+the host's current position and text length. No full-desktop input, file transfer,
+media decoder, ID discovery, or relay channel is implemented.
 
 Passwords are passed separately for one call and held in zeroizing Rust buffers;
 they are not part of saved profiles. An empty password waits for the peer's
@@ -38,5 +47,6 @@ library for both OHOS ABIs and sets target-specific SODIUM_LIB_DIR only while
 building; Windows host tests use the dependency's bundled MSVC library.
 
 The original RustDesk direct-IP listener does not emit this signed handshake.
-It is deliberately rejected; this milestone is validated against a controlled
-protocol-compatible loopback peer, not an unmodified Windows deployment.
+It is deliberately rejected. The Windows DEMO host provides the strict signed
+entry point and local approval; this does not establish compatibility with an
+unmodified Windows RustDesk deployment. See the [DEMO guide](../../docs/project/DEMO.md).

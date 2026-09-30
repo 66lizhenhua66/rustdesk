@@ -13,3 +13,5 @@ apps/harmony-probe/oh_modules/
 apps/harmony-probe/entry/build/
 apps/harmony-probe/entry/.cxx/
 apps/harmony-probe/entry/oh_modules/
+apps/windows-demo-host/target/
+apps/windows-demo-host/artifacts/

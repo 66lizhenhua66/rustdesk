@@ -11,13 +11,15 @@ use std::{
 use bytes::BytesMut;
 use protobuf::Message as _;
 use remote_controller_core::session::{
-    controller_session_cancel, controller_session_create, controller_session_destroy,
-    controller_session_run,
+    approval_code, controller_connection_create, controller_session_cancel,
+    controller_session_create, controller_session_destroy, controller_session_run,
+    controller_session_send_pointer, controller_session_send_text,
 };
 use remote_controller_core::{
     protos::{
         message::{
-            self, login_response, option_message, Hash, LoginResponse, Message, PeerInfo, SignedId,
+            self, login_response, option_message, permission_info, ChatMessage, Hash,
+            LoginResponse, Message, Misc, PeerInfo, PermissionInfo, SignedId,
         },
         rendezvous::IdPk,
     },
@@ -34,6 +36,35 @@ unsafe extern "C" fn collect(event: *const c_char, user: *mut c_void) {
 
 fn request(endpoint: &str) -> CString {
     CString::new(json!({"endpoint":endpoint,"peerId":"123456789","peerPublicKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}).to_string()).unwrap()
+}
+
+#[test]
+fn demo_pairing_code_is_stable() {
+    let digest = Sha256::digest(b"nonce");
+    let value = u32::from_be_bytes(digest[..4].try_into().unwrap()) % 1_000_000;
+    assert_eq!(approval_code("nonce"), format!("{value:06}"));
+}
+
+#[test]
+fn demo_api_validates_handshake_and_input_before_connecting() {
+    let password = CString::new("").unwrap();
+    let req = request("127.0.0.1:1");
+    assert!(controller_connection_create(req.as_ptr(), password.as_ptr(), 99).is_null());
+    assert!(controller_connection_create(req.as_ptr(), password.as_ptr(), 60_001).is_null());
+    let task = controller_connection_create(req.as_ptr(), password.as_ptr(), 100);
+    assert!(!task.is_null());
+    assert_eq!(controller_session_send_pointer(task, 800, 0), 3);
+    assert_eq!(controller_session_send_pointer(task, 0, 450), 3);
+    assert_eq!(controller_session_send_pointer(task, 0, 0), 1);
+    assert_eq!(
+        controller_session_send_text(task, CString::new("").unwrap().as_ptr()),
+        3
+    );
+    assert_eq!(
+        controller_session_send_text(task, CString::new("text").unwrap().as_ptr()),
+        1
+    );
+    controller_session_destroy(task);
 }
 
 fn trusted_request(endpoint: &str, key: &sign::PublicKey, peer_id: &str) -> CString {
@@ -158,6 +189,336 @@ where
     controller_session_destroy(task);
     server.join().unwrap();
     events
+}
+
+fn execute_demo<F>(server_fn: F) -> Vec<Value>
+where
+    F: FnOnce(TcpStream, sign::SecretKey) + Send + 'static,
+{
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let (public, private) = sign::gen_keypair();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        server_fn(stream, private);
+    });
+    let task = controller_connection_create(
+        trusted_request(&endpoint, &public, "123456789").as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1500,
+    );
+    assert!(!task.is_null());
+    let mut events = Vec::<Value>::new();
+    controller_session_run(task, Some(collect), &mut events as *mut _ as *mut c_void);
+    controller_session_destroy(task);
+    server.join().unwrap();
+    events
+}
+
+fn demo_login(stream: &mut TcpStream, cipher: &mut Encrypt, additions: &str) {
+    let mut challenge = Message::new();
+    challenge.set_hash(Hash {
+        salt: "salt".into(),
+        challenge: "nonce".into(),
+        ..Default::default()
+    });
+    send_encrypted(stream, cipher, &challenge);
+    let login = receive_encrypted(stream, cipher);
+    let Some(message::message::Union::LoginRequest(login)) = login.union else {
+        panic!("expected login")
+    };
+    assert!(login.password.is_empty());
+    assert_eq!(
+        login.option.unwrap().disable_keyboard.enum_value().unwrap(),
+        option_message::BoolOption::No
+    );
+    let mut response = Message::new();
+    response.set_login_response(LoginResponse {
+        union: Some(login_response::Union::PeerInfo(PeerInfo {
+            platform_additions: additions.into(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+    send_encrypted(stream, cipher, &response);
+}
+
+#[test]
+fn persistent_connection_rejects_plain_peer_info() {
+    let events = execute_demo(|mut stream, key| {
+        let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+        demo_login(&mut stream, &mut cipher, "");
+        let close = receive_encrypted(&mut stream, &mut cipher);
+        assert!(
+            matches!(close.union, Some(message::message::Union::Misc(misc)) if matches!(misc.union, Some(message::misc::Union::CloseReason(_))))
+        );
+    });
+    assert!(events.iter().any(|e| e["code"] == "UNSUPPORTED_PEER"));
+    assert!(events
+        .iter()
+        .all(|e| e["authenticated"] == false && e["authorized"] == false));
+    assert!(events
+        .iter()
+        .any(|e| e["state"] == "awaiting_approval"
+            && e["confirmationCode"] == approval_code("nonce")));
+}
+
+fn send_permission(stream: &mut TcpStream, cipher: &mut Encrypt, enabled: bool) {
+    let mut misc = Misc::new();
+    misc.set_permission_info(PermissionInfo {
+        permission: permission_info::Permission::Keyboard.into(),
+        enabled,
+        ..Default::default()
+    });
+    let mut message = Message::new();
+    message.set_misc(misc);
+    send_encrypted(stream, cipher, &message);
+}
+
+struct DemoCollector {
+    events: Vec<Value>,
+    task: *mut remote_controller_core::session::ControllerSession,
+    sends: Vec<i32>,
+}
+
+unsafe extern "C" fn collect_demo(event: *const c_char, user: *mut c_void) {
+    let context = &mut *(user as *mut DemoCollector);
+    let event: Value = serde_json::from_str(CStr::from_ptr(event).to_str().unwrap()).unwrap();
+    if event["state"] == "connected" {
+        context
+            .sends
+            .push(controller_session_send_pointer(context.task, 10, 20));
+    }
+    if event["state"] == "permissions_changed" {
+        context.sends.push(controller_session_send_text(
+            context.task,
+            CString::new("hello").unwrap().as_ptr(),
+        ));
+        if event["authorized"] == true {
+            context
+                .sends
+                .push(controller_session_send_pointer(context.task, 10, 20));
+        }
+    }
+    context.events.push(event);
+}
+
+#[test]
+fn persistent_connection_gates_input_and_reports_status() {
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let (public, private) = sign::gen_keypair();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut cipher = negotiated(&mut stream, &private, "123456789", 1);
+        demo_login(
+            &mut stream,
+            &mut cipher,
+            r#"{"ord_demo":1,"input_scope":"demo_window","width":800,"height":450}"#,
+        );
+        send_permission(&mut stream, &mut cipher, false);
+        send_permission(&mut stream, &mut cipher, true);
+        let first = receive_encrypted(&mut stream, &mut cipher);
+        let second = receive_encrypted(&mut stream, &mut cipher);
+        assert!(
+            matches!(first.union, Some(message::message::Union::KeyEvent(k)) if k.seq() == "hello")
+        );
+        assert!(
+            matches!(second.union, Some(message::message::Union::MouseEvent(m)) if m.x == 10 && m.y == 20 && m.mask == 0)
+        );
+        let mut misc = Misc::new();
+        misc.set_chat_message(ChatMessage {
+            text: r#"{"ord_demo_status":1,"x":10,"y":20,"textLength":5}"#.into(),
+            ..Default::default()
+        });
+        let mut status = Message::new();
+        status.set_misc(misc);
+        send_encrypted(&mut stream, &mut cipher, &status);
+        send_permission(&mut stream, &mut cipher, false);
+        let mut close = Message::new();
+        let mut misc = Misc::new();
+        misc.set_close_reason("done".into());
+        close.set_misc(misc);
+        send_encrypted(&mut stream, &mut cipher, &close);
+    });
+    let task = controller_connection_create(
+        trusted_request(&endpoint, &public, "123456789").as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1500,
+    );
+    assert!(!task.is_null());
+    let mut context = DemoCollector {
+        events: Vec::new(),
+        task,
+        sends: Vec::new(),
+    };
+    controller_session_run(
+        task,
+        Some(collect_demo),
+        &mut context as *mut _ as *mut c_void,
+    );
+    controller_session_destroy(task);
+    server.join().unwrap();
+    assert_eq!(context.sends, [2, 2, 0, 0, 2]);
+    assert!(context
+        .events
+        .iter()
+        .any(|e| e["state"] == "demo_status" && e["x"] == 10 && e["textLength"] == 5));
+    assert!(context.events.iter().any(|e| e["state"] == "connected"
+        && e["authenticated"] == true
+        && e["authorized"] == false));
+    assert!(context
+        .events
+        .last()
+        .is_some_and(|e| e["authenticated"] == false && e["authorized"] == false));
+}
+
+struct BusyPeerCollector {
+    task: *mut remote_controller_core::session::ControllerSession,
+    statuses: usize,
+    enqueue_result: Option<i32>,
+}
+
+unsafe extern "C" fn collect_busy_peer(event: *const c_char, user: *mut c_void) {
+    let context = &mut *(user as *mut BusyPeerCollector);
+    let event: Value = serde_json::from_str(CStr::from_ptr(event).to_str().unwrap()).unwrap();
+    if event["state"] == "permissions_changed" && event["authorized"] == true {
+        context.enqueue_result = Some(controller_session_send_pointer(context.task, 31, 41));
+    }
+    if event["state"] == "demo_status" {
+        context.statuses += 1;
+        if context.statuses == 5 {
+            controller_session_cancel(context.task);
+        }
+    }
+}
+
+#[test]
+fn continuous_inbound_status_does_not_starve_authorized_input() {
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let (public, private) = sign::gen_keypair();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut cipher = negotiated(&mut stream, &private, "123456789", 1);
+        demo_login(
+            &mut stream,
+            &mut cipher,
+            r#"{"ord_demo":1,"input_scope":"demo_window","width":800,"height":450}"#,
+        );
+        send_permission(&mut stream, &mut cipher, true);
+        for _ in 0..5 {
+            let mut misc = Misc::new();
+            misc.set_chat_message(ChatMessage {
+                text: r#"{"ord_demo_status":1,"x":0,"y":0,"textLength":0}"#.into(),
+                ..Default::default()
+            });
+            let mut status = Message::new();
+            status.set_misc(misc);
+            send_encrypted(&mut stream, &mut cipher, &status);
+        }
+        let input = receive_encrypted(&mut stream, &mut cipher);
+        assert!(
+            matches!(input.union, Some(message::message::Union::MouseEvent(m))
+            if m.x == 31 && m.y == 41 && m.mask == 0)
+        );
+    });
+    let task = controller_connection_create(
+        trusted_request(&endpoint, &public, "123456789").as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1500,
+    );
+    assert!(!task.is_null());
+    let mut context = BusyPeerCollector {
+        task,
+        statuses: 0,
+        enqueue_result: None,
+    };
+    controller_session_run(
+        task,
+        Some(collect_busy_peer),
+        &mut context as *mut _ as *mut c_void,
+    );
+    controller_session_destroy(task);
+    server.join().unwrap();
+    assert_eq!(context.enqueue_result, Some(0));
+    assert_eq!(context.statuses, 5);
+}
+
+struct CancelCollector {
+    events: Vec<Value>,
+    task: *mut remote_controller_core::session::ControllerSession,
+    after_cancel: Option<i32>,
+}
+
+unsafe extern "C" fn cancel_on_permission(event: *const c_char, user: *mut c_void) {
+    let context = &mut *(user as *mut CancelCollector);
+    let event: Value = serde_json::from_str(CStr::from_ptr(event).to_str().unwrap()).unwrap();
+    if event["state"] == "permissions_changed" && event["authorized"] == true {
+        controller_session_cancel(context.task);
+        context.after_cancel = Some(controller_session_send_pointer(context.task, 1, 2));
+    }
+    context.events.push(event);
+}
+
+#[test]
+fn cancelling_connected_demo_immediately_disables_input() {
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let (public, private) = sign::gen_keypair();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut cipher = negotiated(&mut stream, &private, "123456789", 1);
+        demo_login(
+            &mut stream,
+            &mut cipher,
+            r#"{"ord_demo":1,"input_scope":"demo_window","width":800,"height":450}"#,
+        );
+        send_permission(&mut stream, &mut cipher, true);
+        let mut byte = [0];
+        assert_eq!(stream.read(&mut byte).unwrap_or(0), 0);
+    });
+    let task = controller_connection_create(
+        trusted_request(&endpoint, &public, "123456789").as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1500,
+    );
+    assert!(!task.is_null());
+    let mut context = CancelCollector {
+        events: Vec::new(),
+        task,
+        after_cancel: None,
+    };
+    controller_session_run(
+        task,
+        Some(cancel_on_permission),
+        &mut context as *mut _ as *mut c_void,
+    );
+    controller_session_destroy(task);
+    server.join().unwrap();
+    assert_eq!(context.after_cancel, Some(1));
+    assert!(context
+        .events
+        .last()
+        .is_some_and(|e| e["code"] == "CANCELLED"
+            && e["authenticated"] == false
+            && e["authorized"] == false));
 }
 
 #[test]
