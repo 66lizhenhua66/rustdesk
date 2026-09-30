@@ -51,6 +51,8 @@
 
 后续增量已完成 [严格身份与单次加密登录验证](research/2026-09-30-secure-session-validation.md)，但只是受控对端测试，登录确认后即关闭。真实 Windows 互通、ID/中继通道、2FA 继续会话和明确操作权限仍是 M1 后续工作；未将该验证标作完整 Session 交付。
 
+2026-09-30 后续执行调整：用户试用非视频 DEMO 后跳过真机，并选择优先实施 [正式 Windows 安全入口](plans/2026-09-30-official-secure-entry.md)。此切片专注官方 Connection / CM 的签名、加密、现场审批与默认拒绝，不等同于 M1 视频/完整桌面或公网验收。
+
 ## Windows 省流调查结论（基线 a7f226020）
 
 - `libs/scrap/src/dxgi/mod.rs:600` 已使用画面更新时间/累计帧信息判定新帧；`libs/scrap/src/common/mod.rs:122` 有相等帧过滤。具体行为取决于采集后端。

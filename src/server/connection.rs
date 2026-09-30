@@ -4,6 +4,8 @@ use super::login_failure_check::{
     evaluate_os_credential_policy, record_os_credential_failure, FailureScope,
 };
 use super::{input_service::*, *};
+#[cfg(all(windows, feature = "ord-secure-host"))]
+mod secure_host;
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::clipboard::try_empty_clipboard_files;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -372,6 +374,8 @@ pub struct Connection {
     authorized: bool,
     // The place among the unauthorized connections; given back at authorization.
     unauthorized_id: Option<UnauthorizedID>,
+    #[cfg(all(windows, feature = "ord-secure-host"))]
+    secure_login_pending: bool,
     require_2fa: Option<totp_rs::TOTP>,
     awaiting_2fa: bool,
     keyboard: bool,
@@ -587,6 +591,8 @@ impl Connection {
             tx_to_cm,
             authorized: false,
             unauthorized_id: Some(unauthorized),
+            #[cfg(all(windows, feature = "ord-secure-host"))]
+            secure_login_pending: false,
             keyboard: Self::permission(keys::OPTION_ENABLE_KEYBOARD, &control_permissions),
             clipboard: Self::permission(keys::OPTION_ENABLE_CLIPBOARD, &control_permissions),
             audio: Self::permission(keys::OPTION_ENABLE_AUDIO, &control_permissions),
@@ -659,6 +665,17 @@ impl Connection {
             conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
             conn_audit_two_factor: ConnAuditTwoFactor::None,
         };
+        #[cfg(all(windows, feature = "ord-secure-host"))]
+        {
+            conn.run_secure_host(
+                addr,
+                &mut rx_from_cm,
+                &mut rx,
+                &mut rx_video,
+                &mut rx_from_authed,
+            ).await;
+            return;
+        }
         let addr = hbb_common::try_into_v4(addr);
         if !conn.on_open(addr).await {
             conn.closed = true;

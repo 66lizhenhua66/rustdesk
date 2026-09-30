@@ -15,6 +15,7 @@
 | [ROADMAP.md](ROADMAP.md) | 阶段顺序、依赖、退出条件与代码入口 |
 | [PROGRESS.md](PROGRESS.md) | 唯一的当前进度入口，记录结果、证据、阻塞和下一步 |
 | [DEMO.md](DEMO.md) | Windows / HarmonyOS 非视频 DEMO 的构建、安装、连接和撤权操作说明 |
+| [OFFICIAL-SECURE-ENTRY.md](OFFICIAL-SECURE-ENTRY.md) | 正式 Windows 非媒体安全入口的构建开关、显式监听和能力边界 |
 | [DECISIONS.md](DECISIONS.md) | 已确认方向、提议及其取舍，避免反复讨论 |
 | [specs/001-baseline-and-harmony-feasibility.md](specs/001-baseline-and-harmony-feasibility.md) | 第一阶段范围草案与验收清单 |
 | [specs/002-controller-tech-stack.md](specs/002-controller-tech-stack.md) | 鸿蒙优先的控制端技术栈决策、各层职责与未来平台复用方式 |
@@ -24,6 +25,8 @@
 | [plans/2026-09-30-secure-session.md](plans/2026-09-30-secure-session.md) | 严格身份、加密握手和非媒体登录的实施任务 |
 | [research/2026-09-30-secure-session-validation.md](research/2026-09-30-secure-session-validation.md) | 38 项测试、双 ABI 构建、登录能力及真实互通限制 |
 | [plans/2026-09-30-interactive-demo.md](plans/2026-09-30-interactive-demo.md) | 持续加密连接、Windows 演示窗口和鸿蒙受限输入计划 |
+| [plans/2026-09-30-official-secure-entry.md](plans/2026-09-30-official-secure-entry.md) | 官方 Connection / CM 严格非媒体安全准入的实现与验证计划 |
+| [research/2026-09-30-official-secure-entry-validation.md](research/2026-09-30-official-secure-entry-validation.md) | 59 项测试、官方 Windows 双配置编译、开发版 EXE 和真实未验收项 |
 | [research/2026-09-30-interactive-demo-validation.md](research/2026-09-30-interactive-demo-validation.md) | 53 项测试、最终 EXE/HAP、模拟器到 Windows 联调与回归范围 |
 | [research/2026-09-30-harmony-bridge-validation.md](research/2026-09-30-harmony-bridge-validation.md) | 双 ABI 构建、模拟器 6/6 与生命周期验证结果及未验证边界 |
 | [research/](research/) | 带日期和来源的调研快照，不代表当前实现能力 |

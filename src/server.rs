@@ -69,6 +69,10 @@ pub mod input_service {
 }
 
 mod connection;
+#[cfg(all(windows, feature = "ord-secure-host"))]
+pub(crate) mod secure_host;
+#[cfg(all(windows, feature = "ord-secure-host"))]
+pub(crate) mod secure_host_policy;
 mod login_failure_check;
 pub(crate) mod port_forward_mux;
 pub mod display_service;
@@ -215,6 +219,10 @@ pub async fn create_tcp_connection(
     secure: bool,
     meta: ConnectionMeta,
 ) -> ResultType<()> {
+    #[cfg(all(windows, feature = "ord-secure-host"))]
+    if !secure || !matches!(&stream, Stream::Tcp(_)) {
+        bail!("Secure host requires an explicitly secure TCP connection");
+    }
     let mut stream = stream;
     // The address the connection layer keys on, whitelist and admission alike.
     let addr = hbb_common::try_into_v4(addr);
@@ -226,6 +234,16 @@ pub async fn create_tcp_connection(
     };
     // Before the handshake, so its read is bounded too; lifted again at authorization.
     stream.set_max_packet_length(MAX_UNAUTHORIZED_MESSAGE);
+    #[cfg(all(windows, feature = "ord-secure-host"))]
+    stream.set_max_packet_length(64 * 1024);
+    #[cfg(all(windows, feature = "ord-secure-host"))]
+    tokio::select! {
+        handshake = secure_host::identity_handshake(&mut stream) => handshake?,
+        _ = unauthorized.evicted() => {
+            bail!("evicted to make room for a newer unauthenticated connection");
+        }
+    }
+    #[cfg(not(all(windows, feature = "ord-secure-host")))]
     tokio::select! {
         handshake = identity_handshake(&mut stream, secure) => handshake?,
         _ = unauthorized.evicted() => {

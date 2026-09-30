@@ -272,6 +272,13 @@ impl RendezvousMediator {
     }
 
     pub async fn start_all() {
+        #[cfg(all(windows, feature = "ord-secure-host"))]
+        {
+            if let Err(err) = crate::server::secure_host::start().await {
+                log::error!("Secure host listener stopped: {}", err);
+            }
+            return;
+        }
         crate::test_nat_type();
         if config::is_outgoing_only() {
             loop {
