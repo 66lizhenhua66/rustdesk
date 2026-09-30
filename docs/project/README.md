@@ -49,6 +49,8 @@ gitnexus analyze --index-only --name rustdesk --workers 4
 
 先用 `status` 检查新鲜度，在源码、分支或提交变动后按需刷新。`--index-only` 保留已有 AGENTS.md、CLAUDE.md 和技能文件；`.gitnexus/` 由本机 `.git/info/exclude` 排除，不提交索引数据库。新 clone 需各自建立索引。当前没有生成 embeddings，不能把图查询与全文检索误认为已启用向量语义检索。
 
+仓库根 `.gitnexusignore` 另外明确排除本项目的下载缓存、target、Hvigor/ohpm 产物和测试 artifacts，避免索引器对嵌套 `.gitignore` 的处理差异将第三方生成目录纳入项目调用图。
+
 ## 鸿蒙官方开发知识 MCP
 
 - 服务名：`harmonyos_developer_knowledge`。

@@ -1,0 +1,15 @@
+libs/controller-core/artifacts/
+libs/controller-core/target/
+apps/harmony-controller/artifacts/
+apps/harmony-controller/.hvigor/
+apps/harmony-controller/oh_modules/
+apps/harmony-controller/entry/build/
+apps/harmony-controller/entry/.cxx/
+apps/harmony-controller/entry/oh_modules/
+apps/harmony-probe/artifacts/
+apps/harmony-probe/native/rust/target/
+apps/harmony-probe/.hvigor/
+apps/harmony-probe/oh_modules/
+apps/harmony-probe/entry/build/
+apps/harmony-probe/entry/.cxx/
+apps/harmony-probe/entry/oh_modules/
