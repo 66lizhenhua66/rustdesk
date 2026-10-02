@@ -10,6 +10,7 @@
     "pages": "$profile:main_pages",
     "abilities": [{
       "name": "EntryAbility",
+      "orientation": "auto_rotation",
       "srcEntry": "./ets/entryability/EntryAbility.ets",
       "description": "$string:module_desc",
       "icon": "$media:app_icon",

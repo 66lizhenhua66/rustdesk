@@ -1,44 +1,69 @@
-# 鸿蒙控制端：非视频 DEMO
+# 鸿蒙控制端：原生工作台与只读桌面
 
-当前可用：设备配置的新增、编辑、删除与本地保存；IP/设备 ID/中继三种配置；共享 Rust 校验；IP 单点网络预检；预存可信设备身份后的单次加密登录验证；公开配置导入与 Windows 演示窗口的持续连接、配对码、显式输入权限、受限光标/文本、撤权和断开。
+默认入口为 ArkUI 原生 `pages/Desk.ets`，按照当前原型推荐的 A 方案实现设备工作台、连接等待、远程桌面、会话工具和结束页。已有正式 Windows 安全入口的签名身份校验、v1 加密、IP 直连、CM 逐连接现场批准及主屏 VP8 已接入；**正式桌面目前仅支持查看，不支持真实系统键鼠输入**。
 
-**当前操作范围仅为 Windows 演示窗口，没有远程视频或全桌面控制。** 设备 ID/中继仍只保存配置；IP 预检不发送应用载荷。“验证加密登录”保持单次验证后关闭；“连接演示端”才进入新的持续 DEMO 通道，要求专用能力标记及独立输入授权。完整官方 Session、ID/中继通道、视频、音频与文件通道尚未接入。产物、构建与运行步骤见 [DEMO 指南](../../docs/project/DEMO.md)。
+实施范围和验收见 [本轮计划](../../docs/project/plans/2026-10-03-native-controller-ui.md)、[本轮验证记录](../../docs/project/research/2026-10-03-native-controller-ui-validation.md)。2026-10-02 已实测真实 Windows 主屏，见 [上轮只读画面记录](../../docs/project/research/2026-10-02-readonly-screen-validation.md)；这份历史证据不代替新界面的本轮现场批准与画面复验。
+
+## 当前界面与能力
+
+- 设备资料：新增、编辑、确认移除、公开配置导入预览、搜索与常用设备；继续读取原有 `controller_profiles/profiles`，保留既有设备。收藏和最近连接使用独立的非敏感存储键。
+- 连接：IP 与端口分字段，预存可信设备 ID、公钥和可选指纹；保存不连接，连接按钮显式请求正式只读画面。未通过身份验证、未获现场批准、获批等待首帧和已经呈现画面分别显示真实状态。
+- 会话：原生 Surface 保持远端比例，浮动工具栏可以收起；工具面板显示真实身份、批准、尺寸和接收/呈现统计。键盘、控制和文件按钮禁用，未实现能力明确标注。
+- 生命周期：返回设备页保留同一会话与 Surface，并提供返回会话入口；活动会话须断开后才能更改目标或进入诊断。取消、断开、离开前台和页面退出清理会话及画面；重新连接需要新的 Windows 本机批准。
+- 最近连接：只记录真实获批连接，不预置样例，不保存密码、画面或输入内容。保存设备不代表设备在线或已获访问权。
+- 响应式布局：小于 600 vp 为单列和底栏，600–1099 vp 为导航轨和双列，1100 vp 起为完整侧栏与多列设备卡。横竖屏根据当前窗口宽高布局，弹窗及工具内容可滚动。
+
+设备 ID/中继、无人值守、系统键鼠/中文输入、文件、剪贴板、声音、多屏、硬件解码和画质切换仍未实现。ArkUI 不使用 WebView，视频像素不经过 ArkTS/JSON。
+
+## 连接与安全边界
+
+正式入口仍要求被控端本机显式启用视频：`ORD_SECURE_VIDEO=1`，或使用仓库的 `scripts/start-official-secure-host.ps1 -Video`。视频门禁默认关闭；客户端请求不能开启该门禁，也不能代替 CM 逐连接批准。启动脚本默认只绑定 `127.0.0.1:21120`，没有自动批准、公网监听扩展或系统安全设置修改。
+
+正式表单默认端口 21120；IP 地址支持标准 literal IPv4/IPv6，端口和资料合法性由共享 Rust 核心验证。旧诊断页未填端口时仍采用原有默认值 21118。公钥和指纹是公开信任材料，必须从可信来源核对；不能从网络预检结果自动建立或替换信任。普通上游明文 IP 入口缺少所需签名握手，会被拒绝，不会降级继续。
+
+视频使用 VP8 软件编解码，单主屏不超过 1280×720、约 8 fps 上限，相同像素不重复发送。获批前不启动正式屏幕采集；批准及成功连接不代表已呈现首帧，更不代表允许操作 Windows。
+
+## 保留的连接诊断
+
+在偏好设置中打开连接诊断，进入原有 `pages/Index.ets`。其设备 CRUD、IP/设备 ID/中继资料保存及公开配置导入路径保留；设备 ID/中继仍只能保存资料。
+
+| 入口 | 实际行为与边界 |
+| --- | --- |
+| 网络预检 | 只检查指定 IP 的网络与协议首帧，最多等待 2 秒，不发送应用载荷，不验证身份、不授予权限 |
+| 验证加密登录 | 核对预存 ID/公钥、签名与 v1 加密后执行单次登录，确认即关闭；显示登录已确认也不代表可以操作；2FA 继续流程未接入 |
+| 连接正式入口 | 正式 Windows 安全入口的持续非媒体诊断，需本机批准，仅验证连接，不启动画面或系统输入 |
+| 查看桌面（只读） | 旧页面保留的正式视频入口，同样受视频门禁、身份/加密和 CM 批准约束 |
+| 连接演示端 | 独立 Windows DEMO 通道，核对配对码、现场批准、独立输入授权；光标与文本仅作用于演示窗口，不是系统桌面控制 |
+
+诊断页本次登录密码不写入 Preferences，在启动、取消、切换设备或离开页面时清空；JavaScript 字符串不保证立即物理擦除。单次登录 UI 默认总时限 10 秒，API 上限 30 秒；持续 DEMO 握手上限 60 秒、会话最长 30 分钟，独立 Windows DEMO 的现场批准另有 30 秒时限。取消关闭已连接 socket；进行中的系统 connect 最迟在 2 秒上限结束。每个环境最多允许 4 个尚未退出的网络 worker，旧回调在取消或退出后丢弃。
+
+独立演示端的运行步骤见 [DEMO 指南](../../docs/project/DEMO.md)。DEMO 的输入测试不能作为正式系统键鼠控制的验收证据；真实输入后续须具备 Windows 本机独立授权、执行点撤权和断开清理。
 
 ## 结构
 
-- `entry/src/main/ets`：ArkUI 界面与 Preferences 非敏感设备资料。加载失败显示错误并禁止覆盖，未知字段或密码字段不能通过核心校验。
-- `entry/src/main/cpp`：NAPI 与 Rust C ABI。网络操作在后台，取消/销毁只标记停止，不在 UI 线程 join；工作线程结束后释放其 TSFN 引用和任务。
-- [libs/controller-core](../../libs/controller-core/README.md)：共享配置、预检和严格登录验证，复用上游帧/消息定义及按哈希校验提取的身份与加密实现。
-- `scripts/build.ps1`：构建独立核心的 x86_64/ARM64 库和 HAP。
+- `entry/src/main/ets/pages/Desk.ets`：正式工作台、设备存储及会话调度；`components/RemoteSession.ets` 承载原生画面与工具栏，`model/DeskModels.ts` 将核心事件投影为界面状态。
+- `entry/src/main/ets/pages/Index.ets`：保留旧连接诊断和独立 DEMO 操作路径。
+- `entry/src/main/cpp`：薄 NAPI 桥接、原生 libvpx 解码和 NativeWindow 渲染。网络操作在后台，取消不在 UI 线程等待网络 worker 退出。
+- [libs/controller-core](../../libs/controller-core/README.md)：共享配置验证、认证、协议和会话核心，通过版本化 C ABI 供平台适配调用。
+- `scripts/build.ps1`：构建 x86_64/ARM64 Rust、libvpx、C++ 库及 HAP。Android/iOS 后续复用核心，不复制鸿蒙界面或协议实现。
 
-原有 `apps/harmony-probe` 保留作为第一阶段桥接验证；没有改动根 `src/`、既有 `libs/` 模块或根 Cargo workspace。
-
-## 构建与测试
+## 构建与验证
 
 从 RustDesk 仓库根目录运行：
 
 ```powershell
+node --experimental-strip-types --test apps/harmony-controller/tests/desk-models.test.ts
 cargo test --manifest-path libs/controller-core/Cargo.toml --locked
-cargo fmt --manifest-path libs/controller-core/Cargo.toml --check
+cargo test --manifest-path apps/windows-demo-host/Cargo.toml --locked
+& ./scripts/build-official-secure-host.ps1 -TestVideo
+& ./scripts/build-official-secure-host.ps1 -TestSecureGate
 & ./apps/harmony-controller/scripts/build.ps1 -DevEcoRoot 'G:\Huawei\DevEco Studio'
 ```
 
-环境与前一轮 probe 相同：Rust 1.96.1，DevEco 内置 SDK24/API24，HAP 兼容 API22。依赖版本由独立 Cargo.lock 固定。需要已安装 x86_64-unknown-linux-ohos、aarch64-unknown-linux-ohos 标准库。初次构建下载公开 Cargo 依赖及校验哈希的 libsodium/CMake 来源；下载和原生构建缓存不进 Git。
+使用 Rust 1.96.1、DevEco 内置 SDK 6.1.1.125/API24，HAP 兼容 API22；需已安装 `x86_64-unknown-linux-ohos` 和 `aarch64-unknown-linux-ohos` 标准库。开发包为 `entry/build/default/outputs/default/entry-default-unsigned.hap`。构建缓存、截图、布局、日志及签名材料不进 Git；不要覆盖用户本地 `build-profile.json5`。
 
-开发包：`entry/build/default/outputs/default/entry-default-unsigned.hap`。本机 API22 模拟器已安装并完成基本配置冒烟检查；真机与视频按用户要求后移。unsigned 包不能当作可对外分发的签名版本。
+2026-10-03 本轮已有 77 项回归与 5 项新界面模型测试共 **82 项通过**，双 ABI/HAP 构建通过。API22 手机模拟器已验证设备 CRUD、冷启动读取、横竖屏切换、批准等待及超时；使用合成 VP8 视频验证了浮动工具栏、工具面板、收起/展开、会话旋转、返回设备保持同一 Surface 和断开清屏。合成视频没有采集真实 Windows 桌面，不替代正式 CM 批准。API24 2in1 模拟器已验证中宽/宽屏工作台，窗口宽度变化不等于平板真机验收。
 
-## 使用边界
+本轮 Windows Debug 首次因运行中的 `target/debug/rustdesk.exe` 占用而失败（更新产物时访问被拒绝）；核验没有活动连接后，仅停止本仓库对应的测试进程，重试构建成功，随后恢复 `127.0.0.1:21120` 回环视频服务与 CM，未自动批准。首次失败与最终成功分别记录在 `artifacts/ui-windows-debug.log`、`artifacts/ui-windows-debug-final.log`。
 
-IP 配置接受标准 literal IPv4/IPv6，未填端口默认 21118；带端口 IPv6 使用 `[地址]:端口`。设备 ID 当前限定 6—20 位数字。服务器地址可保存域名，默认端口 21116，但不会据此发起设备 ID 会话。
-
-公钥和指纹都是公开信任材料；保存本身不代表验证成功。直连资料可填写预先从可信来源取得的被控设备 ID、Ed25519 公钥和可选 SHA-256 公钥指纹；具备这些资料后可以显式选择“验证加密登录”。本次密码单独输入，可留空等待现场批准；启动/取消/切设备/离开页面会清空输入，不写入 Preferences。JS 字符串不能保证立即物理擦除。
-
-“网络预检”只连接指定 IP，最多等待 2 秒，最多解析 64 KiB 首帧；即使收到格式正确的消息，也以 `AUTHENTICATION_REQUIRED` 提醒该检查不验证身份。“验证加密登录”要求对端首包为能由预存公钥验证的 SignedId，设备 ID/指纹一致且支持密钥交换 v1，再接受加密 Hash 和提交登录。旧明文直连入口、错公钥、篡改密文和不满足必要因子的会话均拒绝。
-
-**普通官方 RustDesk 的直接 IP 入口当前没有该签名握手，本入口会拒绝它。** 当前成功路径由本机受控协议对端测试验证，不代表已完成真实 Windows 被控端互通。上游协议没有 disable_video，登录可能触发对端默认屏幕订阅；本版本不解码，并在确认登录后立即关闭，不能宣称对端完全不发送视频。
-
-“验证加密登录”显示“登录已确认”仍不表示可以操作远端；该 API 的事件始终未授权。2FA 请求会明确阻塞，不继续获取第二因子。单次登录 UI 默认总时限 10 秒，API 接受至多 30 秒；DEMO 握手上限 60 秒、会话最长 30 分钟，Windows 现场批准另有 30 秒时限。取消立即返回，已连接 socket 被关闭；进行中的系统 connect 最迟在 2 秒上限结束。
-
-每个环境最多允许 4 个尚未退出的网络 worker，旧回调在退出/取消/切设备后被丢弃。它不是端口扫描器，不自动探测公网或保存原始远端报文。
-
-本地构建和冒烟证据在忽略的 `artifacts/`，不提交截图、设备布局、原始日志、产物或签名文件。基础记录见 [非媒体实施记录](../../docs/project/research/2026-09-30-controller-foundation-implementation.md)，本次登录与测试见 [严格登录验证记录](../../docs/project/research/2026-09-30-secure-session-validation.md)。
+正式 Windows 现场接受已请求用户，但请求超时且尚未收到答复，因此**本轮新界面的真实桌面复验仍待 Windows 本机接受**。真机验证继续后移，ARM64 编译、模拟器安装和合成视频验证不代表 HarmonyOS 6.1 真机、正式桌面复验或公网验收通过。

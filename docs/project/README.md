@@ -32,6 +32,8 @@
 | [research/2026-09-30-harmony-bridge-validation.md](research/2026-09-30-harmony-bridge-validation.md) | 双 ABI 构建、模拟器 6/6 与生命周期验证结果及未验证边界 |
 | [plans/2026-10-02-readonly-screen.md](plans/2026-10-02-readonly-screen.md) | Windows 正式安全入口到鸿蒙原生只读画面的实现计划 |
 | [research/2026-10-02-readonly-screen-validation.md](research/2026-10-02-readonly-screen-validation.md) | 只读画面的测试、构建、模拟器与现场验收边界 |
+| [plans/2026-10-03-native-controller-ui.md](plans/2026-10-03-native-controller-ui.md) | 原型到原生工作台、会话页面的映射与 Windows 后续任务 |
+| [research/2026-10-03-native-controller-ui-validation.md](research/2026-10-03-native-controller-ui-validation.md) | 正式界面、82 项测试、双 ABI 构建与模拟器布局/会话验证 |
 | [research/](research/) | 带日期和来源的调研快照，不代表当前实现能力 |
 
 ## 维护约定
