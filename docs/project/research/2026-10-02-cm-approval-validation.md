@@ -10,17 +10,21 @@
 - 先运行旧实现观察错模式、批准前权限提升用例失败，再修复通过。最终共享核心 53 项、Windows DEMO 9 项、官方审批状态 1 项，共 **63 项**通过；并非运行全部官方测试。
 - 修复后的官方 Debug EXE、双 ABI 鸿蒙 HAP 均构建成功，最终 HAP 已安装到 API22 模拟器。连接后文案改为“Windows 本机已批准”，不再错误地显示仍等待批准。
 
-## 尚待实际操作
+## 真实本机批准与连接验证
 
-Windows 窗口列表已经可通过专用 Sky 接口取得；窗口内容读取的 Computer Use 应用授权等待超时，尚未取得可用于点击的截图或控件树。因此未自动点击 CM 批准、拒绝，也未声称批准后断开/重连的真实 GUI 验证通过。没有用 IPC 注入或自动批准测试入口代替本机操作。
+窗口内容读取的 Computer Use 应用授权等待超时，因此由本机用户实际点击 CM 接受。随后读取模拟器界面，确认“正式安全入口已连接 · 只读”，并核对 21120 的 TCP Established 连接仍属于本任务的正式服务进程。没有用 IPC 注入或自动批准测试入口替代本机操作。
 
-本轮完成代码修复与可运行环境准备；真实批准仍需要本机用户点击，或允许工具访问 RustDesk 窗口后继续验证。模拟器“等待批准”并不等于已经批准。
+用户反馈点击后窗口似乎退出。检查发现这是旧 `src/ui/cm.tis` 接受按钮在 30ms 后自动最小化的行为；当时 Windows 服务和 CM 进程仍存活，模拟器已处于 connected，并非异常退出。未修改该既有窗口行为。
+
+继续通过模拟器执行“断开连接”，确认回到未授权；再次连接时显示“等待正式入口批准”，没有继承上次批准。随后取消新请求，结束本轮测试会话。实际批准、持续只读、客户端断开和重连重新审批已验证；Windows 拒绝按钮与 stop-service 的实际点击尚未单独测试。视频和系统输入仍未开放。
 
 ## 构建和证据
 
 命令：`cargo test --manifest-path libs/controller-core/Cargo.toml --locked`、Windows DEMO 对应测试，以及 `scripts/build-official-secure-host.ps1 -TestSecureGate` / `-DebugBuild`、`apps/harmony-controller/scripts/build.ps1`。
 
 本机忽略的 `apps/harmony-controller/artifacts/cm-*.log` 保存红/绿测试、构建和 CM 启动证据，`cm-review.md` 记录独立复核与修复闭环。用户签名配置、IDE 文件、原型和任何 Cargo 缓存变化未纳入提交。
+
+实际界面证据位于忽略的 `cm-approved.json`、`cm-client-disconnected.json`、`cm-reconnect-pending.json`、`cm-reconnect-cancelled.json`；只记录测试会话状态，未提交原始界面数据。
 
 ## 回归影响
 
