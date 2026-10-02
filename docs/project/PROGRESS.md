@@ -2,7 +2,7 @@
 
 更新：2026-09-30。当前阶段：Windows / HarmonyOS 非视频 DEMO 已交付，支持持续加密直连、现场批准、独立输入授权、演示窗口光标/文本与撤权。53 项自动化测试、双 ABI HAP/EXE 构建及模拟器到独立 Windows 进程联调通过。视频与真机后移；尚无完整远程桌面画面或公网安全验收。运行入口见 [DEMO.md](DEMO.md)。
 
-本轮继续：用户已亲自试用 DEMO，并选择跳过真机、先接正式 Windows 安全入口。专用 feature、严格监听/握手和官方 Connection/CM 非媒体分支已接入；59 项测试、官方 feature-off/on 编译检查和开发版 EXE 链接通过。原生依赖已补齐；真实 CM 交互、视频及系统输入尚未验收，见 [本轮报告](research/2026-09-30-official-secure-entry-validation.md)。
+本轮继续：用户已亲自试用 DEMO，并选择跳过真机、先接正式 Windows 安全入口。专用 feature、严格监听/握手和官方 Connection/CM 非媒体分支已接入；60 项测试、官方 feature-off/on 编译检查、开发版/Release 链接和鸿蒙到正式入口的 pending 联调通过。CM 窗口点击批准因当前 Windows UI 自动化环境未枚举窗口而未验收，视频及系统输入仍未验收，见 [本轮报告](research/2026-09-30-official-secure-entry-validation.md)。
 
 ## 当前快照
 
@@ -36,7 +36,7 @@
 | 官方 Session 构建接入 | 未完成 | OHOS 使用 linux/ohos cfg，上游根 crate 仍引入 Linux 桌面与音视频；离线 cargo check 在缺 git checkout 时停止，源码依赖清单已记录 |
 | 严格身份/加密登录 A1—A6 | 完成（受控验证范围） | [38 项测试和构建报告](research/2026-09-30-secure-session-validation.md)：上游身份/加密实现按哈希复用，libsodium 双 ABI、NAPI/ArkUI 登录入口、失败/取消/重放回归通过；成功登录立即关闭且 authorized=false |
 | 非视频 DEMO P1—P6 | 完成（本机/模拟器范围） | [53 项测试及联调报告](research/2026-09-30-interactive-demo-validation.md)：EXE/HAP、独立进程加密直连、批准、只读、输入、撤权、断开通过；真机待用户验证 |
-| 官方 Windows 安全入口 S1—S5 | 完成（源码、编译和限定测试范围） | [59 项测试及构建报告](research/2026-09-30-official-secure-entry-validation.md)；真实 CM 端到端与媒体不在完成声明内 |
+| 官方 Windows 安全入口 S1—S5 | 完成（源码、编译和限定测试范围） | [60 项测试及构建报告](research/2026-09-30-official-secure-entry-validation.md)；CM 点击批准、媒体和输入不在完成声明内 |
 | M1 | 进行中 | 已接入非媒体安全入口；画面、正式输入、ID/中继和公网验收未完成 |
 | M2—M5 | 未开始 | 见 ROADMAP |
 

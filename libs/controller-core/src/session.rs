@@ -540,14 +540,86 @@ fn response(
     message
 }
 
-fn demo_peer(additions: &str) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistentPeer {
+    Demo,
+    SecureHost,
+}
+
+fn persistent_peer(additions: &str) -> Option<PersistentPeer> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(additions) else {
-        return false;
+        return None;
     };
-    value.get("ord_demo").and_then(|v| v.as_u64()) == Some(1)
+    if value.get("ord_demo").and_then(|v| v.as_u64()) == Some(1)
         && value.get("input_scope").and_then(|v| v.as_str()) == Some("demo_window")
         && value.get("width").and_then(|v| v.as_u64()) == Some(800)
         && value.get("height").and_then(|v| v.as_u64()) == Some(450)
+    {
+        return Some(PersistentPeer::Demo);
+    }
+    if value.get("ord_secure_host").and_then(|v| v.as_u64()) == Some(1)
+        && value.get("media").and_then(|v| v.as_bool()) == Some(false)
+        && value.get("input_scope").and_then(|v| v.as_str()) == Some("none")
+    {
+        return Some(PersistentPeer::SecureHost);
+    }
+    None
+}
+
+fn run_secure_host(
+    task: &ControllerSession,
+    callback: Option<ControllerSessionCallback>,
+    user: *mut c_void,
+    wire: &mut Wire,
+    cipher: &mut Encrypt,
+) -> Result<(), Failure> {
+    let deadline = Instant::now() + DEMO_LIFETIME;
+    loop {
+        if let Some(message) = wire.poll_message(task, deadline, cipher)? {
+            match message.union {
+                Some(message::message::Union::Misc(misc)) => match misc.union {
+                    Some(message::misc::Union::PermissionInfo(permission)) => {
+                        if permission.permission.enum_value()
+                            == Ok(permission_info::Permission::Keyboard)
+                            && permission.enabled
+                        {
+                            return Err(Failure::failed(
+                                "UNEXPECTED_PERMISSION",
+                                "Formal secure entry cannot grant input in this phase",
+                            ));
+                        }
+                        demo_event(
+                            callback,
+                            user,
+                            "permissions_changed",
+                            "PERMISSIONS_CHANGED",
+                            "Formal secure entry remains read-only",
+                            true,
+                            true,
+                            false,
+                            json!({}),
+                        );
+                    }
+                    Some(message::misc::Union::CloseReason(_)) => {
+                        return Err(Failure::failed("DISCONNECTED", "Peer closed secure entry"));
+                    }
+                    _ => {
+                        return Err(Failure::failed(
+                            "UNSUPPORTED_MESSAGE",
+                            "Unsupported secure entry message",
+                        ));
+                    }
+                },
+                Some(message::message::Union::TestDelay(_)) => {}
+                _ => {
+                    return Err(Failure::failed(
+                        "UNSUPPORTED_MESSAGE",
+                        "Unsupported secure entry message",
+                    ));
+                }
+            }
+        }
+    }
 }
 
 fn run_demo(
@@ -823,34 +895,43 @@ fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, us
                 Some(message::message::Union::LoginResponse(login)) => match login.union {
                     Some(login_response::Union::PeerInfo(peer)) => {
                         if task.demo {
-                            if !demo_peer(&peer.platform_additions) {
+                            let Some(peer_kind) = persistent_peer(&peer.platform_additions) else {
                                 let mut misc = Misc::new();
-                                misc.set_close_reason("Unsupported demo peer".to_owned());
+                                misc.set_close_reason("Unsupported persistent peer".to_owned());
                                 let mut close = Message::new();
                                 close.set_misc(misc);
                                 let _ = wire.send_message(task, deadline, &mut cipher, &close);
                                 return Err(Failure::failed(
                                     "UNSUPPORTED_PEER",
-                                    "Peer does not support isolated demo input",
+                                    "Peer does not support the requested persistent mode",
                                 ));
-                            }
+                            };
                             {
                                 let _pending = task.pending.lock().unwrap();
                                 status(task, deadline)?;
                                 task.connected.store(true, Ordering::Release);
                             }
+                            let message = if peer_kind == PersistentPeer::Demo {
+                                "Demo connection established"
+                            } else {
+                                "Formal secure entry established; read-only"
+                            };
                             demo_event(
                                 callback,
                                 user,
                                 "connected",
                                 "CONNECTED",
-                                "Demo connection established",
+                                message,
                                 true,
                                 true,
                                 false,
                                 json!({}),
                             );
-                            return run_demo(task, callback, user, &mut wire, &mut cipher);
+                            return if peer_kind == PersistentPeer::Demo {
+                                run_demo(task, callback, user, &mut wire, &mut cipher)
+                            } else {
+                                run_secure_host(task, callback, user, &mut wire, &mut cipher)
+                            };
                         }
                         event(
                             callback,

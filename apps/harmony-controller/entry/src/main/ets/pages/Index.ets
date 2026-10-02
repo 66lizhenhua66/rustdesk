@@ -558,6 +558,60 @@ struct Index {
     }
   }
 
+  private startOfficialSecure(profile: Profile): void {
+    this.cancelActive();
+    if (profile.mode !== 'direct' || !profile.peerId || !profile.peerPublicKey) {
+      this.status = '请先保存正式入口的设备 ID 和可信公钥。';
+      return;
+    }
+    const request = JSON.stringify({
+      endpoint: profile.target,
+      peerId: profile.peerId,
+      peerPublicKey: profile.peerPublicKey,
+      peerFingerprint: profile.peerFingerprint.length > 0 ? profile.peerFingerprint : null,
+      minimumKxVersion: 1
+    });
+    const ownerEpoch = this.epoch;
+    this.status = '正在连接正式 Windows 安全入口；当前不会启动画面或输入。';
+    try {
+      const task = controller.connectDemo(request, '', 60000, (event: ControllerEvent) => {
+        if (!this.visible || ownerEpoch !== this.epoch || event.taskId !== this.currentTask) { return; }
+        if (event.state === 'connected') {
+          this.demoConnected = event.verified && event.authenticated;
+          this.status = this.demoConnected
+            ? '正式安全入口已通过加密连接，等待 Windows 本机批准；当前只读。'
+            : '正式入口登录状态不一致；操作未授权。';
+        } else if (event.state === 'permissions_changed') {
+          this.demoAuthorized = false;
+          this.status = '正式安全入口当前只读；本阶段不开放输入。';
+        } else if (event.state === 'closed' || event.state === 'cancelled' ||
+          event.state === 'failed' || event.state === 'blocked') {
+          this.demoConnected = false;
+          this.demoAuthorized = false;
+          this.status = event.code === 'DISCONNECTED' || event.state === 'closed'
+            ? '正式安全入口已关闭；操作未授权。'
+            : `${this.authenticationMessage(event)}；正式入口已结束。`;
+          this.probing = false;
+          this.activeKind = '';
+          this.currentTask = 0;
+          controller.cancel(event.taskId);
+        } else if (event.code === 'AWAITING_APPROVAL') {
+          this.status = '等待 Windows 连接管理器现场批准；当前只读。';
+        } else {
+          this.status = `${this.authenticationMessage(event)}；正式入口当前只读。`;
+        }
+      });
+      if (task <= 0) { throw new Error('任务启动失败'); }
+      this.currentTask = task;
+      this.probing = true;
+      this.activeKind = 'secure';
+    } catch {
+      this.status = '正式安全入口无法启动，请检查目标地址和可信公钥。';
+      this.probing = false;
+      this.activeKind = '';
+    }
+  }
+
   private sendDemoPointer(x: number, y: number): void {
     if (!this.demoAuthorized || !this.demoConnected || this.activeKind !== 'demo' || this.currentTask <= 0 ||
       this.padWidth <= 0 || this.padHeight <= 0) { return; }
@@ -671,6 +725,8 @@ struct Index {
                         .onClick(() => { this.authPromptOpen = true; this.sessionPassword = ''; })
                       Button('连接演示端').margin({ right: 8, bottom: 8 })
                         .enabled(!this.probing && !this.saving).onClick(() => this.startDemo(profile))
+                      Button('连接正式入口').margin({ right: 8, bottom: 8 })
+                        .enabled(!this.probing && !this.saving).onClick(() => this.startOfficialSecure(profile))
                     }
                   }
                   Button('编辑').margin({ right: 8, bottom: 8 }).enabled(!this.saving)
@@ -678,7 +734,7 @@ struct Index {
                   Button('删除').margin({ right: 8, bottom: 8 }).enabled(!this.saving)
                     .onClick(() => this.deleteProfile(profile))
                   if (this.probing && profile.mode === 'direct') {
-                    Button(this.activeKind === 'demo' ? '断开演示连接' :
+                    Button(this.activeKind === 'demo' || this.activeKind === 'secure' ? '断开连接' :
                       this.activeKind === 'auth' ? '取消登录验证' : '取消预检').margin({ bottom: 8 })
                       .onClick(() => { this.cancelActive(); this.status = '连接或检查已取消；操作未授权。'; })
                   }
@@ -736,6 +792,16 @@ struct Index {
                     if (this.demoInputStatus.length > 0) {
                       Text(this.demoInputStatus).fontSize(13).fontColor('#63777B').width('100%')
                     }
+                  }.width('100%').alignItems(HorizontalAlign.Start)
+                }
+                if (this.activeKind === 'secure' && profile.mode === 'direct') {
+                  Column({ space: 10 }) {
+                    Text(this.demoConnected ? '正式安全入口已连接 · 只读' : '等待正式入口批准')
+                      .fontSize(15).fontColor('#176B78').width('100%')
+                    Text('当前切片只验证签名、加密和现场批准，不启动远程画面或系统输入。')
+                      .fontSize(13).fontColor('#63777B').width('100%')
+                    Text('请在 Windows 被控端观察连接管理器批准请求。')
+                      .fontSize(13).fontColor('#63777B').width('100%')
                   }.width('100%').alignItems(HorizontalAlign.Start)
                 }
               }

@@ -267,6 +267,30 @@ fn persistent_connection_rejects_plain_peer_info() {
             && e["confirmationCode"] == approval_code("nonce")));
 }
 
+#[test]
+fn persistent_connection_accepts_official_secure_host_as_read_only() {
+    let events = execute_demo(|mut stream, key| {
+        let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+        demo_login(
+            &mut stream,
+            &mut cipher,
+            r#"{"ord_secure_host":1,"media":false,"input_scope":"none"}"#,
+        );
+        send_permission(&mut stream, &mut cipher, false);
+        let mut close = Message::new();
+        let mut misc = Misc::new();
+        misc.set_close_reason("done".into());
+        close.set_misc(misc);
+        send_encrypted(&mut stream, &mut cipher, &close);
+    });
+    assert!(events.iter().any(|e| {
+        e["state"] == "connected"
+            && e["message"] == "Formal secure entry established; read-only"
+            && e["authorized"] == false
+    }));
+    assert!(events.iter().all(|e| e["authorized"] == false));
+}
+
 fn send_permission(stream: &mut TcpStream, cipher: &mut Encrypt, enabled: bool) {
     let mut misc = Misc::new();
     misc.set_permission_info(PermissionInfo {

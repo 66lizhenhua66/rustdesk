@@ -8,17 +8,18 @@
 
 | 验证 | 本轮结果 | 证据边界 |
 | --- | --- | --- |
-| 共享核心全套测试 | 49 项通过 | 原 44 项 + 5 项正式入口策略/密码学测试，后者直接编译正式源码、复用实际上游 protobuf/Encrypt |
+| 共享核心全套测试 | 50 项通过 | 原 44 项 + 5 项正式入口策略/密码学测试 + 1 项正式 profile 只读连接回归，后者直接编译正式源码、复用实际上游 protobuf/Encrypt |
 | 原 Windows DEMO 回归 | 9 项通过 | 真实 TCP/受限演示权限，未把它当作官方 CM 互通 |
 | 官方审批状态单测 | 1 项通过，344 项被 filter 排除 | 证明 pending/重复批准/2FA 状态约束；不是实际 CM GUI 点击测试 |
 | 官方 Windows feature-off 编译检查 | 通过 | `cargo check --locked -p rustdesk --lib --no-default-features` |
 | 官方 Windows feature-on 编译检查 | 通过 | 同命令加 `--features ord-secure-host`，实际编译所有新增入口模块 |
 | 官方 Windows 开发版链接 | 通过 | `scripts/build-official-secure-host.ps1 -DebugBuild` 生成 `target/debug/rustdesk.exe` |
+| 鸿蒙 → Release 正式入口 pending | 通过 | 新 HAP 导入 `ord_secure_host` profile 后，签名/加密完成，页面显示等待 Windows CM 批准；未收到批准前保持未授权 |
 | 格式与独立源码复核 | 通过 | 新模块 rustfmt、diff 检查；两次独立复核涵盖策略、入口、CM 分流和停止服务处理 |
 
-合计运行 **59 项测试**。普通构建有 40 条上游警告；安全配置因为提前分流增加不可达/未使用提示（开发版共 46 条）。没有为清理警告而改写原有业务路径。没有执行全部官方 345 项单测，也没有执行真实 CM 端到端、正式画面/输入或公网验收。
+合计运行 **60 项测试**。普通构建有 40 条上游警告；安全配置因为提前分流增加不可达/未使用提示（开发版共 46 条）。没有为清理警告而改写原有业务路径。没有执行全部官方 345 项单测，也没有完成 CM 窗口点击批准、正式画面/输入或公网验收。
 
-开发版 EXE SHA256：`de24d1da9419e4b9cfaa272aa78d731d4a2368e5bbae0a49ae1c118df5c6a457`。旁边补齐上游 README 指向的 Sciter 运行时，固定到 `c-smile/sciter-sdk` 提交 `f33df075d9eb2f8d252cb88f1b2c8096e56197ed` 的 `bin.win/x64/sciter.dll`，SHA256 为 `4d97528e157c55ef1fabe9e37a9697116ab66660d7da6163f90a3a7abf80dd56`。本轮未启动这个正式程序，不能把文件存在当作 GUI/运行时验收；二进制仅在本机忽略目录，不提交或发布。
+开发版 EXE SHA256：`de24d1da9419e4b9cfaa272aa78d731d4a2368e5bbae0a49ae1c118df5c6a457`。旁边补齐上游 README 指向的 Sciter 运行时，固定到 `c-smile/sciter-sdk` 提交 `f33df075d9eb2f8d252cb88f1b2c8096e56197ed` 的 `bin.win/x64/sciter.dll`，SHA256 为 `4d97528e157c55ef1fabe9e37a9697116ab66660d7da6163f90a3a7abf80dd56`。Release Connection Manager 窗口可启动；Debug 构建会在旧 rust-sciter wrapper 的组合 enum 转换处 panic。临时缓存诊断补丁已恢复，未进入仓库。
 
 ## 构建环境补齐
 
@@ -40,4 +41,4 @@
 
 ## 后续验证
 
-下一步需要隔离的正式进程/CM 运行验证，再接视频及系统输入的执行点授权与撤权。当前“批准”只输出非媒体能力信息，不能打开键鼠；主 SPEC 的短期协助凭据且现场批准、完整可信设备/2FA、公网策略、服务安装/旧版本共存和安全审计仍未验收。极短报文兼容限制见 [入口说明](../OFFICIAL-SECURE-ENTRY.md)。
+下一步需要在可枚举的 Windows UI 自动化环境中点击正式 CM 批准并观察控制端收到 PeerInfo；当前协议 pending 已证明连接和权限前置逻辑，CM 点击因本机 Computer Use 未枚举窗口而未完成。之后再接视频及系统输入的执行点授权与撤权。当前“批准”只输出非媒体能力信息，不能打开键鼠；主 SPEC 的短期协助凭据且现场批准、完整可信设备/2FA、公网策略、服务安装/旧版本共存和安全审计仍未验收。极短报文兼容限制见 [入口说明](../OFFICIAL-SECURE-ENTRY.md)。
