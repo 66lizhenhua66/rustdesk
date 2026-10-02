@@ -17,7 +17,10 @@ typedef void (*ControllerSessionCallback)(const char *event_json, void *user);
  * return. Cancel may run on another thread. Destroy only after run returns.
  */
 ControllerSession *controller_session_create(const char *request_json, const char *password, uint32_t timeout_ms);
-/* Persistent isolated demo connection; handshake_ms must be 100..60000.
+/* Persistent connection; handshake_ms must be 100..60000.
+ * request_json expectedPeer defaults to "demo". "secure_host" explicitly
+ * selects the non-media official entry and never authorizes any input.
+ * The peer must match the selected mode; there is no automatic fallback.
  * The event includes confirmationCode while awaiting approval, and x/y/textLength
  * for demo_status. Input is accepted only after explicit Keyboard permission.
  */

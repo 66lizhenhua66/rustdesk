@@ -1,5 +1,7 @@
 # 项目进度
 
+最新更新（2026-10-02）：修复安全构建的 Debug CM 启动崩溃，并将正式/DEMO 模式固定为控制方显式选择；63 项测试、官方 Debug 与双 ABI HAP 构建通过。正式窗口已运行，但窗口读取的应用授权超时，真实批准/拒绝点击仍待本机操作。详见 [本轮验证记录](research/2026-10-02-cm-approval-validation.md)。下面的 2026-09-30 快照保留为前阶段记录。
+
 更新：2026-09-30。当前阶段：Windows / HarmonyOS 非视频 DEMO 已交付，支持持续加密直连、现场批准、独立输入授权、演示窗口光标/文本与撤权。53 项自动化测试、双 ABI HAP/EXE 构建及模拟器到独立 Windows 进程联调通过。视频与真机后移；尚无完整远程桌面画面或公网安全验收。运行入口见 [DEMO.md](DEMO.md)。
 
 本轮继续：用户已亲自试用 DEMO，并选择跳过真机、先接正式 Windows 安全入口。专用 feature、严格监听/握手和官方 Connection/CM 非媒体分支已接入；60 项测试、官方 feature-off/on 编译检查、开发版/Release 链接和鸿蒙到正式入口的 pending 联调通过。CM 窗口点击批准因当前 Windows UI 自动化环境未枚举窗口而未验收，视频及系统输入仍未验收，见 [本轮报告](research/2026-09-30-official-secure-entry-validation.md)。

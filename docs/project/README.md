@@ -16,6 +16,7 @@
 | [PROGRESS.md](PROGRESS.md) | 唯一的当前进度入口，记录结果、证据、阻塞和下一步 |
 | [DEMO.md](DEMO.md) | Windows / HarmonyOS 非视频 DEMO 的构建、安装、连接和撤权操作说明 |
 | [OFFICIAL-SECURE-ENTRY.md](OFFICIAL-SECURE-ENTRY.md) | 正式 Windows 非媒体安全入口的构建开关、显式监听和能力边界 |
+| [research/2026-10-02-cm-approval-validation.md](research/2026-10-02-cm-approval-validation.md) | Debug CM 修复、显式模式绑定、63 项测试和真实审批待办 |
 | [DECISIONS.md](DECISIONS.md) | 已确认方向、提议及其取舍，避免反复讨论 |
 | [specs/001-baseline-and-harmony-feasibility.md](specs/001-baseline-and-harmony-feasibility.md) | 第一阶段范围草案与验收清单 |
 | [specs/002-controller-tech-stack.md](specs/002-controller-tech-stack.md) | 鸿蒙优先的控制端技术栈决策、各层职责与未来平台复用方式 |

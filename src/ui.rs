@@ -81,6 +81,15 @@ pub fn start(args: &mut [String]) {
     allow_err!(sciter::set_options(sciter::RuntimeOptions::ScriptFeatures(
         ALLOW_FILE_IO as u8 | ALLOW_SOCKET_IO as u8 | ALLOW_EVAL as u8 | ALLOW_SYSINFO as u8
     )));
+    #[cfg(all(windows, feature = "ord-secure-host"))]
+    let mut frame = if args.first().map(String::as_str) == Some("--cm") {
+        // The old wrapper transmutes combined flags into an invalid Rust enum.
+        // CM's HTML supplies its own frame; a single valid SW_MAIN is sufficient.
+        sciter::WindowBuilder::main().create()
+    } else {
+        sciter::WindowBuilder::main_window().create()
+    };
+    #[cfg(not(all(windows, feature = "ord-secure-host")))]
     let mut frame = sciter::WindowBuilder::main_window().create();
     #[cfg(windows)]
     allow_err!(sciter::set_options(sciter::RuntimeOptions::UxTheming(true)));

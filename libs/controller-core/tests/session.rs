@@ -195,6 +195,13 @@ fn execute_demo<F>(server_fn: F) -> Vec<Value>
 where
     F: FnOnce(TcpStream, sign::SecretKey) + Send + 'static,
 {
+    execute_persistent(None, server_fn)
+}
+
+fn execute_persistent<F>(expected: Option<&str>, server_fn: F) -> Vec<Value>
+where
+    F: FnOnce(TcpStream, sign::SecretKey) + Send + 'static,
+{
     sodiumoxide::init().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = listener.local_addr().unwrap().to_string();
@@ -206,14 +213,38 @@ where
             .unwrap();
         server_fn(stream, private);
     });
+    let mut request: Value = serde_json::from_str(
+        trusted_request(&endpoint, &public, "123456789")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    if let Some(mode) = expected {
+        request["expectedPeer"] = json!(mode);
+    }
     let task = controller_connection_create(
-        trusted_request(&endpoint, &public, "123456789").as_ptr(),
+        CString::new(request.to_string()).unwrap().as_ptr(),
         CString::new("").unwrap().as_ptr(),
         1500,
     );
     assert!(!task.is_null());
     let mut events = Vec::<Value>::new();
-    controller_session_run(task, Some(collect), &mut events as *mut _ as *mut c_void);
+    if expected == Some("secure_host") {
+        let mut context = DemoCollector {
+            events,
+            task,
+            sends: Vec::new(),
+        };
+        controller_session_run(
+            task,
+            Some(collect_demo),
+            &mut context as *mut _ as *mut c_void,
+        );
+        assert!(context.sends.iter().all(|code| *code == 2));
+        events = context.events;
+    } else {
+        controller_session_run(task, Some(collect), &mut events as *mut _ as *mut c_void);
+    }
     controller_session_destroy(task);
     server.join().unwrap();
     events
@@ -269,7 +300,7 @@ fn persistent_connection_rejects_plain_peer_info() {
 
 #[test]
 fn persistent_connection_accepts_official_secure_host_as_read_only() {
-    let events = execute_demo(|mut stream, key| {
+    let events = execute_persistent(Some("secure_host"), |mut stream, key| {
         let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
         demo_login(
             &mut stream,
@@ -289,6 +320,86 @@ fn persistent_connection_accepts_official_secure_host_as_read_only() {
             && e["authorized"] == false
     }));
     assert!(events.iter().all(|e| e["authorized"] == false));
+}
+
+#[test]
+fn selected_persistent_mode_cannot_be_changed_by_peer() {
+    for (expected, capabilities) in [
+        (
+            None,
+            r#"{"ord_secure_host":1,"media":false,"input_scope":"none"}"#,
+        ),
+        (
+            Some("secure_host"),
+            r#"{"ord_demo":1,"input_scope":"demo_window","width":800,"height":450}"#,
+        ),
+        (
+            Some("secure_host"),
+            r#"{"ord_secure_host":1,"ord_demo":1,"media":false,"input_scope":"none"}"#,
+        ),
+    ] {
+        let events = execute_persistent(expected, move |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            demo_login(&mut stream, &mut cipher, capabilities);
+            let close = receive_encrypted(&mut stream, &mut cipher);
+            assert!(close.has_misc());
+        });
+        assert!(events.iter().any(|e| e["code"] == "UNSUPPORTED_PEER"));
+        assert!(events
+            .iter()
+            .all(|e| e["authenticated"] == false && e["authorized"] == false));
+    }
+}
+
+#[test]
+fn secure_host_rejects_any_permission_grant() {
+    for permission in [
+        permission_info::Permission::Keyboard,
+        permission_info::Permission::File,
+        permission_info::Permission::Audio,
+    ] {
+        let events = execute_persistent(Some("secure_host"), move |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            demo_login(
+                &mut stream,
+                &mut cipher,
+                r#"{"ord_secure_host":1,"media":false,"input_scope":"none"}"#,
+            );
+            let mut msg = Message::new();
+            let mut misc = Misc::new();
+            misc.set_permission_info(PermissionInfo {
+                permission: permission.into(),
+                enabled: true,
+                ..Default::default()
+            });
+            msg.set_misc(misc);
+            send_encrypted(&mut stream, &mut cipher, &msg);
+        });
+        assert!(events.iter().any(|e| e["code"] == "UNEXPECTED_PERMISSION"));
+        assert!(events.iter().all(|e| e["authorized"] == false));
+    }
+}
+
+#[test]
+fn secure_host_rejects_permission_grant_before_approval() {
+    let events = execute_persistent(Some("secure_host"), |mut stream, key| {
+        let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+        let mut challenge = Message::new();
+        challenge.set_hash(Hash {
+            salt: "salt".into(),
+            challenge: "nonce".into(),
+            ..Default::default()
+        });
+        send_encrypted(&mut stream, &mut cipher, &challenge);
+        assert!(receive_encrypted(&mut stream, &mut cipher).has_login_request());
+        send_permission(&mut stream, &mut cipher, true);
+    });
+    assert!(events
+        .iter()
+        .any(|event| event["code"] == "UNEXPECTED_PERMISSION"));
+    assert!(events
+        .iter()
+        .all(|event| event["authenticated"] == false && event["authorized"] == false));
 }
 
 fn send_permission(stream: &mut TcpStream, cipher: &mut Encrypt, enabled: bool) {

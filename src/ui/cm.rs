@@ -173,6 +173,13 @@ impl SciterConnectionManager {
 }
 
 impl sciter::EventHandler for SciterConnectionManager {
+    #[cfg(all(windows, feature = "ord-secure-host"))]
+    fn get_subscription(&mut self) -> Option<sciter::dom::event::EVENT_GROUPS> {
+        // Only script calls are implemented here; attachment notifications are unconditional.
+        // Use a valid single flag instead of the old default's invalid enum BitOr.
+        Some(sciter::dom::event::EVENT_GROUPS::HANDLE_SCRIPTING_METHOD_CALL)
+    }
+
     fn attached(&mut self, root: HELEMENT) {
         *self.ui_handler.element.lock().unwrap() = Some(Element::from(root));
     }

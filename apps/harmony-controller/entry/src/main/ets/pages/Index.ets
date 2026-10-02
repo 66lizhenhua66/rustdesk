@@ -569,7 +569,8 @@ struct Index {
       peerId: profile.peerId,
       peerPublicKey: profile.peerPublicKey,
       peerFingerprint: profile.peerFingerprint.length > 0 ? profile.peerFingerprint : null,
-      minimumKxVersion: 1
+      minimumKxVersion: 1,
+      expectedPeer: 'secure_host'
     });
     const ownerEpoch = this.epoch;
     this.status = '正在连接正式 Windows 安全入口；当前不会启动画面或输入。';
@@ -579,7 +580,7 @@ struct Index {
         if (event.state === 'connected') {
           this.demoConnected = event.verified && event.authenticated;
           this.status = this.demoConnected
-            ? '正式安全入口已通过加密连接，等待 Windows 本机批准；当前只读。'
+            ? 'Windows 本机已批准，正式安全入口已连接；当前未开放画面或输入。'
             : '正式入口登录状态不一致；操作未授权。';
         } else if (event.state === 'permissions_changed') {
           this.demoAuthorized = false;

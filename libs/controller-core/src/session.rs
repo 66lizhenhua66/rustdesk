@@ -48,6 +48,7 @@ struct Request {
     peer_public_key: String,
     peer_fingerprint: Option<String>,
     minimum_kx_version: Option<u32>,
+    expected_peer: Option<PersistentPeer>,
 }
 
 pub struct ControllerSession {
@@ -60,6 +61,7 @@ pub struct ControllerSession {
     cancelled: AtomicBool,
     socket: Mutex<Option<TcpStream>>,
     demo: bool,
+    expected_peer: PersistentPeer,
     connected: AtomicBool,
     authorized: AtomicBool,
     pending: Mutex<VecDeque<DemoInput>>,
@@ -110,6 +112,9 @@ fn create(
     let Ok(request) = serde_json::from_str::<Request>(input) else {
         return ptr::null_mut();
     };
+    if !demo && request.expected_peer.is_some() {
+        return ptr::null_mut();
+    }
     let Ok(endpoint) = request.endpoint.parse::<SocketAddr>() else {
         return ptr::null_mut();
     };
@@ -146,6 +151,7 @@ fn create(
         cancelled: AtomicBool::new(false),
         socket: Mutex::new(None),
         demo,
+        expected_peer: request.expected_peer.unwrap_or(PersistentPeer::Demo),
         connected: AtomicBool::new(false),
         authorized: AtomicBool::new(false),
         pending: Mutex::new(VecDeque::new()),
@@ -540,7 +546,8 @@ fn response(
     message
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum PersistentPeer {
     Demo,
     SecureHost,
@@ -550,6 +557,9 @@ fn persistent_peer(additions: &str) -> Option<PersistentPeer> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(additions) else {
         return None;
     };
+    if value.get("ord_demo").is_some() && value.get("ord_secure_host").is_some() {
+        return None;
+    }
     if value.get("ord_demo").and_then(|v| v.as_u64()) == Some(1)
         && value.get("input_scope").and_then(|v| v.as_str()) == Some("demo_window")
         && value.get("width").and_then(|v| v.as_u64()) == Some(800)
@@ -579,13 +589,10 @@ fn run_secure_host(
             match message.union {
                 Some(message::message::Union::Misc(misc)) => match misc.union {
                     Some(message::misc::Union::PermissionInfo(permission)) => {
-                        if permission.permission.enum_value()
-                            == Ok(permission_info::Permission::Keyboard)
-                            && permission.enabled
-                        {
+                        if permission.enabled {
                             return Err(Failure::failed(
                                 "UNEXPECTED_PERMISSION",
-                                "Formal secure entry cannot grant input in this phase",
+                                "Formal secure entry cannot grant capabilities in this phase",
                             ));
                         }
                         demo_event(
@@ -895,7 +902,9 @@ fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, us
                 Some(message::message::Union::LoginResponse(login)) => match login.union {
                     Some(login_response::Union::PeerInfo(peer)) => {
                         if task.demo {
-                            let Some(peer_kind) = persistent_peer(&peer.platform_additions) else {
+                            let Some(peer_kind) = persistent_peer(&peer.platform_additions)
+                                .filter(|kind| *kind == task.expected_peer)
+                            else {
                                 let mut misc = Misc::new();
                                 misc.set_close_reason("Unsupported persistent peer".to_owned());
                                 let mut close = Message::new();
@@ -964,7 +973,18 @@ fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, us
                 },
                 Some(message::message::Union::TestDelay(_)) => {}
                 Some(message::message::Union::Misc(misc))
-                    if matches!(misc.union, Some(message::misc::Union::PermissionInfo(_))) => {}
+                    if matches!(misc.union, Some(message::misc::Union::PermissionInfo(_))) =>
+                {
+                    if task.demo
+                        && task.expected_peer == PersistentPeer::SecureHost
+                        && matches!(misc.union, Some(message::misc::Union::PermissionInfo(p)) if p.enabled)
+                    {
+                        return Err(Failure::failed(
+                            "UNEXPECTED_PERMISSION",
+                            "Formal secure entry cannot grant capabilities in this phase",
+                        ));
+                    }
+                }
                 _ => {
                     return Err(Failure::failed(
                         "PROTOCOL_FAILED",
