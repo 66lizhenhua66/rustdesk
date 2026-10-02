@@ -1,6 +1,20 @@
 import controller, { ControllerEvent } from 'libcontroller.so';
 import { preferences } from '@kit.ArkData';
 
+class RemoteScreenSurface extends XComponentController {
+  private created: (surfaceId: string) => void;
+  private destroyed: (surfaceId: string) => void;
+
+  constructor(created: (surfaceId: string) => void, destroyed: (surfaceId: string) => void) {
+    super();
+    this.created = created;
+    this.destroyed = destroyed;
+  }
+
+  onSurfaceCreated(surfaceId: string): void { this.created(surfaceId); }
+  onSurfaceDestroyed(surfaceId: string): void { this.destroyed(surfaceId); }
+}
+
 interface Profile {
   id: string;
   name: string;
@@ -62,6 +76,13 @@ struct Index {
   @State private demoTextLength: number = 0;
   @State private demoText: string = '';
   @State private demoInputStatus: string = '';
+  @State private screenWidth: number = 1280;
+  @State private screenHeight: number = 720;
+  @State private screenFrames: number = 0;
+  @State private screenRendered: number = 0;
+  @State private screenBytes: number = 0;
+  private screenController: XComponentController = new XComponentController();
+  private screenSurfaceId: string = '';
   private store?: preferences.Preferences;
   private currentTask: number = 0;
   private epoch: number = 0;
@@ -99,6 +120,10 @@ struct Index {
     this.currentTask = 0;
     this.probing = false;
     this.activeKind = '';
+    this.screenSurfaceId = '';
+    this.screenFrames = 0;
+    this.screenRendered = 0;
+    this.screenBytes = 0;
     this.demoConnected = false;
     this.demoAuthorized = false;
     this.confirmationCode = '';
@@ -407,6 +432,10 @@ struct Index {
     this.currentTask = 0;
     this.probing = false;
     this.activeKind = '';
+    this.screenSurfaceId = '';
+    this.screenFrames = 0;
+    this.screenRendered = 0;
+    this.screenBytes = 0;
     this.demoConnected = false;
     this.demoAuthorized = false;
     this.confirmationCode = '';
@@ -628,6 +657,74 @@ struct Index {
     }
   }
 
+  private prepareScreen(profile: Profile): void {
+    this.cancelActive();
+    if (profile.mode !== 'direct' || !profile.peerId || !profile.peerPublicKey) {
+      this.status = '请先保存被控端的设备 ID 和可信公钥。';
+      return;
+    }
+    const ownerEpoch = this.epoch;
+    this.screenWidth = 1280;
+    this.screenHeight = 720;
+    this.screenController = new RemoteScreenSurface((surfaceId: string) => {
+      if (!this.visible || this.epoch !== ownerEpoch || this.activeKind !== 'screen' || this.currentTask !== 0) { return; }
+      this.screenSurfaceId = surfaceId;
+      this.connectScreen(profile, surfaceId, ownerEpoch);
+    }, (surfaceId: string) => {
+      if (this.epoch === ownerEpoch && surfaceId === this.screenSurfaceId) {
+        this.cancelActive();
+        this.status = '画面视图已关闭，连接已断开。';
+      }
+    });
+    this.probing = true;
+    this.activeKind = 'screen';
+    this.status = '正在准备画面区域…';
+  }
+
+  private connectScreen(profile: Profile, surfaceId: string, ownerEpoch: number): void {
+    const request = JSON.stringify({
+      endpoint: profile.target,
+      peerId: profile.peerId,
+      peerPublicKey: profile.peerPublicKey,
+      peerFingerprint: profile.peerFingerprint.length > 0 ? profile.peerFingerprint : null,
+      minimumKxVersion: 1,
+      expectedPeer: 'secure_video'
+    });
+    try {
+      const task = controller.connectScreen(request, surfaceId, 60000, (event: ControllerEvent) => {
+        if (!this.visible || this.epoch !== ownerEpoch || event.taskId !== this.currentTask) { return; }
+        if (event.state === 'connected') {
+          this.demoConnected = event.verified && event.authenticated;
+          this.screenWidth = event.videoWidth ?? 1280;
+          this.screenHeight = event.videoHeight ?? 720;
+          this.status = '本机已批准，正在等待第一帧画面；仅查看。';
+        } else if (event.state === 'video_status') {
+          this.screenFrames = event.frames ?? this.screenFrames;
+          this.screenBytes = event.bytes ?? this.screenBytes;
+        } else if (event.state === 'video_rendered') {
+          this.screenRendered = event.renderedFrames ?? this.screenRendered;
+          this.status = '正在查看 Windows 主显示器；未开放键鼠输入。';
+        } else if (event.state === 'permissions_changed') {
+          this.demoAuthorized = false;
+        } else if (event.code === 'AWAITING_APPROVAL') {
+          this.status = '等待 Windows 本机批准查看屏幕；批准前不会采集画面。';
+        } else if (event.state === 'closed' || event.state === 'failed' || event.state === 'blocked' || event.state === 'cancelled') {
+          const code = event.code;
+          this.cancelActive();
+          this.status = code === 'DISCONNECTED' || code === 'CANCELLED'
+            ? '画面连接已结束。' : `无法继续显示画面（${code}）。请检查被控端状态后重新连接。`;
+        } else {
+          this.status = this.authenticationMessage(event);
+        }
+      });
+      if (task <= 0) { throw new Error('任务启动失败'); }
+      this.currentTask = task;
+    } catch {
+      this.cancelActive();
+      this.status = '画面连接无法启动，请检查显示区域和连接资料后重试。';
+    }
+  }
+
   private utf8Length(value: string): number {
     let length = 0;
     for (let index = 0; index < value.length; index++) {
@@ -728,6 +825,8 @@ struct Index {
                         .enabled(!this.probing && !this.saving).onClick(() => this.startDemo(profile))
                       Button('连接正式入口').margin({ right: 8, bottom: 8 })
                         .enabled(!this.probing && !this.saving).onClick(() => this.startOfficialSecure(profile))
+                      Button('查看桌面（只读）').margin({ right: 8, bottom: 8 })
+                        .enabled(!this.probing && !this.saving).onClick(() => this.prepareScreen(profile))
                     }
                   }
                   Button('编辑').margin({ right: 8, bottom: 8 }).enabled(!this.saving)
@@ -735,7 +834,7 @@ struct Index {
                   Button('删除').margin({ right: 8, bottom: 8 }).enabled(!this.saving)
                     .onClick(() => this.deleteProfile(profile))
                   if (this.probing && profile.mode === 'direct') {
-                    Button(this.activeKind === 'demo' || this.activeKind === 'secure' ? '断开连接' :
+                    Button(this.activeKind === 'demo' || this.activeKind === 'secure' || this.activeKind === 'screen' ? '断开连接' :
                       this.activeKind === 'auth' ? '取消登录验证' : '取消预检').margin({ bottom: 8 })
                       .onClick(() => { this.cancelActive(); this.status = '连接或检查已取消；操作未授权。'; })
                   }
@@ -793,6 +892,18 @@ struct Index {
                     if (this.demoInputStatus.length > 0) {
                       Text(this.demoInputStatus).fontSize(13).fontColor('#63777B').width('100%')
                     }
+                  }.width('100%').alignItems(HorizontalAlign.Start)
+                }
+                if (this.activeKind === 'screen' && profile.mode === 'direct') {
+                  Column({ space: 10 }) {
+                    Text(this.screenRendered > 0 ? 'Windows 主屏 · 仅查看' : this.demoConnected ? '正在等待画面' : '等待本机批准查看')
+                      .fontSize(15).fontColor('#176B78').width('100%')
+                    XComponent({ type: XComponentType.SURFACE, controller: this.screenController })
+                      .width('100%').aspectRatio(this.screenWidth / this.screenHeight).backgroundColor('#10181B')
+                    Text(`${this.screenWidth} × ${this.screenHeight} · 收到 ${this.screenFrames} 帧 · 显示 ${this.screenRendered} 帧 · ${Math.round(this.screenBytes / 1024)} KiB`)
+                      .fontSize(12).fontColor('#63777B').width('100%')
+                    Text('触摸此画面不会操作电脑。离开页面或断开连接会停止显示。')
+                      .fontSize(13).fontColor('#63777B').width('100%')
                   }.width('100%').alignItems(HorizontalAlign.Start)
                 }
                 if (this.activeKind === 'secure' && profile.mode === 'direct') {

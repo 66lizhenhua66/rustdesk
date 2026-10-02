@@ -30,6 +30,8 @@
 | [research/2026-09-30-official-secure-entry-validation.md](research/2026-09-30-official-secure-entry-validation.md) | 59 项测试、官方 Windows 双配置编译、开发版 EXE 和真实未验收项 |
 | [research/2026-09-30-interactive-demo-validation.md](research/2026-09-30-interactive-demo-validation.md) | 53 项测试、最终 EXE/HAP、模拟器到 Windows 联调与回归范围 |
 | [research/2026-09-30-harmony-bridge-validation.md](research/2026-09-30-harmony-bridge-validation.md) | 双 ABI 构建、模拟器 6/6 与生命周期验证结果及未验证边界 |
+| [plans/2026-10-02-readonly-screen.md](plans/2026-10-02-readonly-screen.md) | Windows 正式安全入口到鸿蒙原生只读画面的实现计划 |
+| [research/2026-10-02-readonly-screen-validation.md](research/2026-10-02-readonly-screen-validation.md) | 只读画面的测试、构建、模拟器与现场验收边界 |
 | [research/](research/) | 带日期和来源的调研快照，不代表当前实现能力 |
 
 ## 维护约定

@@ -1,4 +1,4 @@
-param([string]$Listen = '127.0.0.1:21120', [string]$Allow = '')
+param([string]$Listen = '127.0.0.1:21120', [string]$Allow = '', [switch]$Video)
 
 $ErrorActionPreference = 'Stop'
 $cmRepository = Split-Path $PSScriptRoot -Parent
@@ -14,11 +14,12 @@ if (-not [Net.IPAddress]::IsLoopback($cmEndpoint.Address) -and [string]::IsNullO
 New-Item -ItemType Directory -Force -Path $cmArtifacts | Out-Null
 $cmProfile = Join-Path $cmArtifacts 'official-current-profile.json'
 $cmEnv = @{}
-foreach ($cmKey in @('ORD_SECURE_LISTEN', 'ORD_SECURE_ALLOW', 'ORD_SECURE_PROFILE_OUT')) { $cmEnv[$cmKey] = [Environment]::GetEnvironmentVariable($cmKey, 'Process') }
+foreach ($cmKey in @('ORD_SECURE_LISTEN', 'ORD_SECURE_ALLOW', 'ORD_SECURE_PROFILE_OUT', 'ORD_SECURE_VIDEO')) { $cmEnv[$cmKey] = [Environment]::GetEnvironmentVariable($cmKey, 'Process') }
 try {
   $env:ORD_SECURE_LISTEN = $Listen
   $env:ORD_SECURE_ALLOW = $Allow
   $env:ORD_SECURE_PROFILE_OUT = $cmProfile
+  $env:ORD_SECURE_VIDEO = if ($Video) { '1' } else { '0' }
   $cmServer = Start-Process -FilePath $cmExe -ArgumentList '--server' -WorkingDirectory $cmRepository -WindowStyle Hidden -PassThru
   $cmWindow = Start-Process -FilePath $cmExe -ArgumentList '--cm' -WorkingDirectory $cmRepository -WindowStyle Normal -PassThru
   Write-Output "Server PID: $($cmServer.Id); CM PID: $($cmWindow.Id)"

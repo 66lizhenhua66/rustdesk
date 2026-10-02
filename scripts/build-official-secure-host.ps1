@@ -3,6 +3,7 @@ param(
   [string]$LibClangPath = 'G:\Huawei\DevEco Studio\sdk\default\openharmony\native\llvm\bin',
   [switch]$CheckOnly,
   [switch]$TestSecureGate,
+  [switch]$TestVideo,
   [switch]$DebugBuild
 )
 
@@ -45,7 +46,9 @@ try {
   $env:BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc = $secureSaved['BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc'] + ' --target=x86_64-pc-windows-msvc -resource-dir="' + $secureClangResources + '"'
   $env:VCPKG_ROOT = $VcpkgRoot
   $env:LIBCLANG_PATH = $LibClangPath
-  if ($TestSecureGate) {
+  if ($TestVideo) {
+    & cargo test --manifest-path (Join-Path $secureRepository 'Cargo.toml') --locked -p rustdesk --lib --no-default-features --features ord-secure-host secure_video::tests -- --test-threads=1
+  } elseif ($TestSecureGate) {
     & cargo test --manifest-path (Join-Path $secureRepository 'Cargo.toml') --locked -p rustdesk --lib --no-default-features --features ord-secure-host cm_approval_requires_this_pending_login_once -- --test-threads=1
   } elseif ($CheckOnly) {
     & cargo check --manifest-path (Join-Path $secureRepository 'Cargo.toml') --locked -p rustdesk --lib --no-default-features --features ord-secure-host

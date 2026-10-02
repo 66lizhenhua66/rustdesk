@@ -1,4 +1,22 @@
-# libsodium for OHOS
+# Native libraries for OHOS
+
+## libvpx for OHOS
+
+`build-libvpx-ohos.ps1` builds decoder-only libvpx 1.15.2 for `arm64-v8a` and
+`x86_64` with the DevEco Native SDK. It verifies the archive SHA512, refreshes
+its own `artifacts/libvpx-ohos/source/` extraction, and builds only that source.
+It downloads the pinned archive when the local copy is absent. The output is
+`artifacts/libvpx-ohos/<ABI>/lib/libvpx.a` with matching headers in `include/`.
+The static archives and intermediate build directories are ignored by Git.
+Pass `-MsysBin` when the vcpkg MSYS2 tools are installed elsewhere.
+
+Source: [webmproject/libvpx v1.15.2](https://github.com/webmproject/libvpx/releases/tag/v1.15.2),
+archive `webmproject-libvpx-v1.15.2.tar.gz`, SHA512
+`824fe8719e4115ec359ae0642f5e1cea051d458f09eb8c24d60858cf082f66e411215e23228173ab154044bafbdfbb2d93b589bb726f55b233939b91f928aae0`.
+License: BSD 3-Clause, reproduced in the source archive's `LICENSE` file.
+The build disables assembly and the encoder for a portable VP8 decoder.
+
+## libsodium for OHOS
 
 `build-libsodium-ohos.ps1` builds the libsodium 1.0.18 source bundled with
 `libsodium-sys` 0.2.7 for `arm64-v8a` and `x86_64` using the DevEco Native SDK.

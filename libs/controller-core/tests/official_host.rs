@@ -202,3 +202,35 @@ fn approval_advertises_no_media_or_input_and_public_export_has_no_secret() {
     remote_controller_core::controller_free_string(output);
     assert_eq!(parsed["ok"], true);
 }
+
+#[test]
+fn video_request_requires_vp8_preference_and_video_profile_is_bounded() {
+    use message_proto::{supported_decoding::PreferCodec, OptionMessage, SupportedDecoding};
+
+    let mut login = LoginRequest::new();
+    assert!(!policy::requests_video(&login));
+    let mut decoding = SupportedDecoding::new();
+    decoding.ability_vp8 = 1;
+    login.option = Some(OptionMessage {
+        supported_decoding: Some(decoding.clone()).into(),
+        ..Default::default()
+    })
+    .into();
+    assert!(!policy::requests_video(&login));
+    decoding.prefer = PreferCodec::VP8.into();
+    login.option.as_mut().unwrap().supported_decoding = Some(decoding).into();
+    assert!(policy::requests_video(&login));
+
+    let message = policy::approved_video_peer_info("1.5.0", 1280, 720);
+    let peer = message.login_response().peer_info();
+    assert_eq!(peer.displays.len(), 1);
+    assert_eq!(
+        (peer.displays[0].width, peer.displays[0].height),
+        (1280, 720)
+    );
+    assert_eq!(peer.current_display, 0);
+    let additions: serde_json::Value = serde_json::from_str(&peer.platform_additions).unwrap();
+    assert_eq!(additions["media"], true);
+    assert_eq!(additions["video_codec"], "vp8");
+    assert_eq!(additions["input_scope"], "none");
+}

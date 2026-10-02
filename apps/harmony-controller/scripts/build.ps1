@@ -16,6 +16,8 @@ $env:JAVA_HOME = Join-Path $DevEcoRoot 'jbr'
 $env:PATH = (Join-Path $DevEcoRoot 'tools\node') + ';' + (Join-Path $env:JAVA_HOME 'bin') + ';' + $env:PATH
 $sodiumScript = Join-Path $repositoryRoot 'libs\controller-core\native\build-libsodium-ohos.ps1'
 & $sodiumScript -SdkNative (Join-Path $controllerSdk 'default\openharmony\native')
+$vpxScript = Join-Path $repositoryRoot 'libs\controller-core\native\build-libvpx-ohos.ps1'
+& $vpxScript -SdkNative (Join-Path $controllerSdk 'default\openharmony\native')
 $savedSodium = @{}
 foreach ($sodiumVariable in @('SODIUM_LIB_DIR', 'SODIUM_SHARED', 'SODIUM_STATIC', 'SODIUM_USE_PKG_CONFIG')) {
   $savedSodium[$sodiumVariable] = [Environment]::GetEnvironmentVariable($sodiumVariable, 'Process')

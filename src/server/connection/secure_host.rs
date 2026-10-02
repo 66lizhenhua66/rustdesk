@@ -1,4 +1,5 @@
 use super::super::secure_host_policy::{self, Request};
+use super::super::secure_video;
 use super::*;
 
 fn approve_pending(pending: &mut bool, authorized: &mut bool, requires_2fa: bool) -> bool {
@@ -11,6 +12,14 @@ fn approve_pending(pending: &mut bool, authorized: &mut bool, requires_2fa: bool
 }
 
 impl Connection {
+    async fn send_secure_video_error(&mut self) {
+        let mut misc = Misc::new();
+        misc.set_close_reason("Screen unavailable".to_owned());
+        let mut message = Message::new();
+        message.set_misc(misc);
+        let _ = self.stream.send(&message).await;
+    }
+
     async fn send_secure_permissions(&mut self) -> bool {
         for message in secure_host_policy::permission_snapshot() {
             if self.stream.send(&message).await.is_err() {
@@ -63,6 +72,7 @@ impl Connection {
         let login_deadline = started + LOGIN_GRACE;
         let session_deadline = started + Duration::from_secs(30 * 60);
         let mut stop_tick = time::interval(Duration::from_secs(1));
+        let mut video_worker: Option<secure_video::Worker> = None;
         loop {
             if super::super::secure_host::is_stopped() {
                 break;
@@ -86,11 +96,40 @@ impl Connection {
                         ) => {
                             self.unauthorized_id = None;
                             self.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);
-                            if self.stream.send(&secure_host_policy::approved_peer_info(VERSION)).await.is_err() {
+                            let video_requested = secure_host_policy::requests_video(&self.lr);
+                            if video_requested && !secure_video::allowed() {
+                                self.send_secure_video_error().await;
+                                break;
+                            }
+                            let video_dimensions = if video_requested {
+                                let Ok(Ok(dimensions)) = tokio::task::spawn_blocking(secure_video::dimensions).await else {
+                                    self.send_secure_video_error().await;
+                                    break;
+                                };
+                                Some(dimensions)
+                            } else {
+                                None
+                            };
+                            let info = if let Some(dimensions) = video_dimensions {
+                                secure_host_policy::approved_video_peer_info(
+                                    VERSION, dimensions.width as _, dimensions.height as _)
+                            } else {
+                                secure_host_policy::approved_peer_info(VERSION)
+                            };
+                            if self.stream.send(&info).await.is_err() {
                                 break;
                             }
                             if !self.send_secure_permissions().await {
                                 break;
+                            }
+                            if let Some(dimensions) = video_dimensions {
+                                match secure_video::start(dimensions) {
+                                    Ok(worker) => video_worker = Some(worker),
+                                    Err(_) => {
+                                        self.send_secure_video_error().await;
+                                        break;
+                                    }
+                                }
                             }
                         }
                         ipc::Data::Close => break,
@@ -106,6 +145,22 @@ impl Connection {
                 Some(_) = rx.recv() => {}
                 Some(_) = rx_video.recv() => {}
                 Some(_) = rx_from_authed.recv() => {}
+                frame = async {
+                    match &mut video_worker {
+                        Some(worker) => worker.receiver.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match frame {
+                        Some(Ok(message)) => {
+                            if self.stream.send(&message).await.is_err() { break; }
+                        }
+                        Some(Err(())) | None => {
+                            self.send_secure_video_error().await;
+                            break;
+                        }
+                    }
+                }
                 packet = self.stream.next() => {
                     let Some(Ok(bytes)) = packet else { break; };
                     // Upstream decrypt passes very short plaintext through. No valid strict
@@ -120,6 +175,7 @@ impl Connection {
                 }
             }
         }
+        drop(video_worker);
         self.secure_login_pending = false;
         self.on_close("Secure host session ended", false).await;
     }
@@ -131,6 +187,9 @@ impl Connection {
                     return false;
                 };
                 if !secure_host_policy::valid_login(&lr, &Config::get_id()) {
+                    return false;
+                }
+                if secure_host_policy::requests_video(&lr) && !secure_video::allowed() {
                     return false;
                 }
                 if self.require_2fa.is_some() {

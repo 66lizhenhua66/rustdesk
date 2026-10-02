@@ -1,8 +1,8 @@
 use std::net::{IpAddr, SocketAddr};
 
 use base::message_proto::{
-    message, misc, permission_info::Permission, LoginRequest, LoginResponse, Message, Misc,
-    PeerInfo, PermissionInfo, SignedId,
+    message, misc, permission_info::Permission, supported_decoding::PreferCodec, DisplayInfo,
+    LoginRequest, LoginResponse, Message, Misc, PeerInfo, PermissionInfo, SignedId,
 };
 use hbb_common::{
     bail,
@@ -179,6 +179,15 @@ pub fn valid_login(lr: &LoginRequest, id: &str) -> bool {
             !c.is_control() && !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
 }
 
+pub fn requests_video(lr: &LoginRequest) -> bool {
+    lr.option
+        .as_ref()
+        .and_then(|option| option.supported_decoding.as_ref())
+        .is_some_and(|decoding| {
+            decoding.ability_vp8 == 1 && decoding.prefer.enum_value() == Ok(PreferCodec::VP8)
+        })
+}
+
 pub fn permission_snapshot() -> Vec<Message> {
     [
         Permission::Keyboard,
@@ -212,6 +221,29 @@ pub fn approved_peer_info(version: &str) -> Message {
         version: version.to_owned(),
         platform_additions:
             serde_json::json!({"ord_secure_host":1,"media":false,"input_scope":"none"}).to_string(),
+        ..Default::default()
+    });
+    let mut message = Message::new();
+    message.set_login_response(login);
+    message
+}
+
+pub fn approved_video_peer_info(version: &str, width: i32, height: i32) -> Message {
+    let mut login = LoginResponse::new();
+    login.set_peer_info(PeerInfo {
+        platform: "Windows".to_owned(),
+        version: version.to_owned(),
+        displays: vec![DisplayInfo {
+            width,
+            height,
+            online: true,
+            ..Default::default()
+        }],
+        current_display: 0,
+        platform_additions: serde_json::json!({
+            "ord_secure_host": 1, "media": true, "video_codec": "vp8", "input_scope": "none"
+        })
+        .to_string(),
         ..Default::default()
     });
     let mut message = Message::new();

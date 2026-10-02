@@ -25,12 +25,14 @@ use crate::{
     bytes_codec::BytesCodec,
     protos::message::{
         self, login_response, option_message, permission_info, Hash, KeyEvent, LoginRequest,
-        Message, Misc, MouseEvent, OptionMessage, PublicKey,
+        Message, Misc, MouseEvent, OptionMessage, PublicKey, SupportedDecoding,
     },
     upstream_crypto::{self, Encrypt, KxTranscript, KX_VERSION_LATEST},
 };
 
 const FRAME_LIMIT: usize = 64 * 1024;
+const VIDEO_FRAME_LIMIT: usize = 8 * 1024 * 1024;
+const VIDEO_PART_LIMIT: usize = 2 * 1024 * 1024;
 const SLICE: Duration = Duration::from_millis(100);
 const DEMO_LIMIT: usize = 64;
 const DEMO_LIFETIME: Duration = Duration::from_secs(30 * 60);
@@ -68,6 +70,8 @@ pub struct ControllerSession {
 }
 
 pub type ControllerSessionCallback = unsafe extern "C" fn(*const c_char, *mut c_void);
+pub type ControllerVideoCallback =
+    unsafe extern "C" fn(*const u8, u32, u32, u32, i64, u8, *mut c_void);
 
 #[no_mangle]
 pub extern "C" fn controller_session_create(
@@ -406,6 +410,7 @@ impl Wire {
     }
 
     fn decode_message(mut bytes: BytesMut, cipher: &mut Encrypt) -> Result<Message, Failure> {
+        let frame_length = bytes.len();
         if bytes.len() < secretbox::MACBYTES || cipher.2 == u64::MAX {
             return Err(Failure::failed(
                 "INVALID_CIPHERTEXT",
@@ -415,8 +420,14 @@ impl Wire {
         cipher
             .dec(&mut bytes)
             .map_err(|_| Failure::failed("INVALID_CIPHERTEXT", "Invalid encrypted message"))?;
-        Message::parse_from_bytes(&bytes)
-            .map_err(|_| Failure::failed("PROTOCOL_FAILED", "Invalid encrypted message"))
+        let message = Message::parse_from_bytes(&bytes)
+            .map_err(|_| Failure::failed("PROTOCOL_FAILED", "Invalid encrypted message"))?;
+        if frame_length > FRAME_LIMIT
+            && !matches!(&message.union, Some(message::message::Union::VideoFrame(_)))
+        {
+            return Err(Failure::failed("INVALID_FRAME", "Control packet too large"));
+        }
+        Ok(message)
     }
 
     fn send(
@@ -498,6 +509,7 @@ fn response(
     challenge: &Hash,
     peer_id: &str,
     demo: bool,
+    video: bool,
 ) -> Message {
     let digest = if password.is_empty() {
         Vec::new()
@@ -520,7 +532,7 @@ fn response(
     };
     password.zeroize();
     let option = OptionMessage {
-        disable_keyboard: (if demo {
+        disable_keyboard: (if demo && !video {
             option_message::BoolOption::No
         } else {
             option_message::BoolOption::Yes
@@ -532,6 +544,15 @@ fn response(
         enable_file_transfer: option_message::BoolOption::No.into(),
         block_input: option_message::BoolOption::No.into(),
         privacy_mode: option_message::BoolOption::No.into(),
+        supported_decoding: if video {
+            MessageField::some(SupportedDecoding {
+                ability_vp8: 1,
+                prefer: message::supported_decoding::PreferCodec::VP8.into(),
+                ..Default::default()
+            })
+        } else {
+            MessageField::none()
+        },
         ..Default::default()
     };
     let mut message = Message::new();
@@ -551,6 +572,140 @@ fn response(
 enum PersistentPeer {
     Demo,
     SecureHost,
+    SecureVideo,
+}
+
+fn video_dimensions(peer: &message::PeerInfo) -> Option<(u32, u32)> {
+    let value: serde_json::Value = serde_json::from_str(&peer.platform_additions).ok()?;
+    let fields = value.as_object()?;
+    if fields.len() != 4
+        || fields.get("ord_secure_host")?.as_u64()? != 1
+        || fields.get("media")?.as_bool()? != true
+        || fields.get("video_codec")?.as_str()? != "vp8"
+        || fields.get("input_scope")?.as_str()? != "none"
+        || peer.displays.len() != 1
+        || peer.current_display != 0
+    {
+        return None;
+    }
+    let display = &peer.displays[0];
+    if !(1..=1280).contains(&display.width) || !(1..=720).contains(&display.height) {
+        return None;
+    }
+    Some((display.width as u32, display.height as u32))
+}
+
+fn run_secure_video(
+    task: &ControllerSession,
+    callback: Option<ControllerSessionCallback>,
+    video_callback: ControllerVideoCallback,
+    user: *mut c_void,
+    wire: &mut Wire,
+    cipher: &mut Encrypt,
+    width: u32,
+    height: u32,
+) -> Result<(), Failure> {
+    let deadline = Instant::now() + DEMO_LIFETIME;
+    let mut first_frame = true;
+    let mut frames = 0u64;
+    let mut bytes = 0u64;
+    let mut last_status = Instant::now();
+    loop {
+        if let Some(message) = wire.poll_message(task, deadline, cipher)? {
+            match message.union {
+                Some(message::message::Union::VideoFrame(video)) => {
+                    let Some(message::video_frame::Union::Vp8s(vp8)) = video.union else {
+                        return Err(Failure::failed("INVALID_VIDEO", "Unsupported video codec"));
+                    };
+                    if video.display != 0 || !(1..=4).contains(&vp8.frames.len()) {
+                        return Err(Failure::failed(
+                            "INVALID_VIDEO",
+                            "Invalid video display or frame count",
+                        ));
+                    }
+                    let mut total = 0usize;
+                    for frame in &vp8.frames {
+                        if frame.data.is_empty() || frame.data.len() > VIDEO_PART_LIMIT {
+                            return Err(Failure::failed(
+                                "INVALID_VIDEO",
+                                "Invalid encoded video size",
+                            ));
+                        }
+                        total = total.saturating_add(frame.data.len());
+                        if total > VIDEO_FRAME_LIMIT || first_frame && !frame.key {
+                            return Err(Failure::failed(
+                                "INVALID_VIDEO",
+                                "Invalid initial or oversized video frame",
+                            ));
+                        }
+                        first_frame = false;
+                    }
+                    for frame in &vp8.frames {
+                        status(task, deadline)?;
+                        // SAFETY: The borrowed frame bytes remain alive through this synchronous call.
+                        unsafe {
+                            video_callback(
+                                frame.data.as_ptr(),
+                                frame.data.len() as u32,
+                                width,
+                                height,
+                                frame.pts,
+                                frame.key as u8,
+                                user,
+                            )
+                        };
+                        frames += 1;
+                        bytes += frame.data.len() as u64;
+                        status(task, deadline)?;
+                    }
+                    if last_status.elapsed() >= Duration::from_secs(1) {
+                        demo_event(
+                            callback,
+                            user,
+                            "video_status",
+                            "VIDEO_STATUS",
+                            "Video streaming",
+                            true,
+                            true,
+                            false,
+                            json!({"frames":frames,"bytes":bytes}),
+                        );
+                        last_status = Instant::now();
+                    }
+                }
+                Some(message::message::Union::Misc(misc)) => match misc.union {
+                    Some(message::misc::Union::PermissionInfo(permission))
+                        if permission.enabled =>
+                    {
+                        return Err(Failure::failed(
+                            "UNEXPECTED_PERMISSION",
+                            "Read-only video cannot grant input",
+                        ));
+                    }
+                    Some(message::misc::Union::PermissionInfo(_)) => {}
+                    Some(message::misc::Union::CloseReason(_)) => {
+                        return Err(Failure::failed(
+                            "DISCONNECTED",
+                            "Peer closed video connection",
+                        ));
+                    }
+                    _ => {
+                        return Err(Failure::failed(
+                            "UNSUPPORTED_MESSAGE",
+                            "Unsupported video message",
+                        ))
+                    }
+                },
+                Some(message::message::Union::TestDelay(_)) => {}
+                _ => {
+                    return Err(Failure::failed(
+                        "UNSUPPORTED_MESSAGE",
+                        "Unsupported video message",
+                    ))
+                }
+            }
+        }
+    }
 }
 
 fn persistent_peer(additions: &str) -> Option<PersistentPeer> {
@@ -742,11 +897,29 @@ fn run_demo(
     }
 }
 
-fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, user: *mut c_void) {
+fn run(
+    task: &ControllerSession,
+    callback: Option<ControllerSessionCallback>,
+    video_callback: Option<ControllerVideoCallback>,
+    video_entry: bool,
+    user: *mut c_void,
+) {
     let deadline = Instant::now() + task.timeout;
     let mut verified = false;
     let result = (|| -> Result<(), Failure> {
         status(task, deadline)?;
+        if video_entry && task.expected_peer != PersistentPeer::SecureVideo {
+            return Err(Failure::failed(
+                "VIDEO_MODE_REQUIRED",
+                "Video entry requires secure_video",
+            ));
+        }
+        if task.expected_peer == PersistentPeer::SecureVideo && video_callback.is_none() {
+            return Err(Failure::failed(
+                "VIDEO_SINK_REQUIRED",
+                "Video callback required",
+            ));
+        }
         event(
             callback,
             user,
@@ -855,7 +1028,13 @@ fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, us
             "Missing login credential",
         ))?;
         let awaiting_approval = password.is_empty();
-        let mut login = response(&mut password, &hash, &task.peer_id, task.demo);
+        let mut login = response(
+            &mut password,
+            &hash,
+            &task.peer_id,
+            task.demo,
+            task.expected_peer == PersistentPeer::SecureVideo,
+        );
         let send_result = wire.send_message(task, deadline, &mut cipher, &login);
         if let Some(message::message::Union::LoginRequest(request)) = login.union.as_mut() {
             request.password.zeroize();
@@ -902,8 +1081,20 @@ fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, us
                 Some(message::message::Union::LoginResponse(login)) => match login.union {
                     Some(login_response::Union::PeerInfo(peer)) => {
                         if task.demo {
+                            let video_size = if task.expected_peer == PersistentPeer::SecureVideo {
+                                video_dimensions(&peer)
+                            } else {
+                                None
+                            };
                             let Some(peer_kind) = persistent_peer(&peer.platform_additions)
                                 .filter(|kind| *kind == task.expected_peer)
+                                .or_else(|| {
+                                    if task.expected_peer == PersistentPeer::SecureVideo {
+                                        video_size.map(|_| PersistentPeer::SecureVideo)
+                                    } else {
+                                        None
+                                    }
+                                })
                             else {
                                 let mut misc = Misc::new();
                                 misc.set_close_reason("Unsupported persistent peer".to_owned());
@@ -922,6 +1113,8 @@ fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, us
                             }
                             let message = if peer_kind == PersistentPeer::Demo {
                                 "Demo connection established"
+                            } else if peer_kind == PersistentPeer::SecureVideo {
+                                "Read-only video connection established"
                             } else {
                                 "Formal secure entry established; read-only"
                             };
@@ -934,10 +1127,33 @@ fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, us
                                 true,
                                 true,
                                 false,
-                                json!({}),
+                                if let Some((width, height)) = video_size {
+                                    json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8"})
+                                } else {
+                                    json!({})
+                                },
                             );
                             return if peer_kind == PersistentPeer::Demo {
                                 run_demo(task, callback, user, &mut wire, &mut cipher)
+                            } else if peer_kind == PersistentPeer::SecureVideo {
+                                wire.codec.set_max_packet_length(VIDEO_FRAME_LIMIT);
+                                let (width, height) = video_size.ok_or(Failure::failed(
+                                    "UNSUPPORTED_PEER",
+                                    "Invalid video peer",
+                                ))?;
+                                run_secure_video(
+                                    task,
+                                    callback,
+                                    video_callback.ok_or(Failure::failed(
+                                        "VIDEO_SINK_REQUIRED",
+                                        "Video callback required",
+                                    ))?,
+                                    user,
+                                    &mut wire,
+                                    &mut cipher,
+                                    width,
+                                    height,
+                                )
                             } else {
                                 run_secure_host(task, callback, user, &mut wire, &mut cipher)
                             };
@@ -976,7 +1192,7 @@ fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, us
                     if matches!(misc.union, Some(message::misc::Union::PermissionInfo(_))) =>
                 {
                     if task.demo
-                        && task.expected_peer == PersistentPeer::SecureHost
+                        && task.expected_peer != PersistentPeer::Demo
                         && matches!(misc.union, Some(message::misc::Union::PermissionInfo(p)) if p.enabled)
                     {
                         return Err(Failure::failed(
@@ -984,6 +1200,11 @@ fn run(task: &ControllerSession, callback: Option<ControllerSessionCallback>, us
                             "Formal secure entry cannot grant capabilities in this phase",
                         ));
                     }
+                }
+                Some(message::message::Union::VideoFrame(_))
+                    if task.expected_peer == PersistentPeer::SecureVideo =>
+                {
+                    return Err(Failure::failed("UNEXPECTED_VIDEO", "Video before approval"));
                 }
                 _ => {
                     return Err(Failure::failed(
@@ -1037,7 +1258,21 @@ pub extern "C" fn controller_session_run(
 ) {
     if let Some(task) = unsafe { task.as_ref() } {
         if !task.started.swap(true, Ordering::AcqRel) {
-            run(task, callback, user)
+            run(task, callback, None, false, user)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn controller_session_run_video(
+    task: *mut ControllerSession,
+    callback: Option<ControllerSessionCallback>,
+    video_callback: Option<ControllerVideoCallback>,
+    user: *mut c_void,
+) {
+    if let Some(task) = unsafe { task.as_ref() } {
+        if !task.started.swap(true, Ordering::AcqRel) {
+            run(task, callback, video_callback, true, user)
         }
     }
 }

@@ -13,13 +13,14 @@ use protobuf::Message as _;
 use remote_controller_core::session::{
     approval_code, controller_connection_create, controller_session_cancel,
     controller_session_create, controller_session_destroy, controller_session_run,
-    controller_session_send_pointer, controller_session_send_text,
+    controller_session_run_video, controller_session_send_pointer, controller_session_send_text,
 };
 use remote_controller_core::{
     protos::{
         message::{
-            self, login_response, option_message, permission_info, ChatMessage, Hash,
-            LoginResponse, Message, Misc, PeerInfo, PermissionInfo, SignedId,
+            self, login_response, option_message, permission_info, ChatMessage, DisplayInfo,
+            EncodedVideoFrame, EncodedVideoFrames, Hash, LoginResponse, Message, Misc, PeerInfo,
+            PermissionInfo, SignedId, VideoFrame,
         },
         rendezvous::IdPk,
     },
@@ -412,6 +413,542 @@ fn send_permission(stream: &mut TcpStream, cipher: &mut Encrypt, enabled: bool) 
     let mut message = Message::new();
     message.set_misc(misc);
     send_encrypted(stream, cipher, &message);
+}
+
+#[test]
+fn video_mode_without_sink_refuses_before_connect() {
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (public, _) = sign::gen_keypair();
+    let mut request: Value = serde_json::from_str(
+        trusted_request(
+            &listener.local_addr().unwrap().to_string(),
+            &public,
+            "123456789",
+        )
+        .to_str()
+        .unwrap(),
+    )
+    .unwrap();
+    request["expectedPeer"] = json!("secure_video");
+    let task = controller_connection_create(
+        CString::new(request.to_string()).unwrap().as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1000,
+    );
+    assert!(!task.is_null());
+    let mut events = Vec::<Value>::new();
+    controller_session_run(task, Some(collect), &mut events as *mut _ as *mut c_void);
+    assert!(events.iter().any(|e| e["code"] == "VIDEO_SINK_REQUIRED"));
+    assert!(listener.accept().is_err());
+    controller_session_destroy(task);
+}
+
+#[test]
+fn video_entry_rejects_non_video_request_before_connect() {
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (public, _) = sign::gen_keypair();
+    let task = controller_connection_create(
+        trusted_request(
+            &listener.local_addr().unwrap().to_string(),
+            &public,
+            "123456789",
+        )
+        .as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1000,
+    );
+    assert!(!task.is_null());
+    let mut events = Vec::<Value>::new();
+    controller_session_run_video(
+        task,
+        Some(collect),
+        Some(discard_video),
+        &mut events as *mut _ as *mut c_void,
+    );
+    assert!(events
+        .iter()
+        .any(|event| event["code"] == "VIDEO_MODE_REQUIRED"));
+    assert!(listener.accept().is_err());
+    controller_session_destroy(task);
+}
+
+#[test]
+fn video_mode_rejects_frame_before_approval() {
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let (public, private) = sign::gen_keypair();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut cipher = negotiated(&mut stream, &private, "123456789", 1);
+        let mut challenge = Message::new();
+        challenge.set_hash(Hash {
+            salt: "salt".into(),
+            challenge: "nonce".into(),
+            ..Default::default()
+        });
+        send_encrypted(&mut stream, &mut cipher, &challenge);
+        let login = receive_encrypted(&mut stream, &mut cipher);
+        let Some(message::message::Union::LoginRequest(login)) = login.union else {
+            panic!("expected login")
+        };
+        let option = login.option.unwrap();
+        assert_eq!(
+            option.disable_keyboard.enum_value().unwrap(),
+            option_message::BoolOption::Yes
+        );
+        let decoding = option.supported_decoding.unwrap();
+        assert_eq!(decoding.ability_vp8, 1);
+        assert_eq!(
+            decoding.prefer.enum_value().unwrap(),
+            message::supported_decoding::PreferCodec::VP8
+        );
+        let mut video = Message::new();
+        video.set_video_frame(Default::default());
+        send_encrypted(&mut stream, &mut cipher, &video);
+    });
+    let mut request: Value = serde_json::from_str(
+        trusted_request(&endpoint, &public, "123456789")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    request["expectedPeer"] = json!("secure_video");
+    let task = controller_connection_create(
+        CString::new(request.to_string()).unwrap().as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1500,
+    );
+    assert!(!task.is_null());
+    let mut events = Vec::<Value>::new();
+    controller_session_run_video(
+        task,
+        Some(collect),
+        Some(discard_video),
+        &mut events as *mut _ as *mut c_void,
+    );
+    controller_session_destroy(task);
+    server.join().unwrap();
+    assert!(events.iter().any(|e| e["code"] == "UNEXPECTED_VIDEO"));
+    assert!(events.iter().all(|e| e["authorized"] == false));
+}
+
+#[test]
+fn video_mode_rejects_permission_grant_before_approval() {
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let (public, private) = sign::gen_keypair();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut cipher = negotiated(&mut stream, &private, "123456789", 1);
+        let mut challenge = Message::new();
+        challenge.set_hash(Hash {
+            salt: "salt".into(),
+            challenge: "nonce".into(),
+            ..Default::default()
+        });
+        send_encrypted(&mut stream, &mut cipher, &challenge);
+        assert!(receive_encrypted(&mut stream, &mut cipher).has_login_request());
+        send_permission(&mut stream, &mut cipher, true);
+    });
+    let mut request: Value = serde_json::from_str(
+        trusted_request(&endpoint, &public, "123456789")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    request["expectedPeer"] = json!("secure_video");
+    let task = controller_connection_create(
+        CString::new(request.to_string()).unwrap().as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1500,
+    );
+    assert!(!task.is_null());
+    let mut events = Vec::<Value>::new();
+    controller_session_run_video(
+        task,
+        Some(collect),
+        Some(discard_video),
+        &mut events as *mut _ as *mut c_void,
+    );
+    controller_session_destroy(task);
+    server.join().unwrap();
+    assert!(events
+        .iter()
+        .any(|event| event["code"] == "UNEXPECTED_PERMISSION"));
+}
+
+unsafe extern "C" fn discard_video(
+    _: *const u8,
+    _: u32,
+    _: u32,
+    _: u32,
+    _: i64,
+    _: u8,
+    _: *mut c_void,
+) {
+}
+
+fn video_login(
+    stream: &mut TcpStream,
+    cipher: &mut Encrypt,
+    additions: &str,
+    width: i32,
+    height: i32,
+) {
+    let mut challenge = Message::new();
+    challenge.set_hash(Hash {
+        salt: "salt".into(),
+        challenge: "nonce".into(),
+        ..Default::default()
+    });
+    send_encrypted(stream, cipher, &challenge);
+    assert!(receive_encrypted(stream, cipher).has_login_request());
+    let mut response = Message::new();
+    response.set_login_response(LoginResponse {
+        union: Some(login_response::Union::PeerInfo(PeerInfo {
+            platform_additions: additions.into(),
+            displays: vec![DisplayInfo {
+                width,
+                height,
+                ..Default::default()
+            }],
+            current_display: 0,
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+    send_encrypted(stream, cipher, &response);
+}
+
+fn video_message(frames: Vec<EncodedVideoFrame>, display: i32) -> Message {
+    let mut message = Message::new();
+    message.set_video_frame(VideoFrame {
+        union: Some(message::video_frame::Union::Vp8s(EncodedVideoFrames {
+            frames,
+            ..Default::default()
+        })),
+        display,
+        ..Default::default()
+    });
+    message
+}
+
+struct VideoCollector {
+    events: Vec<Value>,
+    frames: Vec<(Vec<u8>, u32, u32, i64, u8)>,
+    task: *mut remote_controller_core::session::ControllerSession,
+    cancel_after_first: bool,
+}
+
+unsafe extern "C" fn collect_video_event(event: *const c_char, user: *mut c_void) {
+    let context = &mut *(user as *mut VideoCollector);
+    context
+        .events
+        .push(serde_json::from_str(CStr::from_ptr(event).to_str().unwrap()).unwrap());
+}
+
+unsafe extern "C" fn collect_video(
+    data: *const u8,
+    length: u32,
+    width: u32,
+    height: u32,
+    pts: i64,
+    key_frame: u8,
+    user: *mut c_void,
+) {
+    let context = &mut *(user as *mut VideoCollector);
+    context.frames.push((
+        std::slice::from_raw_parts(data, length as usize).to_vec(),
+        width,
+        height,
+        pts,
+        key_frame,
+    ));
+    if context.cancel_after_first {
+        controller_session_cancel(context.task);
+    }
+}
+
+fn execute_video<F>(server_fn: F, cancel_after_first: bool) -> VideoCollector
+where
+    F: FnOnce(TcpStream, sign::SecretKey) + Send + 'static,
+{
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let (public, private) = sign::gen_keypair();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        server_fn(stream, private);
+    });
+    let mut request: Value = serde_json::from_str(
+        trusted_request(&endpoint, &public, "123456789")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    request["expectedPeer"] = json!("secure_video");
+    let task = controller_connection_create(
+        CString::new(request.to_string()).unwrap().as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1500,
+    );
+    assert!(!task.is_null());
+    let mut context = VideoCollector {
+        events: Vec::new(),
+        frames: Vec::new(),
+        task,
+        cancel_after_first,
+    };
+    controller_session_run_video(
+        task,
+        Some(collect_video_event),
+        Some(collect_video),
+        &mut context as *mut _ as *mut c_void,
+    );
+    controller_session_destroy(task);
+    server.join().unwrap();
+    context
+}
+
+const VIDEO_ADDITIONS: &str =
+    r#"{"ord_secure_host":1,"media":true,"video_codec":"vp8","input_scope":"none"}"#;
+
+#[test]
+fn approved_video_delivers_binary_frames_and_keeps_input_unauthorized() {
+    let body = vec![0x9a; 70_000];
+    let server_body = body.clone();
+    let result = execute_video(
+        move |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            video_login(&mut stream, &mut cipher, VIDEO_ADDITIONS, 1280, 720);
+            let message = video_message(
+                vec![EncodedVideoFrame {
+                    data: server_body,
+                    key: true,
+                    pts: 42,
+                    ..Default::default()
+                }],
+                0,
+            );
+            let encrypted = cipher.enc(&message.write_to_bytes().unwrap());
+            let header = (((encrypted.len() as u32) << 2) | 3).to_le_bytes();
+            stream.write_all(&header).unwrap();
+            stream.write_all(&encrypted).unwrap();
+        },
+        false,
+    );
+    assert_eq!(result.frames, vec![(body, 1280, 720, 42, 1)]);
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["state"] == "connected"
+            && event["videoWidth"] == 1280
+            && event["videoHeight"] == 720
+            && event["videoCodec"] == "vp8"
+            && event["authorized"] == false));
+    assert!(result
+        .events
+        .iter()
+        .all(|event| event["authorized"] == false));
+}
+
+#[test]
+fn video_callback_cancellation_drops_remaining_frames_in_packet() {
+    let result = execute_video(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            video_login(&mut stream, &mut cipher, VIDEO_ADDITIONS, 640, 360);
+            send_encrypted(
+                &mut stream,
+                &mut cipher,
+                &video_message(
+                    vec![
+                        EncodedVideoFrame {
+                            data: vec![1],
+                            key: true,
+                            ..Default::default()
+                        },
+                        EncodedVideoFrame {
+                            data: vec![2],
+                            ..Default::default()
+                        },
+                    ],
+                    0,
+                ),
+            );
+        },
+        true,
+    );
+    assert_eq!(result.frames.len(), 1);
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "CANCELLED"));
+}
+
+#[test]
+fn approved_video_rejects_permission_grant() {
+    let result = execute_video(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            video_login(&mut stream, &mut cipher, VIDEO_ADDITIONS, 640, 360);
+            send_permission(&mut stream, &mut cipher, true);
+        },
+        false,
+    );
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "UNEXPECTED_PERMISSION"));
+    assert!(result.frames.is_empty());
+}
+
+#[test]
+fn approved_video_keeps_large_control_packets_below_64k() {
+    let result = execute_video(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            video_login(&mut stream, &mut cipher, VIDEO_ADDITIONS, 640, 360);
+            let mut control = Message::new();
+            control.set_test_delay(Default::default());
+            let mut plain = control.write_to_bytes().unwrap();
+            // Unknown length-delimited protobuf field 1000 with 70,000 bytes.
+            plain.extend_from_slice(&[0xc2, 0x3e, 0xf0, 0xa2, 0x04]);
+            plain.extend_from_slice(&vec![0u8; 70_000]);
+            let encrypted = cipher.enc(&plain);
+            let header = (((encrypted.len() as u32) << 2) | 3).to_le_bytes();
+            stream.write_all(&header).unwrap();
+            stream.write_all(&encrypted).unwrap();
+        },
+        false,
+    );
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "INVALID_FRAME"));
+    assert!(result.frames.is_empty());
+}
+
+#[test]
+fn video_mode_rejects_invalid_capability_and_frames() {
+    for (additions, width, height, frame, expected) in [
+        (
+            r#"{"ord_secure_host":1,"media":false,"input_scope":"none"}"#,
+            640,
+            360,
+            None,
+            "UNSUPPORTED_PEER",
+        ),
+        (VIDEO_ADDITIONS, 1281, 720, None, "UNSUPPORTED_PEER"),
+        (
+            r#"{"ord_secure_host":1,"ord_demo":1,"media":true,"video_codec":"vp8","input_scope":"none"}"#,
+            640,
+            360,
+            None,
+            "UNSUPPORTED_PEER",
+        ),
+        (
+            VIDEO_ADDITIONS,
+            640,
+            360,
+            Some({
+                let mut message = Message::new();
+                message.set_video_frame(VideoFrame {
+                    union: Some(message::video_frame::Union::Vp9s(EncodedVideoFrames::new())),
+                    ..Default::default()
+                });
+                message
+            }),
+            "INVALID_VIDEO",
+        ),
+        (
+            VIDEO_ADDITIONS,
+            640,
+            360,
+            Some(video_message(Vec::new(), 0)),
+            "INVALID_VIDEO",
+        ),
+        (
+            VIDEO_ADDITIONS,
+            640,
+            360,
+            Some(video_message(
+                vec![EncodedVideoFrame {
+                    data: vec![1],
+                    key: false,
+                    ..Default::default()
+                }],
+                0,
+            )),
+            "INVALID_VIDEO",
+        ),
+        (
+            VIDEO_ADDITIONS,
+            640,
+            360,
+            Some(video_message(
+                vec![EncodedVideoFrame {
+                    data: vec![1],
+                    key: true,
+                    ..Default::default()
+                }],
+                1,
+            )),
+            "INVALID_VIDEO",
+        ),
+        (
+            VIDEO_ADDITIONS,
+            640,
+            360,
+            Some(video_message(
+                vec![EncodedVideoFrame {
+                    data: vec![1; 2 * 1024 * 1024 + 1],
+                    key: true,
+                    ..Default::default()
+                }],
+                0,
+            )),
+            "INVALID_VIDEO",
+        ),
+    ] {
+        let result = execute_video(
+            move |mut stream, key| {
+                let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+                video_login(&mut stream, &mut cipher, additions, width, height);
+                if let Some(frame) = frame {
+                    let encrypted = cipher.enc(&frame.write_to_bytes().unwrap());
+                    let header = (((encrypted.len() as u32) << 2) | 3).to_le_bytes();
+                    stream.write_all(&header).unwrap();
+                    stream.write_all(&encrypted).unwrap();
+                } else {
+                    assert!(receive_encrypted(&mut stream, &mut cipher).has_misc());
+                }
+            },
+            false,
+        );
+        assert!(
+            result.events.iter().any(|event| event["code"] == expected),
+            "{expected}: {:?}",
+            result.events
+        );
+        assert!(result.frames.is_empty());
+    }
 }
 
 struct DemoCollector {
