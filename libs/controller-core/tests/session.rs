@@ -5,7 +5,7 @@ use std::{
     ptr,
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bytes::BytesMut;
@@ -13,7 +13,8 @@ use protobuf::Message as _;
 use remote_controller_core::session::{
     approval_code, controller_connection_create, controller_session_cancel,
     controller_session_create, controller_session_destroy, controller_session_run,
-    controller_session_run_video, controller_session_send_pointer, controller_session_send_text,
+    controller_session_run_video, controller_session_send_input_v1,
+    controller_session_send_pointer, controller_session_send_text,
 };
 use remote_controller_core::{
     protos::{
@@ -63,6 +64,42 @@ fn demo_api_validates_handshake_and_input_before_connecting() {
     );
     assert_eq!(
         controller_session_send_text(task, CString::new("text").unwrap().as_ptr()),
+        1
+    );
+    controller_session_destroy(task);
+}
+
+#[test]
+fn secure_control_input_api_rejects_bad_commands_and_disconnected_sessions() {
+    sodiumoxide::init().unwrap();
+    let request = CString::new(
+        json!({
+            "endpoint":"127.0.0.1:1", "peerId":"123456789",
+            "peerPublicKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "expectedPeer":"secure_control"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let password = CString::new("").unwrap();
+    let task = controller_connection_create(request.as_ptr(), password.as_ptr(), 100);
+    assert!(!task.is_null());
+    assert_eq!(
+        controller_session_send_input_v1(
+            task,
+            CString::new(r#"{"kind":"move","x":65536,"y":0}"#)
+                .unwrap()
+                .as_ptr()
+        ),
+        3
+    );
+    assert_eq!(
+        controller_session_send_input_v1(
+            task,
+            CString::new(r#"{"kind":"move","x":1,"y":2}"#)
+                .unwrap()
+                .as_ptr()
+        ),
         1
     );
     controller_session_destroy(task);
@@ -728,6 +765,450 @@ where
 
 const VIDEO_ADDITIONS: &str =
     r#"{"ord_secure_host":1,"media":true,"video_codec":"vp8","input_scope":"none"}"#;
+const CONTROL_ADDITIONS: &str = r#"{"ord_secure_host":1,"media":true,"video_codec":"vp8","input_scope":"windows_primary","input_version":1}"#;
+
+fn control_login(stream: &mut TcpStream, cipher: &mut Encrypt, additions: &str) {
+    let mut challenge = Message::new();
+    challenge.set_hash(Hash {
+        salt: "salt".into(),
+        challenge: "nonce".into(),
+        ..Default::default()
+    });
+    send_encrypted(stream, cipher, &challenge);
+    let login = receive_encrypted(stream, cipher);
+    let Some(message::message::Union::LoginRequest(login)) = login.union else {
+        panic!("expected login request")
+    };
+    assert_eq!(login.ord_input_version, 1);
+    assert_eq!(
+        login.option.unwrap().disable_keyboard.enum_value(),
+        Ok(option_message::BoolOption::No)
+    );
+    let mut response = Message::new();
+    response.set_login_response(LoginResponse {
+        union: Some(login_response::Union::PeerInfo(PeerInfo {
+            platform_additions: additions.into(),
+            displays: vec![DisplayInfo {
+                width: 640,
+                height: 360,
+                online: true,
+                ..Default::default()
+            }],
+            current_display: 0,
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+    send_encrypted(stream, cipher, &response);
+}
+
+struct ControlCollector {
+    events: Vec<Value>,
+    sends: Vec<i32>,
+    legacy_sends: Vec<i32>,
+    task: *mut remote_controller_core::session::ControllerSession,
+    submit_input: bool,
+}
+
+unsafe extern "C" fn collect_control_event(event: *const c_char, user: *mut c_void) {
+    let context = &mut *(user as *mut ControlCollector);
+    let event: Value = serde_json::from_str(CStr::from_ptr(event).to_str().unwrap()).unwrap();
+    if context.submit_input && event["state"] == "input_state" {
+        context.sends.push(controller_session_send_input_v1(
+            context.task,
+            CString::new(r#"{"kind":"move","x":32768,"y":65535}"#)
+                .unwrap()
+                .as_ptr(),
+        ));
+        if event["authorized"] == true {
+            context
+                .legacy_sends
+                .push(controller_session_send_pointer(context.task, 1, 2));
+            context.legacy_sends.push(controller_session_send_text(
+                context.task,
+                CString::new("legacy").unwrap().as_ptr(),
+            ));
+        }
+    }
+    context.events.push(event);
+}
+
+fn execute_control<F>(server_fn: F, submit_input: bool) -> ControlCollector
+where
+    F: FnOnce(TcpStream, sign::SecretKey) + Send + 'static,
+{
+    sodiumoxide::init().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    let (public, private) = sign::gen_keypair();
+    listener.set_nonblocking(true).unwrap();
+    let server = thread::spawn(move || {
+        let started = Instant::now();
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && started.elapsed() < Duration::from_secs(2) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("control peer did not connect: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        server_fn(stream, private);
+    });
+    let mut request: Value = serde_json::from_str(
+        trusted_request(&endpoint, &public, "123456789")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    request["expectedPeer"] = json!("secure_control");
+    let task = controller_connection_create(
+        CString::new(request.to_string()).unwrap().as_ptr(),
+        CString::new("").unwrap().as_ptr(),
+        1500,
+    );
+    assert!(!task.is_null());
+    let mut context = ControlCollector {
+        events: Vec::new(),
+        sends: Vec::new(),
+        legacy_sends: Vec::new(),
+        task,
+        submit_input,
+    };
+    controller_session_run_video(
+        task,
+        Some(collect_control_event),
+        Some(discard_video),
+        &mut context as *mut _ as *mut c_void,
+    );
+    controller_session_destroy(task);
+    server.join().unwrap();
+    context
+}
+
+#[test]
+fn control_mode_rejects_old_read_only_peer_metadata() {
+    let result = execute_control(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, VIDEO_ADDITIONS);
+            assert!(receive_encrypted(&mut stream, &mut cipher).has_misc());
+        },
+        false,
+    );
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "UNSUPPORTED_PEER"));
+    assert!(result
+        .events
+        .iter()
+        .all(|event| event["authorized"] == false));
+}
+
+#[test]
+fn control_mode_requires_real_state_and_revokes_input() {
+    let token = vec![7; 16];
+    let server_token = token.clone();
+    let result = execute_control(
+        move |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
+            for (enabled, grant_token) in [(false, Vec::new()), (true, server_token.clone())] {
+                let mut state = Message::new();
+                state.set_ord_input_state(message::OrdInputState {
+                    version: 1,
+                    supported: true,
+                    enabled,
+                    grant_token,
+                    ..Default::default()
+                });
+                send_encrypted(&mut stream, &mut cipher, &state);
+            }
+            send_permission(&mut stream, &mut cipher, true);
+            let sent = receive_encrypted(&mut stream, &mut cipher);
+            let Some(message::message::Union::OrdInputEvent(event)) = sent.union else {
+                panic!("expected authorized input event")
+            };
+            assert_eq!(event.version, 1);
+            assert_eq!(event.grant_token, server_token);
+            assert!(
+                matches!(event.command, Some(message::ord_input_event::Command::Move(m))
+            if m.x == 32768 && m.y == 65535)
+            );
+            let mut revoke = Message::new();
+            revoke.set_ord_input_state(message::OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                grant_token: Vec::new(),
+                ..Default::default()
+            });
+            send_encrypted(&mut stream, &mut cipher, &revoke);
+            send_permission(&mut stream, &mut cipher, false);
+            let mut close = Message::new();
+            let mut misc = Misc::new();
+            misc.set_close_reason("done".into());
+            close.set_misc(misc);
+            send_encrypted(&mut stream, &mut cipher, &close);
+        },
+        true,
+    );
+    assert_eq!(result.sends, [2, 0, 2]);
+    assert_eq!(result.legacy_sends, [1, 1]);
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["state"] == "input_state"
+            && event["inputSupported"] == true
+            && event["authorized"] == true));
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["state"] == "input_state"
+            && event["inputSupported"] == true
+            && event["authorized"] == false));
+}
+
+#[test]
+fn control_heartbeat_stops_after_revoke() {
+    let result = execute_control(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
+            let mut grant = Message::new();
+            grant.set_ord_input_state(message::OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![9; 16],
+                ..Default::default()
+            });
+            send_encrypted(&mut stream, &mut cipher, &grant);
+            let heartbeat = receive_encrypted(&mut stream, &mut cipher);
+            let Some(message::message::Union::OrdInputEvent(event)) = heartbeat.union else {
+                panic!("expected input heartbeat")
+            };
+            assert_eq!(event.grant_token, vec![9; 16]);
+            assert!(matches!(
+                event.command,
+                Some(message::ord_input_event::Command::KeepAlive(_))
+            ));
+            let mut revoke = Message::new();
+            revoke.set_ord_input_state(message::OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                grant_token: Vec::new(),
+                ..Default::default()
+            });
+            send_encrypted(&mut stream, &mut cipher, &revoke);
+            stream
+                .set_read_timeout(Some(Duration::from_millis(1500)))
+                .unwrap();
+            let mut byte = [0];
+            assert!(
+                matches!(stream.read(&mut byte), Err(error) if error.kind() == std::io::ErrorKind::TimedOut
+            || error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+            let mut close = Message::new();
+            let mut misc = Misc::new();
+            misc.set_close_reason("done".into());
+            close.set_misc(misc);
+            send_encrypted(&mut stream, &mut cipher, &close);
+        },
+        false,
+    );
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["state"] == "input_state" && event["authorized"] == false));
+}
+
+#[test]
+fn control_downlink_stall_stops_heartbeats_without_eof() {
+    let result = execute_control(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
+            let mut grant = Message::new();
+            grant.set_ord_input_state(message::OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![8; 16],
+                ..Default::default()
+            });
+            send_encrypted(&mut stream, &mut cipher, &grant);
+            let first = receive_encrypted(&mut stream, &mut cipher);
+            assert!(
+                matches!(first.union, Some(message::message::Union::OrdInputEvent(event))
+            if matches!(event.command, Some(message::ord_input_event::Command::KeepAlive(_))))
+            );
+            stream
+                .set_read_timeout(Some(Duration::from_secs(7)))
+                .unwrap();
+            let started = Instant::now();
+            let mut byte = [0];
+            loop {
+                match stream.read(&mut byte) {
+                    Ok(0) => break,
+                    Ok(_) if started.elapsed() < Duration::from_secs(7) => {}
+                    result => {
+                        panic!("expected control session to close after downlink stall: {result:?}")
+                    }
+                }
+            }
+        },
+        false,
+    );
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "TRANSPORT_STALLED"));
+}
+
+#[test]
+fn read_only_control_session_can_wait_on_a_static_desktop() {
+    let result = execute_control(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
+            let mut state = Message::new();
+            state.set_ord_input_state(message::OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                grant_token: Vec::new(),
+                ..Default::default()
+            });
+            send_encrypted(&mut stream, &mut cipher, &state);
+            thread::sleep(Duration::from_millis(5500));
+            let mut close = Message::new();
+            let mut misc = Misc::new();
+            misc.set_close_reason("done".into());
+            close.set_misc(misc);
+            send_encrypted(&mut stream, &mut cipher, &close);
+        },
+        false,
+    );
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| event["code"] == "TRANSPORT_STALLED"));
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "DISCONNECTED"));
+}
+
+#[test]
+fn echoed_control_heartbeats_keep_a_static_authorized_session_live() {
+    let result = execute_control(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
+            let mut grant = Message::new();
+            grant.set_ord_input_state(message::OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![6; 16],
+                ..Default::default()
+            });
+            send_encrypted(&mut stream, &mut cipher, &grant);
+            for _ in 0..6 {
+                let heartbeat = receive_encrypted(&mut stream, &mut cipher);
+                assert!(matches!(&heartbeat.union,
+                Some(message::message::Union::OrdInputEvent(event))
+                if event.grant_token == vec![6; 16]
+                    && matches!(event.command, Some(message::ord_input_event::Command::KeepAlive(_)))));
+                send_encrypted(&mut stream, &mut cipher, &heartbeat);
+            }
+            let mut close = Message::new();
+            let mut misc = Misc::new();
+            misc.set_close_reason("done".into());
+            close.set_misc(misc);
+            send_encrypted(&mut stream, &mut cipher, &close);
+        },
+        false,
+    );
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "DISCONNECTED"));
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| event["code"] == "TRANSPORT_STALLED"));
+}
+
+#[test]
+fn wrong_token_heartbeat_echo_fails_closed() {
+    let result = execute_control(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
+            let mut grant = Message::new();
+            grant.set_ord_input_state(message::OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![6; 16],
+                ..Default::default()
+            });
+            send_encrypted(&mut stream, &mut cipher, &grant);
+            let mut bad = Message::new();
+            let mut event = message::OrdInputEvent::new();
+            event.version = 1;
+            event.grant_token = vec![7; 16];
+            event.set_keep_alive(message::OrdInputKeepAlive::new());
+            bad.set_ord_input_event(event);
+            send_encrypted(&mut stream, &mut cipher, &bad);
+        },
+        false,
+    );
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "INVALID_INPUT_HEARTBEAT" && event["authorized"] == false));
+}
+
+#[test]
+fn release_failure_after_revoke_remains_visible_to_controller() {
+    let result = execute_control(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
+            let mut revoked = Message::new();
+            revoked.set_ord_input_state(message::OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                grant_token: Vec::new(),
+                ..Default::default()
+            });
+            send_encrypted(&mut stream, &mut cipher, &revoked);
+            let mut close = Message::new();
+            let mut misc = Misc::new();
+            misc.set_close_reason("Input release failed".into());
+            close.set_misc(misc);
+            send_encrypted(&mut stream, &mut cipher, &close);
+        },
+        false,
+    );
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "INPUT_RELEASE_FAILED" && event["authorized"] == false));
+}
 
 #[test]
 fn approved_video_delivers_binary_frames_and_keeps_input_unauthorized() {

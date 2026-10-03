@@ -3,6 +3,7 @@ import { preferences } from '@kit.ArkData';
 import { RemoteSession } from '../components/RemoteSession';
 import { Profile, ScreenState, initialScreenState, projectScreenEvent, endedScreenState,
   screenIsLive, splitEndpoint, joinEndpoint, canConnectProfile } from '../model/DeskModels';
+import { canSendSystemInput } from '../model/InputModels';
 
 interface ValidationResult {
   ok: boolean;
@@ -32,6 +33,7 @@ class DeskSurface extends XComponentController {
 @Entry
 @Component
 struct Desk {
+  @StorageLink('deskForeground') @Watch('applicationForegroundChanged') private applicationForeground: boolean = true;
   @State private profiles: Profile[] = [];
   @State private favorites: string[] = [];
   @State private recent: RecentConnection[] = [];
@@ -72,9 +74,17 @@ struct Desk {
   onPageHide(): void { this.leavePage(); }
   aboutToDisappear(): void { this.leavePage(); }
 
+  private applicationForegroundChanged(): void {
+    if (!this.applicationForeground) { this.leavePage(); }
+    else {
+      this.visible = true;
+      if (screenIsLive(this.screen)) { this.disconnect('应用曾离开前台，请重新连接并等待本机批准。'); }
+    }
+  }
+
   onBackPress(): boolean {
     if (this.modal.length > 0 && !this.saving) { this.modal = ''; return true; }
-    if (this.sessionOpen) { this.sessionOpen = false; return true; }
+    if (this.sessionOpen) { this.hideSession(); return true; }
     return false;
   }
 
@@ -310,7 +320,7 @@ struct Desk {
     try {
       const request = JSON.stringify({ endpoint: profile.target, peerId: profile.peerId,
         peerPublicKey: profile.peerPublicKey, peerFingerprint: profile.peerFingerprint || null,
-        minimumKxVersion: 1, expectedPeer: 'secure_video' });
+        minimumKxVersion: 1, expectedPeer: 'secure_control' });
       const task = controller.connectScreen(request, surfaceId, 60000, (event: ControllerEvent) => {
         if (!this.visible || owner !== this.generation || event.taskId !== this.task) { return; }
         const wasApproved = this.screen.approved;
@@ -337,6 +347,29 @@ struct Desk {
     this.surfaceId = '';
     this.screen = endedScreenState(detail, code);
     if (task > 0) { controller.cancel(task); }
+  }
+
+  private sendSystemInput(command: string): number {
+    if (!this.visible || this.task <= 0 || !canSendSystemInput(this.screen, this.sessionOpen, true)) { return 2; }
+    try { return controller.sendInput(this.task, command); }
+    catch { return 1; }
+  }
+
+  private releaseInput(): void {
+    if (this.task <= 0) { return; }
+    try {
+      const result = controller.sendInput(this.task, '{"kind":"release_all"}');
+      if (result === 3 || result === 4) {
+        this.disconnect('输入释放请求无法提交，连接已结束。请重新连接并等待本机批准。');
+      }
+    } catch {
+      this.disconnect('输入通道不可用，连接已结束。请重新连接。');
+    }
+  }
+
+  private hideSession(): void {
+    this.releaseInput();
+    this.sessionOpen = false;
   }
 
   private openDiagnostics(): void {
@@ -533,7 +566,8 @@ struct Desk {
     }.width('100%').padding(24).alignItems(HorizontalAlign.Start).backgroundColor('#FFFFFF').borderRadius(18)
     Column({ space: 4 }) {
       Text('远程桌面').fontSize(19).fontWeight(FontWeight.Medium).fontColor('#20352F')
-      this.setting('进入模式', '仅查看；系统键鼠与中文输入尚未开放')
+      this.setting('进入模式', '默认仅查看；Windows 本机独立允许后可切换键鼠控制')
+      this.setting('文字输入', '在键盘面板选词并确认发送；不发送输入法预编辑文本')
       this.setting('画面显示', '保持比例，适应窗口；单主屏')
       this.setting('画面质量', 'VP8 软件视频 · 最大 1280 × 720 · 约 8 fps 上限；画质切换尚未实现')
       this.setting('文件、剪贴板与声音', '尚未实现，不随连接自动开放')
@@ -653,8 +687,9 @@ struct Desk {
       if (this.sessionProfile) {
         ForEach([this.sessionKey], (_key: number) => {
           RemoteSession({ screen: this.screen, deviceName: this.sessionProfile?.name ?? '', endpoint: this.sessionProfile?.target ?? '',
-            surfaceActive: screenIsLive(this.screen), controller: this.surfaceController,
-            onBack: () => { this.sessionOpen = false; }, onDisconnect: () => this.disconnect(),
+            surfaceActive: screenIsLive(this.screen), sessionVisible: this.sessionOpen, controller: this.surfaceController,
+            onBack: () => this.hideSession(), onDisconnect: () => this.disconnect(),
+            onInput: (command: string) => this.sendSystemInput(command), onReleaseInput: () => this.releaseInput(),
             onRetry: () => { if (this.sessionProfile) { this.connect(this.sessionProfile); } } })
         }, (key: number) => String(key))
       }

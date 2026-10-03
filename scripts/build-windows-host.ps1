@@ -74,7 +74,7 @@ try {
       throw 'Invalid FFI bool binding; regenerate the bridge with the Clang standard headers available.'
     }
     if ($Test) {
-      foreach ($hostFilter in @('secure_host_ui::tests', 'cm_approval_requires_this_pending_login_once', 'secure_video::tests')) {
+      foreach ($hostFilter in @('secure_host_ui::tests', 'cm_approval_requires_this_pending_login_once', 'secure_video::tests', 'secure_input::tests')) {
         & cargo test --locked -p rustdesk --lib --features flutter,ord-secure-host $hostFilter -- --test-threads=1
         if ($LASTEXITCODE -ne 0) { throw "Rust test failed: $hostFilter" }
       }

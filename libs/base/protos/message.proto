@@ -84,6 +84,7 @@ message LoginRequest {
   string my_platform = 13;
   bytes hwid = 14;
   string avatar = 17;
+  uint32 ord_input_version = 18;
 }
 
 message Terminal {
@@ -307,6 +308,62 @@ message KeyEvent {
   }
   repeated ControlKey modifiers = 8;
   KeyboardMode mode = 9;
+}
+
+message OrdInputState {
+  uint32 version = 1;
+  bool supported = 2;
+  bool enabled = 3;
+  bytes grant_token = 4;
+}
+
+message OrdInputMove {
+  uint32 x = 1;
+  uint32 y = 2;
+}
+
+message OrdInputRelativeMove {
+  sint32 dx = 1;
+  sint32 dy = 2;
+}
+
+message OrdInputButton {
+  enum Button {
+    Left = 0;
+    Right = 1;
+    Middle = 2;
+  }
+  Button button = 1;
+  bool down = 2;
+}
+
+message OrdInputWheel {
+  sint32 dx = 1;
+  sint32 dy = 2;
+}
+
+message OrdInputKey {
+  string code = 1;
+  bool down = 2;
+}
+
+message OrdInputText { string text = 1; }
+message OrdInputReleaseAll {}
+message OrdInputKeepAlive {}
+
+message OrdInputEvent {
+  uint32 version = 1;
+  bytes grant_token = 2;
+  oneof command {
+    OrdInputMove move = 3;
+    OrdInputButton button = 4;
+    OrdInputWheel wheel = 5;
+    OrdInputKey key = 6;
+    OrdInputText text = 7;
+    OrdInputReleaseAll release_all = 8;
+    OrdInputKeepAlive keep_alive = 9;
+    OrdInputRelativeMove move_relative = 10;
+  }
 }
 
 message CursorData {
@@ -1030,5 +1087,7 @@ message Message {
     TerminalAction terminal_action = 31;
     TerminalResponse terminal_response = 32;
     PortForwardChannel port_forward_channel = 33;
+    OrdInputState ord_input_state = 34;
+    OrdInputEvent ord_input_event = 35;
   }
 }

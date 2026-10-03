@@ -18,6 +18,7 @@ export interface ScreenEvent {
   verified: boolean;
   authenticated: boolean;
   authorized: boolean;
+  inputSupported?: boolean;
   confirmationCode?: string;
   x?: number;
   y?: number;
@@ -36,6 +37,8 @@ export class ScreenState {
   detail: string = '';
   verified: boolean = false;
   approved: boolean = false;
+  inputSupported: boolean = false;
+  inputGranted: boolean = false;
   width: number = 1280;
   height: number = 720;
   frames: number = 0;
@@ -67,11 +70,14 @@ export function screenIsLive(state: ScreenState): boolean {
 }
 
 function failureDetail(code: string): string {
+  if (code === 'INPUT_RELEASE_FAILED') {
+    return '输入许可已失效，但 Windows 按键释放失败。请在本机检查按键状态，并重启被控服务后重试。';
+  }
   switch (code) {
     case 'VIDEO_NOT_ENABLED':
       return '被控端尚未启用屏幕共享。请在被控端开启视频服务后重试。';
     case 'MODE_MISMATCH':
-      return '当前入口不支持屏幕查看。请核对被控端模式和地址后重试。';
+      return '当前入口不支持此控制协议。请更新被控端，或在连接诊断中使用原只读入口。';
     case 'IDENTITY_REQUIRED':
     case 'IDENTITY_INVALID':
     case 'INVALID_SIGNATURE':
@@ -168,6 +174,8 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
   state.detail = previous.detail;
   state.verified = previous.verified;
   state.approved = previous.approved;
+  state.inputSupported = previous.inputSupported;
+  state.inputGranted = previous.inputGranted;
   state.width = previous.width;
   state.height = previous.height;
   state.frames = previous.frames;
@@ -177,7 +185,10 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
   if (!state.approved) {
     return state;
   }
-  if (event.state === 'video_status') {
+  if (event.state === 'input_state') {
+    state.inputSupported = event.verified && event.authenticated && event.inputSupported === true;
+    state.inputGranted = state.inputSupported && event.authorized === true;
+  } else if (event.state === 'video_status') {
     if (event.frames !== undefined && event.frames >= 0) {
       state.frames = event.frames;
     }
@@ -189,7 +200,7 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
     state.rendered = event.renderedFrames;
     state.phase = 'viewing';
     state.title = '正在查看远程桌面';
-    state.detail = '正在查看 Windows 主显示器；未开放键鼠输入。';
+    state.detail = '正在查看 Windows 主显示器；键鼠需要 Windows 本机独立允许。';
   }
   return state;
 }

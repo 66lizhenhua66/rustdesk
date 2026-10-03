@@ -6,6 +6,7 @@ export interface ControllerEvent {
   verified: boolean;
   authenticated: boolean;
   authorized: boolean;
+  inputSupported?: boolean;
   confirmationCode?: string;
   x?: number;
   y?: number;
@@ -27,6 +28,7 @@ declare const controller: {
   connectScreen(requestJson: string, surfaceId: string, timeoutMs: number, callback: (event: ControllerEvent) => void): number;
   sendPointer(taskId: number, x: number, y: number): boolean;
   sendText(taskId: number, text: string): boolean;
+  sendInput(taskId: number, commandJson: string): number;
   cancel(taskId: number): boolean;
   dispose(): void;
 };

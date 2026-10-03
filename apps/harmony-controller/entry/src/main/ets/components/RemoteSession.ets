@@ -1,19 +1,223 @@
 import { ScreenState } from '../model/DeskModels';
+import { KeyCode } from '@kit.InputKit';
+import { SystemInputCommand, normalizePointerDelta, canSendSystemInput, canSubmitInputText } from '../model/InputModels';
 
 @Component
 export struct RemoteSession {
-  @Prop screen: ScreenState = new ScreenState();
+  @Prop @Watch('inputAvailabilityChanged') screen: ScreenState = new ScreenState();
   @Prop deviceName: string = '';
   @Prop endpoint: string = '';
   @Prop surfaceActive: boolean = false;
+  @Prop @Watch('inputAvailabilityChanged') sessionVisible: boolean = true;
   controller: XComponentController = new XComponentController();
   onBack: () => void = () => {};
   onDisconnect: () => void = () => {};
   onRetry: () => void = () => {};
+  onInput: (command: string) => number = () => 1;
+  onReleaseInput: () => void = () => {};
   @State private areaWidth: number = 390;
   @State private areaHeight: number = 720;
   @State private toolbarCollapsed: boolean = false;
   @State private toolsOpen: boolean = false;
+  @State private controlMode: boolean = false;
+  @State private inputPanel: string = '';
+  @State private leftHeld: boolean = false;
+  @State private inputNotice: string = '';
+  @State private inputText: string = '';
+  @State private previewActive: boolean = false;
+  private textController: TextInputController = new TextInputController();
+  private touchId: number = -1;
+  private touchX: number = 0;
+  private touchY: number = 0;
+  private touchDistance: number = 0;
+  private touchStarted: number = 0;
+  private pendingDx: number = 0;
+  private pendingDy: number = 0;
+  private lastMoveAt: number = 0;
+  private heldKeys: Set<number> = new Set<number>();
+
+  aboutToDisappear(): void { this.stopInput(); }
+
+  private readyForInput(): boolean {
+    return canSendSystemInput(this.screen, this.sessionVisible, this.controlMode);
+  }
+
+  private inputAvailabilityChanged(): void {
+    if (!canSendSystemInput(this.screen, this.sessionVisible, true)) { this.stopInput(); }
+  }
+
+  private releasePressed(force: boolean = false): void {
+    const release = force || this.leftHeld || this.heldKeys.size > 0;
+    this.leftHeld = false;
+    this.heldKeys.clear();
+    this.touchId = -1;
+    this.pendingDx = 0;
+    this.pendingDy = 0;
+    if (release) { this.onReleaseInput(); }
+  }
+
+  private flushPointer(): boolean {
+    if (this.pendingDx === 0 && this.pendingDy === 0) { return true; }
+    const dx = this.pendingDx;
+    const dy = this.pendingDy;
+    this.pendingDx = 0;
+    this.pendingDy = 0;
+    this.lastMoveAt = Date.now();
+    return this.send({ kind: 'move_relative', dx: dx, dy: dy });
+  }
+
+  private inputBlur(): void {
+    this.flushPointer();
+    this.releasePressed(true);
+  }
+
+  private stopInput(): void {
+    const controlling = this.controlMode;
+    this.controlMode = false;
+    this.releasePressed(controlling);
+    if (this.inputPanel === 'keyboard') { this.textController.stopEditing(); }
+    this.inputPanel = '';
+    this.inputText = '';
+    this.previewActive = false;
+    this.inputNotice = '';
+  }
+
+  private openInput(panel: string): void {
+    this.stopInput();
+    if (!canSendSystemInput(this.screen, this.sessionVisible, true)) { return; }
+    this.controlMode = true;
+    this.inputPanel = panel;
+    this.inputNotice = '';
+    this.toolsOpen = false;
+  }
+
+  private send(command: SystemInputCommand): boolean {
+    if (!this.readyForInput()) { this.stopInput(); return false; }
+    if (command.kind !== 'move_relative' && !this.flushPointer()) { return false; }
+    const status = this.onInput(JSON.stringify(command));
+    if (status !== 0) {
+      this.stopInput();
+      this.inputNotice = status === 2 ? '输入许可已失效，当前仅查看。' : '输入未能排队，已暂停控制。请检查连接后重试。';
+      return false;
+    }
+    return true;
+  }
+
+  private clickMouse(button: string): void {
+    if (this.leftHeld) { this.releasePressed(true); }
+    if (this.send({ kind: 'button', button: button, down: true })) {
+      this.send({ kind: 'button', button: button, down: false });
+    }
+  }
+
+  private toggleLeftHold(): void {
+    const next = !this.leftHeld;
+    if (this.send({ kind: 'button', button: 'left', down: next })) { this.leftHeld = next; }
+  }
+
+  private tapKey(code: string): void {
+    if (this.send({ kind: 'key', code: code, down: true })) {
+      this.send({ kind: 'key', code: code, down: false });
+    }
+  }
+
+  private submitText(): void {
+    if (!this.readyForInput() || !canSubmitInputText(this.inputText, this.previewActive)) { return; }
+    if (this.send({ kind: 'text', text: this.inputText })) {
+      this.inputText = '';
+      this.inputNotice = '文本已排队，请以远端画面为准。';
+    }
+  }
+
+  private pointerTouch(event: TouchEvent): void {
+    event.stopPropagation();
+    if (event.type === TouchType.Cancel || !this.readyForInput()) { this.stopInput(); return; }
+    if (event.changedTouches.length === 0) { return; }
+    if (event.type === TouchType.Down) {
+      if (this.touchId >= 0 || event.touches.length > 1) { this.releasePressed(true); return; }
+      const point = event.changedTouches[0];
+      this.touchId = point.id;
+      this.touchX = point.x;
+      this.touchY = point.y;
+      this.touchDistance = 0;
+      this.touchStarted = Date.now();
+      try { this.getUIContext().getFocusController().requestFocus('system-touchpad'); }
+      catch { this.inputNotice = '可点击触控板重新获取物理键盘焦点。'; }
+      return;
+    }
+    for (const point of event.changedTouches) {
+      if (point.id !== this.touchId) { continue; }
+      if (event.type === TouchType.Move) {
+        const dx = point.x - this.touchX;
+        const dy = point.y - this.touchY;
+        this.touchDistance += Math.abs(dx) + Math.abs(dy);
+        this.touchX = point.x;
+        this.touchY = point.y;
+        const delta = normalizePointerDelta(dx, dy, this.surfaceWidth(), this.surfaceHeight());
+        this.pendingDx = Math.max(-65535, Math.min(65535, this.pendingDx + delta.dx));
+        this.pendingDy = Math.max(-65535, Math.min(65535, this.pendingDy + delta.dy));
+        if (Date.now() - this.lastMoveAt >= 20) { this.flushPointer(); }
+      } else if (event.type === TouchType.Up) {
+        const dx = point.x - this.touchX;
+        const dy = point.y - this.touchY;
+        this.touchDistance += Math.abs(dx) + Math.abs(dy);
+        const delta = normalizePointerDelta(dx, dy, this.surfaceWidth(), this.surfaceHeight());
+        this.pendingDx = Math.max(-65535, Math.min(65535, this.pendingDx + delta.dx));
+        this.pendingDy = Math.max(-65535, Math.min(65535, this.pendingDy + delta.dy));
+        this.touchId = -1;
+        if (!this.flushPointer()) { return; }
+        if (this.touchDistance < 6 && Date.now() - this.touchStarted < 500 && !this.leftHeld) { this.clickMouse('left'); }
+      }
+    }
+  }
+
+  private hardwareCode(code: number): string {
+    if (code >= KeyCode.KEYCODE_A && code <= KeyCode.KEYCODE_Z) { return 'Key' + String.fromCharCode(65 + code - KeyCode.KEYCODE_A); }
+    if (code >= KeyCode.KEYCODE_0 && code <= KeyCode.KEYCODE_9) { return 'Digit' + String(code - KeyCode.KEYCODE_0); }
+    switch (code) {
+      case KeyCode.KEYCODE_ENTER: return 'Enter';
+      case KeyCode.KEYCODE_ESCAPE: return 'Escape';
+      case KeyCode.KEYCODE_TAB: return 'Tab';
+      case KeyCode.KEYCODE_DEL: return 'Backspace';
+      case KeyCode.KEYCODE_FORWARD_DEL: return 'Delete';
+      case KeyCode.KEYCODE_SPACE: return 'Space';
+      case KeyCode.KEYCODE_DPAD_LEFT: return 'ArrowLeft';
+      case KeyCode.KEYCODE_DPAD_RIGHT: return 'ArrowRight';
+      case KeyCode.KEYCODE_DPAD_UP: return 'ArrowUp';
+      case KeyCode.KEYCODE_DPAD_DOWN: return 'ArrowDown';
+      case KeyCode.KEYCODE_MOVE_HOME: return 'Home';
+      case KeyCode.KEYCODE_MOVE_END: return 'End';
+      case KeyCode.KEYCODE_PAGE_UP: return 'PageUp';
+      case KeyCode.KEYCODE_PAGE_DOWN: return 'PageDown';
+      case KeyCode.KEYCODE_SHIFT_LEFT:
+      case KeyCode.KEYCODE_SHIFT_RIGHT: return 'Shift';
+      case KeyCode.KEYCODE_CTRL_LEFT:
+      case KeyCode.KEYCODE_CTRL_RIGHT: return 'Control';
+      case KeyCode.KEYCODE_ALT_LEFT:
+      case KeyCode.KEYCODE_ALT_RIGHT: return 'Alt';
+      default: return '';
+    }
+  }
+
+  private hardwareKey(event: KeyEvent): boolean {
+    if (!this.readyForInput() || this.inputPanel !== 'pointer') { return false; }
+    const code = this.hardwareCode(event.keyCode);
+    if (code.length === 0) { return false; }
+    if (event.type === KeyType.Down) {
+      if (this.send({ kind: 'key', code: code, down: true })) { this.heldKeys.add(event.keyCode); }
+    } else if (event.type === KeyType.Up) {
+      if (!this.heldKeys.delete(event.keyCode)) { return true; }
+      let sharedKeyHeld = false;
+      this.heldKeys.forEach((key: number) => { if (this.hardwareCode(key) === code) { sharedKeyHeld = true; } });
+      if (!sharedKeyHeld) { this.send({ kind: 'key', code: code, down: false }); }
+    }
+    return true;
+  }
+
+  private toggleTools(): void {
+    this.stopInput();
+    this.toolsOpen = !this.toolsOpen;
+  }
 
   private compact(): boolean { return this.areaWidth < 600; }
 
@@ -33,19 +237,25 @@ export struct RemoteSession {
   private surfaceWidth(): number { return Math.min(this.areaWidth, this.areaHeight * this.ratio()); }
   private surfaceHeight(): number { return this.surfaceWidth() / this.ratio(); }
   private panelTop(): number { return this.compact() ? 134 : 80; }
+  private inputPanelTop(): number {
+    return this.inputPanel === 'keyboard' ? Math.min(this.panelTop(), Math.max(0, this.areaHeight - 300)) : this.panelTop();
+  }
 
   private leave(): void {
+    this.stopInput();
     this.toolsOpen = false;
     this.onBack();
   }
 
   private disconnect(): void {
+    this.stopInput();
     this.toolsOpen = false;
     this.toolbarCollapsed = false;
     this.onDisconnect();
   }
 
   private retry(): void {
+    this.stopInput();
     this.toolsOpen = false;
     this.toolbarCollapsed = false;
     this.onRetry();
@@ -72,10 +282,13 @@ export struct RemoteSession {
   @Builder
   private modeSwitch() {
     Row({ space: 3 }) {
-      Text('仅查看').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#196B52')
-        .padding({ left: 9, right: 9, top: 10, bottom: 10 }).backgroundColor('#FFFFFF').borderRadius(6)
-      Button('控制·未实现', { type: ButtonType.Normal }).fontSize(10).height(38)
-        .padding({ left: 6, right: 6 }).backgroundColor(Color.Transparent).fontColor('#778780').enabled(false)
+      Button('仅查看', { type: ButtonType.Normal }).fontSize(12).height(38).fontColor('#196B52')
+        .padding({ left: 9, right: 9 }).backgroundColor(this.controlMode ? Color.Transparent : '#FFFFFF').borderRadius(6)
+        .onClick(() => this.stopInput())
+      Button('控制', { type: ButtonType.Normal }).fontSize(12).height(38)
+        .padding({ left: 9, right: 9 }).borderRadius(6).backgroundColor(this.controlMode ? '#FFFFFF' : Color.Transparent)
+        .fontColor('#196B52').enabled(canSendSystemInput(this.screen, this.sessionVisible, true))
+        .onClick(() => this.openInput('pointer'))
     }.padding(3).borderRadius(9).backgroundColor('#EEF3E9').border({ width: 1, color: '#DCE6D7' })
   }
 
@@ -94,7 +307,14 @@ export struct RemoteSession {
   private tools() {
     Row({ space: 1 }) {
       this.unavailableTool($r('app.media.desk_session_folder'), '文件')
-      this.unavailableTool($r('app.media.desk_session_keyboard'), '键盘')
+      Button({ type: ButtonType.Normal }) {
+        Column({ space: 2 }) {
+          Image($r('app.media.desk_session_keyboard')).width(18).height(18)
+          Text('键盘').fontSize(10).fontColor('#426A4D')
+        }
+      }.width(44).height(44).borderRadius(8).backgroundColor(this.inputPanel === 'keyboard' ? '#E4EFDF' : Color.Transparent)
+        .enabled(canSendSystemInput(this.screen, this.sessionVisible, true)).accessibilityText('键盘与确认文本')
+        .onClick(() => this.openInput('keyboard'))
       Button({ type: ButtonType.Normal }) {
         Column({ space: 2 }) {
           Image($r('app.media.desk_session_settings')).width(18).height(18)
@@ -103,7 +323,7 @@ export struct RemoteSession {
       }.width(44).height(44).borderRadius(8)
         .backgroundColor(this.toolsOpen ? '#E4EFDF' : Color.Transparent)
         .accessibilityText(this.toolsOpen ? '关闭会话工具' : '打开会话工具')
-        .onClick(() => { this.toolsOpen = !this.toolsOpen; })
+        .onClick(() => this.toggleTools())
     }
   }
 
@@ -114,6 +334,7 @@ export struct RemoteSession {
         .padding({ left: 12, right: 12 }).borderRadius(8).backgroundColor('#FFF5F2')
         .onClick(() => this.disconnect())
       this.iconButton($r('app.media.desk_session_up'), '收起工具栏', () => {
+        this.stopInput();
         this.toolsOpen = false;
         this.toolbarCollapsed = true;
       })
@@ -155,7 +376,7 @@ export struct RemoteSession {
         Image($r('app.media.desk_session_monitor')).width(18).height(18)
         Text(this.deviceName || '远程设备').fontSize(12).fontColor('#20352F')
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-        Text('仅查看').fontSize(10).fontColor('#426A4D').padding(5).backgroundColor('#E3EFDB').borderRadius(5)
+        Text(this.controlMode ? '控制中' : '仅查看').fontSize(10).fontColor('#426A4D').padding(5).backgroundColor('#E3EFDB').borderRadius(5)
         Image($r('app.media.desk_session_down')).width(16).height(16)
       }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 12 })
     }.width(Math.min(this.areaWidth - 24, 360)).borderRadius({ bottomLeft: 12, bottomRight: 12 })
@@ -179,18 +400,21 @@ export struct RemoteSession {
     Column() {
       Row() {
         Text('会话工具').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#20352F').layoutWeight(1)
-        this.iconButton($r('app.media.desk_session_close'), '关闭会话工具', () => { this.toolsOpen = false; })
+        this.iconButton($r('app.media.desk_session_close'), '关闭会话工具', () => { this.stopInput(); this.toolsOpen = false; })
       }.padding({ left: 18, right: 5 }).width('100%')
       Scroll() {
         Column({ space: 12 }) {
           Column({ space: 7 }) {
-            Text('当前仅允许查看').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#196B52')
-            Text('触摸画面不会操作电脑。键鼠控制、键盘输入和文件传输尚未实现。')
+            Text(this.screen.inputGranted ? 'Windows 本机已允许键鼠' : '当前仅允许查看').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#196B52')
+            Text(this.screen.inputSupported ? '请在 Windows 本机单独允许键鼠，再切换控制。文件与剪贴板仍未开放。' : '当前被控入口未开放键鼠。需在 Windows 本机启用输入入口，重新连接并单独允许。')
               .fontSize(12).fontColor('#778780').lineHeight(20)
           }.alignItems(HorizontalAlign.Start).width('100%').padding(14).borderRadius(10).backgroundColor('#EDF4E6')
           this.stat('连接地址', () => this.endpoint || '未提供')
           this.stat('设备身份', () => this.screen.verified ? '已通过可信身份核验' : '尚未完成核验')
           this.stat('本次授权', () => this.screen.approved ? 'Windows 本机已批准查看' : '尚未批准查看')
+          this.stat('键盘与鼠标', () => this.screen.inputGranted ? '本机已独立允许；当前仅查看' : '尚未获得本次输入许可')
+          Button('打开触控板', { type: ButtonType.Normal }).height(44).width('100%').fontColor('#FFFFFF').backgroundColor('#196B52').borderRadius(10)
+            .enabled(canSendSystemInput(this.screen, this.sessionVisible, true)).onClick(() => this.openInput('pointer'))
           this.stat('远端画面', () => this.screen.approved && this.screen.width > 0 && this.screen.height > 0 ?
             `${this.screen.width} × ${this.screen.height}` : '等待画面协商')
           this.stat('实际接收 / 呈现', () => `${this.screen.frames} 帧 / ${this.screen.rendered} 帧`)
@@ -205,6 +429,73 @@ export struct RemoteSession {
       .height(Math.max(100, this.areaHeight - this.panelTop() - 12))
       .borderRadius(15).clip(true).backgroundColor('#FCFEFA').border({ width: 1, color: '#DCE6DC' })
       .position({ x: this.areaWidth - (this.compact() ? this.areaWidth - 24 : 316) - 12, y: this.panelTop() })
+  }
+
+  @Builder
+  private inputAction(label: () => string, action: () => void, allowed: () => boolean = () => true) {
+    Button(label(), { type: ButtonType.Normal }).height(44).fontSize(12).fontColor('#196B52')
+      .padding({ left: 12, right: 12 }).borderRadius(8).backgroundColor('#EDF4E6')
+      .margin({ right: 7, bottom: 7 }).enabled(this.readyForInput() && allowed()).focusOnTouch(false).onClick(action)
+  }
+
+  @Builder
+  private pointerPad() {
+    Stack() {
+      Text(this.leftHeld ? '左键保持按下 · 滑动拖动\n再次点击按住按钮即可释放' : '单指滑动移动 · 轻点左击\n光标以 Windows 画面为准')
+        .fontSize(12).fontColor('#627A55').textAlign(TextAlign.Center).lineHeight(22)
+    }.width('100%').height(this.areaHeight < 480 ? 90 : 142).backgroundColor('#F0F5EB').borderRadius(12)
+      .border({ width: 1, color: '#C9D9BC', style: BorderStyle.Dashed }).id('system-touchpad').focusable(true)
+      .onTouch((event: TouchEvent) => this.pointerTouch(event))
+      .onKeyEvent((event: KeyEvent) => this.hardwareKey(event)).onBlur(() => this.inputBlur())
+  }
+
+  @Builder
+  private inputControls() {
+    Column() {
+      Row() {
+        Text(this.inputPanel === 'pointer' ? '触控板 · 控制中' : '键盘与文字').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#20352F').layoutWeight(1)
+        this.iconButton($r('app.media.desk_session_close'), '关闭输入并切回仅查看', () => this.stopInput())
+      }.width('100%').padding({ left: 16, right: 5 })
+      if (this.inputPanel === 'pointer') {
+        Column() { this.pointerPad() }.width('100%').padding({ left: 16, right: 16, top: 8, bottom: 8 })
+      }
+      Scroll() {
+        Column({ space: 12 }) {
+          if (this.inputPanel === 'pointer') {
+            Flex({ wrap: FlexWrap.Wrap }) {
+              this.inputAction(() => '左键', () => this.clickMouse('left'))
+              this.inputAction(() => '右键', () => this.clickMouse('right'))
+              this.inputAction(() => '中键', () => this.clickMouse('middle'))
+              this.inputAction(() => this.leftHeld ? '释放左键' : '按住左键', () => this.toggleLeftHold())
+              this.inputAction(() => '滚轮 ↑', () => { this.send({ kind: 'wheel', dx: 0, dy: 1 }); })
+              this.inputAction(() => '滚轮 ↓', () => { this.send({ kind: 'wheel', dx: 0, dy: -1 }); })
+              this.inputAction(() => '横滚 ←', () => { this.send({ kind: 'wheel', dx: -1, dy: 0 }); })
+              this.inputAction(() => '横滚 →', () => { this.send({ kind: 'wheel', dx: 1, dy: 0 }); })
+              this.inputAction(() => '释放全部按键', () => this.releasePressed(true))
+            }.width('100%')
+            Text('点击触控板后可使用外接物理键盘。文本选词请使用工具栏的键盘入口。').fontSize(11).fontColor('#778780').lineHeight(18)
+          } else {
+            Text('只发送确认后的文字。中文选词完成后点击发送，最多 512 UTF-8 字节。').fontSize(12).fontColor('#778780').lineHeight(20)
+            TextInput({ text: this.inputText, controller: this.textController, placeholder: '输入并确认要发到 Windows 的文字' })
+              .width('100%').height(48).fontSize(14).maxLength(512).enablePreviewText(true).backgroundColor('#F0F5EB')
+              .onChange((value: string, preview?: PreviewText) => { this.inputText = value; this.previewActive = (preview?.value.length ?? 0) > 0; })
+              .onBlur(() => this.inputBlur())
+              .onSubmit((_type: EnterKeyType, event?: SubmitEvent) => { if (this.readyForInput()) { event?.keepEditableState(); this.submitText(); } })
+            Button('发送确认文本', { type: ButtonType.Normal }).height(44).width('100%').fontSize(13).backgroundColor('#196B52').fontColor('#FFFFFF').borderRadius(9)
+              .enabled(this.readyForInput() && canSubmitInputText(this.inputText, this.previewActive)).focusOnTouch(false).onClick(() => this.submitText())
+            Flex({ wrap: FlexWrap.Wrap }) {
+              ForEach(['Escape', 'Tab', 'Enter', 'Backspace', 'Delete', 'Space', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'], (code: string) => {
+                this.inputAction(() => code, () => this.tapKey(code), () => !this.previewActive)
+              }, (code: string) => code)
+            }.width('100%')
+          }
+          if (this.inputNotice.length > 0) { Text(this.inputNotice).fontSize(11).fontColor('#778780').lineHeight(18).width('100%') }
+        }.width('100%').padding({ left: 16, right: 16, top: 8, bottom: 16 })
+      }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
+    }.width(this.compact() ? this.areaWidth - 24 : 390)
+      .height(Math.min(440, Math.max(80, this.areaHeight - this.inputPanelTop() - 12)))
+      .backgroundColor('#FCFEFA').borderRadius(15).clip(true).border({ width: 1, color: '#DCE6DC' })
+      .position({ x: this.areaWidth - (this.compact() ? this.areaWidth - 24 : 390) - 12, y: this.inputPanelTop() })
   }
 
   @Builder
@@ -268,7 +559,7 @@ export struct RemoteSession {
               .onClick(() => this.disconnect())
           }
         }.width('100%')
-        Text(this.terminal() ? '当前没有有效授权 · 重连需要重新批准' : '仅请求查看 · 键盘、鼠标和文件权限未开放')
+        Text(this.terminal() ? '当前没有有效授权 · 重连需要重新批准' : '查看批准不授予键鼠 · 输入需要本机另行允许')
           .fontSize(11).fontColor('#778780').textAlign(TextAlign.Center).lineHeight(18)
       }.width('100%').padding({ top: 14 }).border({ width: { top: 1 }, color: '#E4EAE5' })
     }.width(Math.min(this.areaWidth - 24, 500)).height(Math.min(this.areaHeight - 24, this.terminal() ? 400 : 650))
@@ -288,9 +579,10 @@ export struct RemoteSession {
           this.stateCard()
         }.width('100%').height('100%').backgroundColor('#344B45')
       } else {
-        Text('仅查看 · 键鼠尚未开放').fontSize(11).fontColor('#426A4D')
+        Text(this.inputNotice.length > 0 && this.inputPanel.length === 0 ? this.inputNotice : this.controlMode ? '控制中 · Windows 本机已允许键鼠' : this.screen.inputGranted ? '仅查看 · 已暂停键鼠' : '仅查看 · 键鼠尚未获准').fontSize(11).fontColor('#426A4D')
           .padding({ left: 12, right: 12, top: 9, bottom: 9 }).borderRadius(8).backgroundColor('#EDF4E6')
-          .height(32).position({ x: 12, y: this.areaHeight - 44 })
+          .height(32).constraintSize({ maxWidth: this.areaWidth - 24 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          .position({ x: 12, y: this.areaHeight - 44 })
         if (this.toolbarCollapsed) {
           this.collapsedToolbar()
         } else {
@@ -299,11 +591,13 @@ export struct RemoteSession {
         if (this.toolsOpen) {
           this.toolsPanel()
         }
+        if (this.inputPanel.length > 0) { this.inputControls() }
       }
     }.width('100%').height('100%').backgroundColor('#344B45').clip(true)
       .onAreaChange((_oldArea: Area, area: Area) => {
         const width: number = parseFloat(String(area.width));
         const height: number = parseFloat(String(area.height));
+        if (width !== this.areaWidth || (height !== this.areaHeight && this.inputPanel !== 'keyboard')) { this.stopInput(); }
         if (width > 0) { this.areaWidth = width; }
         if (height > 0) { this.areaHeight = height; }
       })

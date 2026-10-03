@@ -139,6 +139,8 @@ pub struct Client {
     pub avatar: String,
     pub peer_id: String,
     pub keyboard: bool,
+    pub ord_input_supported: bool,
+    pub ord_input_release_failed: bool,
     pub clipboard: bool,
     pub audio: bool,
     pub file: bool,
@@ -249,6 +251,8 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             avatar,
             peer_id: peer_id.clone(),
             keyboard,
+            ord_input_supported: false,
+            ord_input_release_failed: false,
             clipboard,
             audio,
             file,
@@ -596,6 +600,22 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     self.cm.new_message(self.conn_id, text);
                                 }
                                 Data::SwitchPermission { name, enabled } => {
+                                    #[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
+                                    if matches!(name.as_str(), "keyboard" | "ord_input_supported" | "ord_input_release_failed") {
+                                        let args: Vec<String> = std::env::args().skip(1).collect();
+                                        if crate::secure_host_ui::is_ord_secure_cm(&args, true) {
+                                            let client = {
+                                                let mut clients = CLIENTS.write().unwrap();
+                                                clients.get_mut(&self.conn_id).map(|client| {
+                                                    if name == "keyboard" { client.keyboard = enabled; }
+                                                    else if name == "ord_input_supported" { client.ord_input_supported = enabled; }
+                                                    else { client.ord_input_release_failed |= enabled; }
+                                                    client.clone()
+                                                })
+                                            };
+                                            if let Some(client) = client { self.cm.ui_handler.add_connection(&client); }
+                                        }
+                                    }
                                     // Keep this branch scoped to privacy mode rollback.
                                     // Other CM permission toggles are updated optimistically by the UI itself.
                                     // The backend currently sends SwitchPermission back to CM only when

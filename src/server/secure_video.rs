@@ -23,12 +23,13 @@ use winapi::{
     um::{
         wingdi::{
             CreateCompatibleDC, CreateDCW, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush,
-            GetDeviceCaps, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO,
+            GetDeviceCaps, GetObjectW, SelectObject, SetStretchBltMode, StretchBlt, BITMAP, BITMAPINFO,
             BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, HORZRES, SRCCOPY, VERTRES,
         },
         winuser::{
-            CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, DESKTOP_READOBJECTS,
-            UOI_NAME,
+            CloseDesktop, CopyIcon, DestroyIcon, DrawIconEx, GetCursorInfo, GetIconInfo,
+            GetUserObjectInformationW, OpenInputDesktop, CURSORINFO, CURSOR_SHOWING,
+            DESKTOP_READOBJECTS, ICONINFO, UOI_NAME,
         },
     },
 };
@@ -80,7 +81,7 @@ fn scaled_dimensions(width: u32, height: u32) -> ResultType<Dimensions> {
     Ok(result)
 }
 
-fn visible_desktop() -> ResultType<()> {
+pub(super) fn visible_desktop() -> ResultType<()> {
     if crate::platform::is_locked() {
         bail!("Interactive desktop is unavailable");
     }
@@ -120,7 +121,7 @@ fn check_initial_desktop() -> ResultType<()> {
     visible_desktop()
 }
 
-fn primary_dc() -> ResultType<(HDC, u32, u32)> {
+pub(super) fn primary_dc() -> ResultType<(HDC, u32, u32)> {
     let name: Vec<u16> = "DISPLAY\0".encode_utf16().collect();
     unsafe {
         let dc = CreateDCW(name.as_ptr(), ptr::null(), ptr::null(), ptr::null());
@@ -252,6 +253,52 @@ impl Capture {
             Ok(std::slice::from_raw_parts(self.pixels, len))
         }
     }
+
+    fn control_frame(&mut self) -> ResultType<&[u8]> {
+        self.frame()?;
+        unsafe {
+            let mut cursor: CURSORINFO = std::mem::zeroed();
+            cursor.cbSize = size_of::<CURSORINFO>() as _;
+            if GetCursorInfo(&mut cursor) == 0 { bail!("Cursor unavailable"); }
+            if cursor.flags & CURSOR_SHOWING != 0
+                && cursor.ptScreenPos.x >= 0 && cursor.ptScreenPos.x < self.source_width
+                && cursor.ptScreenPos.y >= 0 && cursor.ptScreenPos.y < self.source_height {
+                let icon = CopyIcon(cursor.hCursor);
+                if icon.is_null() { bail!("Cursor copy failed"); }
+                let mut info: ICONINFO = std::mem::zeroed();
+                let result = (|| -> ResultType<()> {
+                    if GetIconInfo(icon, &mut info) == 0 { bail!("Cursor bitmap unavailable"); }
+                    let mut bitmap: BITMAP = std::mem::zeroed();
+                    let source = if info.hbmColor.is_null() { info.hbmMask } else { info.hbmColor };
+                    if source.is_null() || GetObjectW(source as _, size_of::<BITMAP>() as _, &mut bitmap as *mut _ as _) == 0 {
+                        bail!("Cursor dimensions unavailable");
+                    }
+                    let height = if info.hbmColor.is_null() { bitmap.bmHeight / 2 } else { bitmap.bmHeight };
+                    if bitmap.bmWidth <= 0 || height <= 0 { bail!("Invalid cursor dimensions"); }
+                    let x = scaled_cursor_axis(cursor.ptScreenPos.x, info.xHotspot, self.source_width, self.dimensions.width);
+                    let y = scaled_cursor_axis(cursor.ptScreenPos.y, info.yHotspot, self.source_height, self.dimensions.height);
+                    let width = (i64::from(bitmap.bmWidth) * i64::from(self.dimensions.width) / i64::from(self.source_width)).max(1) as i32;
+                    let height = (i64::from(height) * i64::from(self.dimensions.height) / i64::from(self.source_height)).max(1) as i32;
+                    if DrawIconEx(self.target, x, y, icon, width, height, 0, ptr::null_mut(), windows::Win32::UI::WindowsAndMessaging::DI_NORMAL.0) == 0 {
+                        bail!("Cursor rendering failed");
+                    }
+                    Ok(())
+                })();
+                if !info.hbmColor.is_null() { DeleteObject(info.hbmColor as _); }
+                if !info.hbmMask.is_null() { DeleteObject(info.hbmMask as _); }
+                DestroyIcon(icon);
+                result?;
+            }
+            if GdiFlush() == 0 { bail!("Cursor synchronization failed"); }
+            visible_desktop()?;
+            let len = self.dimensions.width as usize * self.dimensions.height as usize * 4;
+            Ok(std::slice::from_raw_parts(self.pixels, len))
+        }
+    }
+}
+
+fn scaled_cursor_axis(position: i32, hotspot: u32, source: i32, target: u32) -> i32 {
+    ((i64::from(position) - i64::from(hotspot)) * i64::from(target) / i64::from(source)) as i32
 }
 
 impl Drop for Capture {
@@ -269,6 +316,7 @@ fn run_worker(
     dimensions: Dimensions,
     tx: mpsc::Sender<Result<Message, ()>>,
     cancelled: Arc<AtomicBool>,
+    show_cursor: bool,
 ) -> ResultType<()> {
     let mut capture = Capture::new(dimensions)?;
     let mut encoder = Encoder::new(
@@ -291,7 +339,7 @@ fn run_worker(
     let started = Instant::now();
     while !cancelled.load(Ordering::Acquire) && !tx.is_closed() {
         let tick = Instant::now();
-        let pixels = capture.frame()?;
+        let pixels = if show_cursor { capture.control_frame()? } else { capture.frame()? };
         if previous.as_slice() != pixels {
             previous.clear();
             previous.extend_from_slice(pixels);
@@ -365,7 +413,7 @@ pub fn start(dimensions: Dimensions) -> ResultType<Worker> {
     std::thread::Builder::new()
         .name("ord-secure-video".to_owned())
         .spawn(move || {
-            if let Err(error) = run_worker(dimensions, tx.clone(), flag) {
+            if let Err(error) = run_worker(dimensions, tx.clone(), flag, false) {
                 hbb_common::log::warn!("Secure video stopped: {error}");
                 let _ = tx.blocking_send(Err(()));
             }
@@ -376,9 +424,34 @@ pub fn start(dimensions: Dimensions) -> ResultType<Worker> {
     })
 }
 
+pub fn start_control(dimensions: Dimensions) -> ResultType<Worker> {
+    if !allowed() { bail!("Secure video is disabled locally"); }
+    let (tx, receiver) = mpsc::channel(1);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancelled);
+    std::thread::Builder::new()
+        .name("ord-control-video".to_owned())
+        .spawn(move || {
+            if let Err(error) = run_worker(dimensions, tx.clone(), flag, true) {
+                hbb_common::log::warn!("Control video stopped: {error}");
+                if tx.blocking_send(Err(())).is_err() {
+                    hbb_common::log::trace!("Control video receiver already closed");
+                }
+            }
+        })?;
+    Ok(Worker { receiver, cancelled })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_hotspot_is_scaled_and_clipped_at_screen_edges() {
+        assert_eq!(scaled_cursor_axis(960, 12, 1920, 1280), 632);
+        assert_eq!(scaled_cursor_axis(0, 12, 1920, 1280), -8);
+        assert_eq!(scaled_cursor_axis(1919, 0, 1920, 1280), 1279);
+    }
 
     #[test]
     fn bounds_and_even_dimensions_preserve_aspect_ratio() {

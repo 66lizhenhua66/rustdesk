@@ -234,3 +234,50 @@ fn video_request_requires_vp8_preference_and_video_profile_is_bounded() {
     assert_eq!(additions["video_codec"], "vp8");
     assert_eq!(additions["input_scope"], "none");
 }
+
+#[test]
+fn control_version_requires_vp8_and_keeps_read_only_peer_distinct() {
+    use message_proto::{supported_decoding::PreferCodec, OptionMessage, SupportedDecoding};
+
+    let mut login = LoginRequest {
+        username: "123456789".into(),
+        my_id: "987654321".into(),
+        ..Default::default()
+    };
+    assert!(!policy::requests_input(&login));
+    login.ord_input_version = 1;
+    assert!(!policy::requests_input(&login));
+    let mut decoding = SupportedDecoding::new();
+    decoding.ability_vp8 = 1;
+    decoding.prefer = PreferCodec::VP8.into();
+    login.option = Some(OptionMessage {
+        supported_decoding: Some(decoding).into(),
+        ..Default::default()
+    })
+    .into();
+    for (version, accepted) in [(0, false), (1, true), (2, false)] {
+        login.ord_input_version = version;
+        assert_eq!(policy::requests_input(&login), accepted);
+        assert_eq!(policy::valid_login(&login, "123456789"), version != 2);
+    }
+
+    let control = policy::approved_control_peer_info("1.5.0", 1280, 720);
+    let peer = control.login_response().peer_info();
+    assert_eq!(peer.displays.len(), 1);
+    assert_eq!(
+        (peer.displays[0].width, peer.displays[0].height),
+        (1280, 720)
+    );
+    let additions: serde_json::Value = serde_json::from_str(&peer.platform_additions).unwrap();
+    assert_eq!(additions.as_object().unwrap().len(), 5);
+    assert_eq!(additions["input_scope"], "windows_primary");
+    assert_eq!(additions["input_version"], 1);
+    assert_eq!(additions["video_codec"], "vp8");
+
+    let read_only = policy::approved_video_peer_info("1.5.0", 1280, 720);
+    let additions: serde_json::Value =
+        serde_json::from_str(&read_only.login_response().peer_info().platform_additions).unwrap();
+    assert_eq!(additions.as_object().unwrap().len(), 4);
+    assert_eq!(additions["input_scope"], "none");
+    assert!(additions.get("input_version").is_none());
+}

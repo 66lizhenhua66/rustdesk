@@ -1,5 +1,5 @@
 use super::super::secure_host_policy::{self, Request};
-use super::super::secure_video;
+use super::super::{secure_input, secure_video};
 use super::*;
 
 fn approve_pending(pending: &mut bool, authorized: &mut bool, requires_2fa: bool) -> bool {
@@ -11,7 +11,32 @@ fn approve_pending(pending: &mut bool, authorized: &mut bool, requires_2fa: bool
     true
 }
 
+fn local_approval_allowed() -> bool {
+    get_time().saturating_sub(CLICK_TIME.load(Ordering::SeqCst)) > 200
+}
+
 impl Connection {
+    async fn send_secure_input_state(&mut self, input: &secure_input::Control) -> bool {
+        self.keyboard = input.enabled();
+        self.send_to_cm(ipc::Data::SwitchPermission { name: "ord_input_supported".into(), enabled: input.supported() });
+        self.send_to_cm(ipc::Data::SwitchPermission { name: "keyboard".into(), enabled: self.keyboard });
+        if self.stream.send(&input.state()).await.is_err() { return false; }
+        let mut misc = Misc::new();
+        misc.set_permission_info(PermissionInfo { permission: Permission::Keyboard.into(), enabled: self.keyboard, ..Default::default() });
+        let mut message = Message::new();
+        message.set_misc(misc);
+        self.stream.send(&message).await.is_ok()
+    }
+
+    async fn send_secure_input_error(&mut self, reason: &str) {
+        let mut misc = Misc::new();
+        misc.set_close_reason(reason.to_owned());
+        let mut message = Message::new();
+        message.set_misc(misc);
+        if self.stream.send(&message).await.is_err() {
+            log::trace!("Secure input close notification could not be sent");
+        }
+    }
     async fn send_secure_video_error(&mut self) {
         let mut misc = Misc::new();
         misc.set_close_reason("Screen unavailable".to_owned());
@@ -73,6 +98,7 @@ impl Connection {
         let session_deadline = started + Duration::from_secs(30 * 60);
         let mut stop_tick = time::interval(Duration::from_secs(1));
         let mut video_worker: Option<secure_video::Worker> = None;
+        let mut input = secure_input::Control::new(self.inner.id());
         loop {
             if super::super::secure_host::is_stopped() {
                 break;
@@ -83,13 +109,22 @@ impl Connection {
                     if super::super::secure_host::is_stopped() {
                         break;
                     }
+                    match input.tick() {
+                        Ok(true) => {
+                            self.send_secure_input_state(&input).await;
+                            break;
+                        }
+                        Err(error) => { log::warn!("Secure input watchdog stopped: {error}"); break; }
+                        Ok(false) => {}
+                    }
                 }
                 _ = time::sleep_until(session_deadline) => break,
                 _ = time::sleep_until(login_deadline), if !self.authorized => break,
                 _ = unauthorized_evicted(&self.unauthorized_id) => break,
-                Some(data) = rx_from_cm.recv() => {
+                data = rx_from_cm.recv() => {
+                    let Some(data) = data else { break; };
                     match data {
-                        ipc::Data::Authorize if approve_pending(
+                        ipc::Data::Authorize if local_approval_allowed() && approve_pending(
                             &mut self.secure_login_pending,
                             &mut self.authorized,
                             self.require_2fa.is_some(),
@@ -97,6 +132,7 @@ impl Connection {
                             self.unauthorized_id = None;
                             self.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);
                             let video_requested = secure_host_policy::requests_video(&self.lr);
+                            let input_requested = secure_host_policy::requests_input(&self.lr);
                             if video_requested && !secure_video::allowed() {
                                 self.send_secure_video_error().await;
                                 break;
@@ -111,8 +147,11 @@ impl Connection {
                                 None
                             };
                             let info = if let Some(dimensions) = video_dimensions {
-                                secure_host_policy::approved_video_peer_info(
-                                    VERSION, dimensions.width as _, dimensions.height as _)
+                                if input_requested {
+                                    secure_host_policy::approved_control_peer_info(VERSION, dimensions.width as _, dimensions.height as _)
+                                } else {
+                                    secure_host_policy::approved_video_peer_info(VERSION, dimensions.width as _, dimensions.height as _)
+                                }
                             } else {
                                 secure_host_policy::approved_peer_info(VERSION)
                             };
@@ -123,7 +162,8 @@ impl Connection {
                                 break;
                             }
                             if let Some(dimensions) = video_dimensions {
-                                match secure_video::start(dimensions) {
+                                let worker = if input_requested { secure_video::start_control(dimensions) } else { secure_video::start(dimensions) };
+                                match worker {
                                     Ok(worker) => video_worker = Some(worker),
                                     Err(_) => {
                                         self.send_secure_video_error().await;
@@ -133,11 +173,26 @@ impl Connection {
                             }
                             #[cfg(feature = "flutter")]
                             self.try_start_cm(self.lr.my_id.clone(), self.lr.my_name.clone(), true);
+                            if input_requested {
+                                input.configure(Self::permission(keys::OPTION_ENABLE_KEYBOARD, &self.control_permissions));
+                                if !self.send_secure_input_state(&input).await { break; }
+                            }
                         }
                         ipc::Data::Close => break,
                         ipc::Data::CmErr(_) => break,
-                        ipc::Data::SwitchPermission { .. } => {
-                            if !self.send_secure_permissions().await {
+                        ipc::Data::SwitchPermission { name, enabled } => {
+                            if self.authorized && secure_host_policy::requests_input(&self.lr) {
+                                if name == "keyboard" {
+                                    let result = if enabled {
+                                        if local_approval_allowed() && Self::permission(keys::OPTION_ENABLE_KEYBOARD, &self.control_permissions) {
+                                            input.grant()
+                                        } else { Err("Local input approval was blocked".to_owned()) }
+                                    } else { input.revoke() };
+                                    if let Err(error) = result { log::warn!("Secure input permission unchanged: {error}"); }
+                                    if input.poisoned() { break; }
+                                }
+                                if !self.send_secure_input_state(&input).await { break; }
+                            } else if !self.send_secure_permissions().await {
                                 break;
                             }
                         }
@@ -171,11 +226,39 @@ impl Connection {
                         break;
                     }
                     let Ok(message) = Message::parse_from_bytes(&bytes) else { break; };
+                    if secure_host_policy::classify_message(&message) == Request::Input {
+                        if !self.authorized || !secure_host_policy::requests_input(&self.lr) { break; }
+                        let Some(message::Union::OrdInputEvent(event)) = message.union else { break; };
+                        let echo = matches!(&event.command, Some(ord_input_event::Command::KeepAlive(_))).then(|| event.clone());
+                        match input.apply(event) {
+                            Ok(true) => {
+                                if let Some(echo) = echo {
+                                    let mut reply = Message::new();
+                                    reply.set_ord_input_event(echo);
+                                    if self.stream.send(&reply).await.is_err() { break; }
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(error) => { log::warn!("Secure input rejected: {error}"); break; }
+                        }
+                        continue;
+                    }
                     if !self.on_secure_host_message(message).await {
                         break;
                     }
                 }
             }
+        }
+        if let Err(error) = input.revoke() {
+            self.send_to_cm(ipc::Data::SwitchPermission { name: "ord_input_release_failed".into(), enabled: true });
+            self.keyboard = false;
+            log::error!("Secure input cleanup failed: {error}");
+            if secure_host_policy::requests_input(&self.lr) {
+                self.send_secure_input_state(&input).await;
+                self.send_secure_input_error("Input release failed").await;
+            }
+        } else if self.authorized && secure_host_policy::requests_input(&self.lr) {
+            self.send_secure_input_state(&input).await;
         }
         drop(video_worker);
         self.secure_login_pending = false;
@@ -218,7 +301,7 @@ impl Connection {
                 true
             }
             Request::Close => false,
-            Request::Login | Request::Denied => false,
+            Request::Login | Request::Input | Request::Denied => false,
         }
     }
 }

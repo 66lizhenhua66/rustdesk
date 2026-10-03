@@ -532,6 +532,11 @@ class ServerModel with ChangeNotifier {
         if (index < 0) {
           _clients.add(client);
         } else {
+          if (isSecureHostWindow) {
+            _clients[index].keyboard = client.keyboard;
+            _clients[index].ordInputSupported = client.ordInputSupported;
+            _clients[index].ordInputReleaseFailed = client.ordInputReleaseFailed;
+          }
           if (_clients[index].authorized) {
             _clients[index].privacyMode = client.privacyMode;
             notifyListeners();
@@ -808,6 +813,8 @@ class Client {
   String avatar = "";
   String peerId = ""; // peer user's id,show at app
   bool keyboard = false;
+  bool ordInputSupported = false;
+  bool ordInputReleaseFailed = false;
   bool clipboard = false;
   bool audio = false;
   bool file = false;
@@ -837,6 +844,8 @@ class Client {
     avatar = json['avatar'] ?? '';
     peerId = json['peer_id'];
     keyboard = json['keyboard'];
+    ordInputSupported = json['ord_input_supported'] == true;
+    ordInputReleaseFailed = json['ord_input_release_failed'] == true;
     clipboard = json['clipboard'];
     audio = json['audio'];
     file = json['file'];
@@ -862,6 +871,8 @@ class Client {
     data['avatar'] = avatar;
     data['peer_id'] = peerId;
     data['keyboard'] = keyboard;
+    data['ord_input_supported'] = ordInputSupported;
+    data['ord_input_release_failed'] = ordInputReleaseFailed;
     data['clipboard'] = clipboard;
     data['audio'] = audio;
     data['file'] = file;

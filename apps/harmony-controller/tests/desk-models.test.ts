@@ -83,6 +83,45 @@ test('statistics and rendered frames become visible only after approval', () => 
   assert.equal(streaming.rendered, 0);
 });
 
+test('only an authenticated input-state event grants control and revocation preserves video', () => {
+  const input = screenEvent('input_state', 'INPUT_STATE', true, true);
+  input.inputSupported = true;
+  input.authorized = true;
+  assert.equal(projectScreenEvent(initialScreenState(), input).inputGranted, false);
+  const approved = projectScreenEvent(initialScreenState(), screenEvent('connected', 'CONNECTED', true, true));
+  const legacy = screenEvent('permissions_changed', 'PERMISSIONS_CHANGED', true, true);
+  legacy.authorized = true;
+  assert.equal(projectScreenEvent(approved, legacy).inputGranted, false);
+
+  const granted = projectScreenEvent(approved, input);
+  assert.equal(granted.inputSupported, true);
+  assert.equal(granted.inputGranted, true);
+  const rendered = screenEvent('video_rendered', 'VIDEO_RENDERED', true, true);
+  rendered.renderedFrames = 5;
+  const viewing = projectScreenEvent(granted, rendered);
+  assert.equal(viewing.inputGranted, true);
+  const stats = screenEvent('video_status', 'VIDEO_STATUS', true, true);
+  stats.frames = 8;
+  assert.equal(projectScreenEvent(viewing, stats).inputGranted, true);
+
+  input.authorized = false;
+  const revoked = projectScreenEvent(viewing, input);
+  assert.equal(revoked.inputGranted, false);
+  assert.equal(revoked.inputSupported, true);
+  assert.equal(revoked.phase, 'viewing');
+  assert.equal(revoked.rendered, 5);
+  input.authorized = true;
+  input.inputSupported = false;
+  assert.equal(projectScreenEvent(viewing, input).inputGranted, false);
+  input.inputSupported = true;
+  input.authenticated = false;
+  assert.equal(projectScreenEvent(viewing, input).inputGranted, false);
+  const ended = projectScreenEvent(viewing, screenEvent('closed', 'DISCONNECTED'));
+  assert.equal(ended.inputGranted, false);
+  assert.equal(ended.inputSupported, false);
+  assert.equal(projectScreenEvent(ended, input).inputGranted, false);
+});
+
 test('terminal events clear approval and statistics and explain the next action', () => {
   const approved = projectScreenEvent(initialScreenState(),
     screenEvent('connected', 'CONNECTED', true, true));

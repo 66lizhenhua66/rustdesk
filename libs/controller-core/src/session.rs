@@ -23,6 +23,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     bytes_codec::BytesCodec,
+    input::{parse_command, ControlInputState},
     protos::message::{
         self, login_response, option_message, permission_info, Hash, KeyEvent, LoginRequest,
         Message, Misc, MouseEvent, OptionMessage, PublicKey, SupportedDecoding,
@@ -67,6 +68,7 @@ pub struct ControllerSession {
     connected: AtomicBool,
     authorized: AtomicBool,
     pending: Mutex<VecDeque<DemoInput>>,
+    control_input: Mutex<ControlInputState>,
 }
 
 pub type ControllerSessionCallback = unsafe extern "C" fn(*const c_char, *mut c_void);
@@ -159,6 +161,7 @@ fn create(
         connected: AtomicBool::new(false),
         authorized: AtomicBool::new(false),
         pending: Mutex::new(VecDeque::new()),
+        control_input: Mutex::new(ControlInputState::default()),
     }))
 }
 
@@ -203,6 +206,36 @@ pub extern "C" fn controller_session_send_text(
     queue_input(task, DemoInput::Text(text.to_owned()))
 }
 
+#[no_mangle]
+pub extern "C" fn controller_session_send_input_v1(
+    task: *mut ControllerSession,
+    command_json: *const c_char,
+) -> i32 {
+    if command_json.is_null() {
+        return 3;
+    }
+    let Ok(raw) = (unsafe { CStr::from_ptr(command_json) }).to_str() else {
+        return 3;
+    };
+    let Ok(command) = parse_command(raw) else {
+        return 3;
+    };
+    let Some(task) = (unsafe { task.as_ref() }) else {
+        return 3;
+    };
+    if task.expected_peer != PersistentPeer::SecureControl
+        || !task.connected.load(Ordering::Acquire)
+        || task.cancelled.load(Ordering::Acquire)
+    {
+        return 1;
+    }
+    let mut input = task.control_input.lock().unwrap();
+    if !task.connected.load(Ordering::Acquire) || task.cancelled.load(Ordering::Acquire) {
+        return 1;
+    }
+    input.queue(command)
+}
+
 fn queue_input(task: &ControllerSession, input: DemoInput) -> i32 {
     if !task.demo
         || !task.connected.load(Ordering::Acquire)
@@ -212,6 +245,9 @@ fn queue_input(task: &ControllerSession, input: DemoInput) -> i32 {
     }
     if !task.authorized.load(Ordering::Acquire) {
         return 2;
+    }
+    if task.expected_peer != PersistentPeer::Demo {
+        return 1;
     }
     let mut pending = task.pending.lock().unwrap();
     if !task.connected.load(Ordering::Acquire) || task.cancelled.load(Ordering::Acquire) {
@@ -510,6 +546,7 @@ fn response(
     peer_id: &str,
     demo: bool,
     video: bool,
+    control: bool,
 ) -> Message {
     let digest = if password.is_empty() {
         Vec::new()
@@ -532,7 +569,7 @@ fn response(
     };
     password.zeroize();
     let option = OptionMessage {
-        disable_keyboard: (if demo && !video {
+        disable_keyboard: (if demo && (!video || control) {
             option_message::BoolOption::No
         } else {
             option_message::BoolOption::Yes
@@ -561,6 +598,7 @@ fn response(
         password: digest,
         my_id: "123456789".to_owned(),
         my_name: "Harmony Controller".to_owned(),
+        ord_input_version: if control { 1 } else { 0 },
         option: MessageField::some(option),
         ..Default::default()
     });
@@ -573,6 +611,7 @@ enum PersistentPeer {
     Demo,
     SecureHost,
     SecureVideo,
+    SecureControl,
 }
 
 fn video_dimensions(peer: &message::PeerInfo) -> Option<(u32, u32)> {
@@ -585,6 +624,28 @@ fn video_dimensions(peer: &message::PeerInfo) -> Option<(u32, u32)> {
         || fields.get("input_scope")?.as_str()? != "none"
         || peer.displays.len() != 1
         || peer.current_display != 0
+    {
+        return None;
+    }
+    let display = &peer.displays[0];
+    if !(1..=1280).contains(&display.width) || !(1..=720).contains(&display.height) {
+        return None;
+    }
+    Some((display.width as u32, display.height as u32))
+}
+
+fn control_video_dimensions(peer: &message::PeerInfo) -> Option<(u32, u32)> {
+    let value: serde_json::Value = serde_json::from_str(&peer.platform_additions).ok()?;
+    let fields = value.as_object()?;
+    if fields.len() != 5
+        || fields.get("ord_secure_host")?.as_u64()? != 1
+        || fields.get("media")?.as_bool()? != true
+        || fields.get("video_codec")?.as_str()? != "vp8"
+        || fields.get("input_scope")?.as_str()? != "windows_primary"
+        || fields.get("input_version")?.as_u64()? != 1
+        || peer.displays.len() != 1
+        || peer.current_display != 0
+        || !peer.displays[0].online
     {
         return None;
     }
@@ -704,6 +765,220 @@ fn run_secure_video(
                     ))
                 }
             }
+        }
+    }
+}
+
+fn run_secure_control(
+    task: &ControllerSession,
+    callback: Option<ControllerSessionCallback>,
+    video_callback: ControllerVideoCallback,
+    user: *mut c_void,
+    wire: &mut Wire,
+    cipher: &mut Encrypt,
+    width: u32,
+    height: u32,
+) -> Result<(), Failure> {
+    let deadline = Instant::now() + DEMO_LIFETIME;
+    let mut first_frame = true;
+    let mut frames = 0u64;
+    let mut bytes = 0u64;
+    let mut last_status = Instant::now();
+    let mut last_heartbeat = Instant::now();
+    let mut last_inbound = Instant::now();
+    loop {
+        if let Some(message) = wire.poll_message(task, deadline, cipher)? {
+            if message
+                .special_fields
+                .unknown_fields()
+                .iter()
+                .next()
+                .is_some()
+            {
+                return Err(Failure::failed(
+                    "UNSUPPORTED_MESSAGE",
+                    "Unknown control message",
+                ));
+            }
+            last_inbound = Instant::now();
+            match message.union {
+                Some(message::message::Union::VideoFrame(video)) => {
+                    let Some(message::video_frame::Union::Vp8s(vp8)) = video.union else {
+                        return Err(Failure::failed("INVALID_VIDEO", "Unsupported video codec"));
+                    };
+                    if video.display != 0 || !(1..=4).contains(&vp8.frames.len()) {
+                        return Err(Failure::failed(
+                            "INVALID_VIDEO",
+                            "Invalid video display or frame count",
+                        ));
+                    }
+                    let mut total = 0usize;
+                    for frame in &vp8.frames {
+                        if frame.data.is_empty() || frame.data.len() > VIDEO_PART_LIMIT {
+                            return Err(Failure::failed(
+                                "INVALID_VIDEO",
+                                "Invalid encoded video size",
+                            ));
+                        }
+                        total = total.saturating_add(frame.data.len());
+                        if total > VIDEO_FRAME_LIMIT || first_frame && !frame.key {
+                            return Err(Failure::failed(
+                                "INVALID_VIDEO",
+                                "Invalid initial or oversized video frame",
+                            ));
+                        }
+                        first_frame = false;
+                    }
+                    for frame in &vp8.frames {
+                        status(task, deadline)?;
+                        // SAFETY: Frame bytes remain borrowed through this synchronous callback.
+                        unsafe {
+                            video_callback(
+                                frame.data.as_ptr(),
+                                frame.data.len() as u32,
+                                width,
+                                height,
+                                frame.pts,
+                                frame.key as u8,
+                                user,
+                            )
+                        };
+                        frames += 1;
+                        bytes += frame.data.len() as u64;
+                        status(task, deadline)?;
+                    }
+                    if last_status.elapsed() >= Duration::from_secs(1) {
+                        let input = task.control_input.lock().unwrap();
+                        let supported = input.supported();
+                        let allowed = input.allowed();
+                        drop(input);
+                        demo_event(
+                            callback,
+                            user,
+                            "video_status",
+                            "VIDEO_STATUS",
+                            "Video streaming",
+                            true,
+                            true,
+                            allowed,
+                            json!({"frames":frames,"bytes":bytes,"inputSupported":supported}),
+                        );
+                        last_status = Instant::now();
+                    }
+                }
+                Some(message::message::Union::OrdInputState(state)) => {
+                    let (supported, allowed) = {
+                        let mut input = task.control_input.lock().unwrap();
+                        let result = input.apply_state(&state);
+                        task.authorized.store(input.allowed(), Ordering::Release);
+                        result
+                    }
+                    .map_err(|_| {
+                        Failure::failed("INVALID_INPUT_STATE", "Invalid input permission state")
+                    })?;
+                    demo_event(
+                        callback,
+                        user,
+                        "input_state",
+                        "INPUT_STATE",
+                        "Input permission changed",
+                        true,
+                        true,
+                        allowed,
+                        json!({"inputSupported":supported}),
+                    );
+                }
+                Some(message::message::Union::OrdInputEvent(event)) => {
+                    let valid_echo = event.version == 1
+                        && event.grant_token.len() == 16
+                        && event
+                            .special_fields
+                            .unknown_fields()
+                            .iter()
+                            .next()
+                            .is_none()
+                        && matches!(event.command,
+                            Some(message::ord_input_event::Command::KeepAlive(ref heartbeat))
+                            if heartbeat.special_fields.unknown_fields().iter().next().is_none());
+                    let mut token = [0; 16];
+                    if valid_echo {
+                        token.copy_from_slice(&event.grant_token);
+                    }
+                    if !valid_echo || !task.control_input.lock().unwrap().matches_token(token) {
+                        return Err(Failure::failed(
+                            "INVALID_INPUT_HEARTBEAT",
+                            "Invalid input heartbeat echo",
+                        ));
+                    }
+                }
+                Some(message::message::Union::Misc(misc)) => match misc.union {
+                    Some(message::misc::Union::PermissionInfo(permission))
+                        if permission.enabled =>
+                    {
+                        if permission.permission.enum_value()
+                            != Ok(permission_info::Permission::Keyboard)
+                            || !task.control_input.lock().unwrap().allowed()
+                        {
+                            return Err(Failure::failed(
+                                "UNEXPECTED_PERMISSION",
+                                "Legacy permission cannot grant control",
+                            ));
+                        }
+                    }
+                    Some(message::misc::Union::PermissionInfo(_)) => {}
+                    Some(message::misc::Union::CloseReason(reason)) => {
+                        if reason == "Input release failed" {
+                            return Err(Failure::failed(
+                                "INPUT_RELEASE_FAILED",
+                                "Peer could not release injected input",
+                            ));
+                        }
+                        return Err(Failure::failed(
+                            "DISCONNECTED",
+                            "Peer closed control connection",
+                        ));
+                    }
+                    _ => {
+                        return Err(Failure::failed(
+                            "UNSUPPORTED_MESSAGE",
+                            "Unsupported control message",
+                        ))
+                    }
+                },
+                Some(message::message::Union::TestDelay(_)) => {}
+                _ => {
+                    return Err(Failure::failed(
+                        "UNSUPPORTED_MESSAGE",
+                        "Unsupported control message",
+                    ))
+                }
+            }
+        }
+        if task.control_input.lock().unwrap().allowed()
+            && last_inbound.elapsed() >= Duration::from_secs(5)
+        {
+            return Err(Failure::failed(
+                "TRANSPORT_STALLED",
+                "Control peer stopped responding",
+            ));
+        }
+        for _ in 0..8 {
+            let next_input = { task.control_input.lock().unwrap().pop() };
+            let Some((command, token)) = next_input else {
+                break;
+            };
+            if task.control_input.lock().unwrap().matches_token(token) {
+                let send_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+                wire.send_message(task, send_deadline, cipher, &command.into_message(token))?;
+            }
+        }
+        if last_heartbeat.elapsed() >= Duration::from_secs(1) {
+            let heartbeat = { task.control_input.lock().unwrap().keep_alive_message() };
+            if let Some(heartbeat) = heartbeat {
+                let send_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+                wire.send_message(task, send_deadline, cipher, &heartbeat)?;
+            }
+            last_heartbeat = Instant::now();
         }
     }
 }
@@ -908,13 +1183,22 @@ fn run(
     let mut verified = false;
     let result = (|| -> Result<(), Failure> {
         status(task, deadline)?;
-        if video_entry && task.expected_peer != PersistentPeer::SecureVideo {
+        if video_entry
+            && !matches!(
+                task.expected_peer,
+                PersistentPeer::SecureVideo | PersistentPeer::SecureControl
+            )
+        {
             return Err(Failure::failed(
                 "VIDEO_MODE_REQUIRED",
                 "Video entry requires secure_video",
             ));
         }
-        if task.expected_peer == PersistentPeer::SecureVideo && video_callback.is_none() {
+        if matches!(
+            task.expected_peer,
+            PersistentPeer::SecureVideo | PersistentPeer::SecureControl
+        ) && video_callback.is_none()
+        {
             return Err(Failure::failed(
                 "VIDEO_SINK_REQUIRED",
                 "Video callback required",
@@ -1033,7 +1317,11 @@ fn run(
             &hash,
             &task.peer_id,
             task.demo,
-            task.expected_peer == PersistentPeer::SecureVideo,
+            matches!(
+                task.expected_peer,
+                PersistentPeer::SecureVideo | PersistentPeer::SecureControl
+            ),
+            task.expected_peer == PersistentPeer::SecureControl,
         );
         let send_result = wire.send_message(task, deadline, &mut cipher, &login);
         if let Some(message::message::Union::LoginRequest(request)) = login.union.as_mut() {
@@ -1081,19 +1369,18 @@ fn run(
                 Some(message::message::Union::LoginResponse(login)) => match login.union {
                     Some(login_response::Union::PeerInfo(peer)) => {
                         if task.demo {
-                            let video_size = if task.expected_peer == PersistentPeer::SecureVideo {
-                                video_dimensions(&peer)
-                            } else {
-                                None
+                            let video_size = match task.expected_peer {
+                                PersistentPeer::SecureVideo => video_dimensions(&peer),
+                                PersistentPeer::SecureControl => control_video_dimensions(&peer),
+                                _ => None,
                             };
                             let Some(peer_kind) = persistent_peer(&peer.platform_additions)
                                 .filter(|kind| *kind == task.expected_peer)
-                                .or_else(|| {
-                                    if task.expected_peer == PersistentPeer::SecureVideo {
-                                        video_size.map(|_| PersistentPeer::SecureVideo)
-                                    } else {
-                                        None
+                                .or_else(|| match task.expected_peer {
+                                    PersistentPeer::SecureVideo | PersistentPeer::SecureControl => {
+                                        video_size.map(|_| task.expected_peer)
                                     }
+                                    _ => None,
                                 })
                             else {
                                 let mut misc = Misc::new();
@@ -1113,6 +1400,8 @@ fn run(
                             }
                             let message = if peer_kind == PersistentPeer::Demo {
                                 "Demo connection established"
+                            } else if peer_kind == PersistentPeer::SecureControl {
+                                "Control-capable video connection established; input awaits local permission"
                             } else if peer_kind == PersistentPeer::SecureVideo {
                                 "Read-only video connection established"
                             } else {
@@ -1128,7 +1417,11 @@ fn run(
                                 true,
                                 false,
                                 if let Some((width, height)) = video_size {
-                                    json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8"})
+                                    if peer_kind == PersistentPeer::SecureControl {
+                                        json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8","inputSupported":false})
+                                    } else {
+                                        json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8"})
+                                    }
                                 } else {
                                     json!({})
                                 },
@@ -1142,6 +1435,25 @@ fn run(
                                     "Invalid video peer",
                                 ))?;
                                 run_secure_video(
+                                    task,
+                                    callback,
+                                    video_callback.ok_or(Failure::failed(
+                                        "VIDEO_SINK_REQUIRED",
+                                        "Video callback required",
+                                    ))?,
+                                    user,
+                                    &mut wire,
+                                    &mut cipher,
+                                    width,
+                                    height,
+                                )
+                            } else if peer_kind == PersistentPeer::SecureControl {
+                                wire.codec.set_max_packet_length(VIDEO_FRAME_LIMIT);
+                                let (width, height) = video_size.ok_or(Failure::failed(
+                                    "UNSUPPORTED_PEER",
+                                    "Invalid control video peer",
+                                ))?;
+                                run_secure_control(
                                     task,
                                     callback,
                                     video_callback.ok_or(Failure::failed(
@@ -1221,6 +1533,7 @@ fn run(
         task.authorized.store(false, Ordering::Release);
         pending.clear();
     }
+    task.control_input.lock().unwrap().clear();
     task.password.lock().unwrap().take();
     *task.socket.lock().unwrap() = None;
     if let Err(error) = result {
@@ -1287,6 +1600,7 @@ pub extern "C" fn controller_session_cancel(task: *mut ControllerSession) {
             task.authorized.store(false, Ordering::Release);
             pending.clear();
         }
+        task.control_input.lock().unwrap().clear();
         task.password.lock().unwrap().take();
         if let Some(socket) = task.socket.lock().unwrap().as_ref() {
             let _ = socket.shutdown(Shutdown::Both);

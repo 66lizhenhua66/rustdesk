@@ -2,10 +2,12 @@ param(
   [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
   [string]$Listen = '127.0.0.1:21120',
   [string]$Allow = '',
-  [switch]$Video
+  [switch]$Video,
+  [Alias('Input')][switch]$EnableInput
 )
 
 $ErrorActionPreference = 'Stop'
+if ($EnableInput -and -not $Video) { throw 'Keyboard and mouse require the video session; specify -Video with -Input.' }
 $hostRepository = Split-Path $PSScriptRoot -Parent
 $hostBundle = Join-Path $hostRepository "flutter\build\windows\x64\runner\$Configuration"
 $hostExe = Join-Path $hostBundle 'rustdesk.exe'
@@ -23,7 +25,7 @@ $hostArtifacts = Join-Path $hostRepository 'apps\harmony-controller\artifacts'
 New-Item -ItemType Directory -Force -Path $hostArtifacts | Out-Null
 $hostProfile = Join-Path $hostArtifacts 'official-current-profile.json'
 $hostSaved = @{}
-foreach ($hostKey in @('ORD_SECURE_LISTEN', 'ORD_SECURE_ALLOW', 'ORD_SECURE_PROFILE_OUT', 'ORD_SECURE_VIDEO')) {
+foreach ($hostKey in @('ORD_SECURE_LISTEN', 'ORD_SECURE_ALLOW', 'ORD_SECURE_PROFILE_OUT', 'ORD_SECURE_VIDEO', 'ORD_SECURE_INPUT')) {
   $hostSaved[$hostKey] = [Environment]::GetEnvironmentVariable($hostKey, 'Process')
 }
 try {
@@ -31,11 +33,13 @@ try {
   $env:ORD_SECURE_ALLOW = $Allow
   $env:ORD_SECURE_PROFILE_OUT = $hostProfile
   $env:ORD_SECURE_VIDEO = if ($Video) { '1' } else { '0' }
+  $env:ORD_SECURE_INPUT = if ($EnableInput) { '1' } else { '0' }
   $hostServer = Start-Process -FilePath $hostExe -ArgumentList '--server' -WorkingDirectory $hostBundle -WindowStyle Hidden -PassThru
   $hostWindow = Start-Process -FilePath $hostExe -ArgumentList @('--cm', '--ord-secure-ui') -WorkingDirectory $hostBundle -WindowStyle Normal -PassThru
   Write-Output "Flutter host server PID: $($hostServer.Id); workspace PID: $($hostWindow.Id)"
   Write-Output "Public profile: $hostProfile"
   Write-Output 'Approve each request in the Flutter workspace. Video is enabled only with -Video.'
+  Write-Output 'Keyboard and mouse also require -Input and a separate local grant for each connection.'
 } finally {
   foreach ($hostKey in $hostSaved.Keys) {
     if ($null -eq $hostSaved[$hostKey]) { Remove-Item -LiteralPath "Env:$hostKey" -ErrorAction SilentlyContinue }

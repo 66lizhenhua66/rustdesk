@@ -7,7 +7,6 @@ import '../../common.dart';
 import '../../models/platform_model.dart';
 import '../../models/server_model.dart';
 import '../widgets/secure_host_workspace.dart';
-import 'server_page.dart' show checkClickTime;
 
 class SecureHostPage extends StatefulWidget {
   const SecureHostPage({super.key});
@@ -93,9 +92,21 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
         name: client.name.isEmpty ? '未提供名称的控制端' : client.name,
         peerId: client.peerId,
         status: status,
+        inputSupported: client.ordInputSupported,
+        inputEnabled:
+            client.authorized && client.keyboard && !client.disconnected,
       );
       next.add(item);
       final old = previous[client.id];
+      if (old != null &&
+          old.inputEnabled != item.inputEnabled &&
+          !client.ordInputReleaseFailed) {
+        _record(item.inputEnabled ? '被控端已允许本次键鼠操作' : '被控端已撤销键鼠操作', item.name);
+        _notice = null;
+      }
+      if (client.ordInputReleaseFailed) {
+        _notice = '${item.name} 的输入许可已失效，但按键释放失败。请在本机检查按键状态，并重启被控服务后重试。';
+      }
       if (old == null) {
         _selectedId = client.id;
         _record(status == SecureHostStatus.active ? '被控端已确认本次连接批准' : '收到新的连接请求',
@@ -140,7 +151,7 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
         client.authorized ||
         _approving.contains(id) ||
         _closing.contains(id)) return;
-    checkClickTime(id, () async {
+    _withLocalDecision(id, () async {
       final current = _liveClient(id);
       if (!mounted ||
           current == null ||
@@ -162,24 +173,22 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
     });
   }
 
-  void _end(int id) {
-    if (_liveClient(id) == null || _closing.contains(id)) return;
-    checkClickTime(id, () async {
-      final current = _liveClient(id);
-      if (!mounted || current == null || _closing.contains(id)) return;
-      _closing.add(id);
-      _notice = null;
-      _record(current.authorized ? '已请求结束本次连接' : '已提交拒绝请求', current.name);
+  void _end(int id) async {
+    final current = _liveClient(id);
+    if (!mounted || current == null || _closing.contains(id)) return;
+    // Ending access must remain available even while remote input is arriving.
+    _closing.add(id);
+    _notice = null;
+    _record(current.authorized ? '已请求结束本次连接' : '已提交拒绝请求', current.name);
+    _onModelChanged();
+    try {
+      await bind.cmCloseConnection(connId: id);
+    } catch (_) {
+      if (!mounted) return;
+      _closing.remove(id);
+      _notice = '结束请求未能提交，请重试。';
       _onModelChanged();
-      try {
-        await bind.cmCloseConnection(connId: id);
-      } catch (_) {
-        if (!mounted) return;
-        _closing.remove(id);
-        _notice = '结束请求未能提交，请重试。';
-        _onModelChanged();
-      }
-    });
+    }
   }
 
   Future<void> _copyIdentity() async {
@@ -188,6 +197,51 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
       if (mounted) setState(() => _notice = '本机设备 ID 已复制。');
     } catch (_) {
       if (mounted) setState(() => _notice = '复制失败，请选中设备 ID 后复制。');
+    }
+  }
+
+  void _setInputPermission(int id, bool enabled) {
+    Future<void> submit() async {
+      final client = _liveClient(id);
+      if (!mounted ||
+          client == null ||
+          !client.authorized ||
+          (enabled && !client.ordInputSupported) ||
+          _closing.contains(id)) return;
+      setState(() => _notice = enabled
+          ? '已提交允许键鼠请求；会话权限将显示本机确认结果。同一时刻仅一个连接可操作。'
+          : '已提交撤销请求，正在等待本机清理按键并确认。');
+      try {
+        await bind.cmSwitchPermission(
+            connId: id, name: 'keyboard', enabled: enabled);
+      } catch (_) {
+        if (mounted) setState(() => _notice = '键鼠权限请求未能提交，请重试。');
+      }
+    }
+
+    if (enabled) {
+      _withLocalDecision(id, submit);
+    } else {
+      submit();
+    }
+  }
+
+  Future<void> _withLocalDecision(
+      int id, Future<void> Function() action) async {
+    // Strict approval never uses the legacy allow-remote-CM-modification option.
+    final clickedAt = DateTime.now().millisecondsSinceEpoch;
+    try {
+      await bind.cmCheckClickTime(connId: id);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      final lastRemoteInput = await bind.cmGetClickTime();
+      if (!mounted) return;
+      if (clickedAt - lastRemoteInput > 120) {
+        await action();
+      } else {
+        setState(() => _notice = '刚检测到远端输入，请先停止远端操作，再在本机确认。撤销与结束始终可用。');
+      }
+    } catch (_) {
+      if (mounted) setState(() => _notice = '无法确认本机操作，请重试。');
     }
   }
 
@@ -260,6 +314,7 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
         onApprove: _approve,
         onReject: _end,
         onDisconnect: _end,
+        onInputPermission: _setInputPermission,
         onCopyLocalId: _localId.isEmpty ? null : _copyIdentity,
       );
 }

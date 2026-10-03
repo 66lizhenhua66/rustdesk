@@ -16,11 +16,17 @@ export default class EntryAbility extends UIAbility {
     }
   }
 
+  onForeground(): void {
+    AppStorage.setOrCreate('deskForeground', true);
+  }
+
   onBackground(): void {
+    AppStorage.setOrCreate('deskForeground', false);
     controller.dispose();
   }
 
   onDestroy(): void {
+    AppStorage.setOrCreate('deskForeground', false);
     controller.dispose();
   }
 }
