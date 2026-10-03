@@ -10,6 +10,8 @@ import 'package:flutter_hbb/common/widgets/overlay.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
+import 'package:flutter_hbb/desktop/pages/secure_host_page.dart';
+import 'package:flutter_hbb/desktop/secure_host_mode.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_file_transfer_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_view_camera_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_port_forward_screen.dart';
@@ -22,6 +24,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:window_size/window_size.dart' as window_size;
 
 import 'common.dart';
 import 'consts.dart';
@@ -120,6 +123,14 @@ Future<void> main(List<String> args) async {
 Future<void> initEnv(String appType) async {
   // global shared preference
   await platformFFI.init(appType);
+  if (appType == kAppTypeConnectionManager && isWindows &&
+      requestsSecureHostWindow(kBootArgs)) {
+    isSecureHostWindow =
+        await bind.cmGetConfig(name: 'ord-secure-host-ui') == 'true';
+    if (!isSecureHostWindow) {
+      throw StateError('This native library does not support the secure host workspace');
+    }
+  }
   // global FFI, use this **ONLY** for global configuration
   // for convenience, use global FFI on mobile platform
   // focus on multi-ffi on desktop first
@@ -284,6 +295,29 @@ void runMultiWindow(
 
 void runConnectionManagerScreen() async {
   await initEnv(kAppTypeConnectionManager);
+  if (isSecureHostWindow) {
+    _runApp('Open Remote Desk', const SecureHostPage(), ThemeMode.light);
+    await windowManager.setPreventClose(true);
+    final screen = (await window_size.getWindowInfo()).screen;
+    final available = screen?.visibleFrame.size ?? const Size(1120, 760);
+    final size = Size(available.width.clamp(0, 1120).toDouble(),
+        available.height.clamp(0, 760).toDouble());
+    final options = getHiddenTitleBarWindowOptions(
+        size: size, alwaysOnTop: false);
+    await windowManager.waitUntilReadyToShow(options, () async {
+      await windowManager.setMinimumSize(Size(
+          size.width.clamp(0, 840).toDouble(),
+          size.height.clamp(0, 620).toDouble()));
+      await windowManager.setResizable(true);
+      await windowManager.setSkipTaskbar(false);
+      await windowManager.center();
+      await windowManager.setTitle('Open Remote Desk · 被控端');
+      await windowManager.setOpacity(1);
+      await windowManager.show();
+      await windowManager.focus();
+    });
+    return;
+  }
   _runApp(
     '',
     const DesktopServerPage(),
@@ -304,6 +338,7 @@ void runConnectionManagerScreen() async {
 bool _isCmReadyToShow = false;
 
 showCmWindow({bool isStartup = false}) async {
+  if (isSecureHostWindow) return;
   if (isStartup) {
     WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
         size: kConnectionManagerWindowSizeClosedChat, alwaysOnTop: true);
@@ -331,6 +366,7 @@ showCmWindow({bool isStartup = false}) async {
 }
 
 hideCmWindow({bool isStartup = false}) async {
+  if (isSecureHostWindow) return;
   if (isStartup) {
     WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
         size: kConnectionManagerWindowSizeClosedChat);

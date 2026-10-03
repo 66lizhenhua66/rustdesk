@@ -131,6 +131,8 @@ impl Connection {
                                     }
                                 }
                             }
+                            #[cfg(feature = "flutter")]
+                            self.try_start_cm(self.lr.my_id.clone(), self.lr.my_name.clone(), true);
                         }
                         ipc::Data::Close => break,
                         ipc::Data::CmErr(_) => break,

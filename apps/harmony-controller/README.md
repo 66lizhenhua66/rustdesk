@@ -17,7 +17,9 @@
 
 ## 连接与安全边界
 
-正式入口仍要求被控端本机显式启用视频：`ORD_SECURE_VIDEO=1`，或使用仓库的 `scripts/start-official-secure-host.ps1 -Video`。视频门禁默认关闭；客户端请求不能开启该门禁，也不能代替 CM 逐连接批准。启动脚本默认只绑定 `127.0.0.1:21120`，没有自动批准、公网监听扩展或系统安全设置修改。
+正式 Windows 桌面使用现有 Flutter 工程，构建与启动入口为 `scripts/build-windows-host.ps1` 和 `scripts/start-windows-host.ps1 -Video`，见 [正式入口说明](../../docs/project/OFFICIAL-SECURE-ENTRY.md)。视频必须由本机显式 `-Video`（`ORD_SECURE_VIDEO=1`）开启，默认关闭；客户端请求不能开启该门禁，也不能代替 CM 逐连接批准。启动脚本默认只绑定 `127.0.0.1:21120`，没有自动批准、公网监听扩展或系统安全设置修改。旧 `start-official-secure-host.ps1` 仅保留 Sciter 开发壳复测。
+
+新 Flutter 被控工作台的 Debug 整包已构建并实际打开；最新 3 组 widget tests、专用页面定向 analyze 和 7 项 Rust 模式/门禁/视频回归通过，本机三页与窗口缩放已截图检查。真实手机请求已到达待批准状态，用户本机批准和后续真实桌面联调尚未完成本轮验收，见 [Windows Flutter 验证记录](../../docs/project/research/2026-10-03-windows-host-ui-validation.md)。Windows 的“批准连接”只确认连接获批，CM 回执不表示视频已协商或首帧已送达；实际画面以鸿蒙原生 Surface 为准。下文的 82 项回归和真实 Windows 画面记录属于此前鸿蒙界面＋开发壳组合，不作为新 Flutter 被控端的批准与视频验收证据。
 
 正式表单默认端口 21120；IP 地址支持标准 literal IPv4/IPv6，端口和资料合法性由共享 Rust 核心验证。旧诊断页未填端口时仍采用原有默认值 21118。公钥和指纹是公开信任材料，必须从可信来源核对；不能从网络预检结果自动建立或替换信任。普通上游明文 IP 入口缺少所需签名握手，会被拒绝，不会降级继续。
 

@@ -2285,6 +2285,15 @@ pub fn cm_switch_back(conn_id: i32) {
 }
 
 pub fn cm_get_config(name: String) -> String {
+    if name == "ord-secure-host-ui" {
+        #[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
+        {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            return crate::secure_host_ui::is_ord_secure_cm(&args, true).to_string();
+        }
+        #[cfg(not(all(windows, feature = "ord-secure-host", feature = "flutter")))]
+        return "false".to_string();
+    }
     #[cfg(not(target_os = "ios"))]
     {
         if let Ok(Some(v)) = crate::ipc::get_config(&name) {

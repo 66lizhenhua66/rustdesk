@@ -365,6 +365,17 @@ pub fn get_click_time() -> i64 {
 #[inline]
 #[cfg(not(any(target_os = "ios")))]
 pub fn authorize(id: i32) {
+    #[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if crate::secure_host_ui::is_ord_secure_cm(&args, true) {
+            if let Some(client) = CLIENTS.read().unwrap().get(&id) {
+                // The strict service confirms authorization through its Login reply.
+                allow_err!(client.tx.send(Data::Authorize));
+            }
+            return;
+        }
+    }
     if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
         client.authorized = true;
         allow_err!(client.tx.send(Data::Authorize));
@@ -854,7 +865,18 @@ pub async fn start_ipc<T: InvokeUiCM>(cm: ConnectionManager<T>) {
         ContextSend::enable(enabled);
         *lock = Some(enabled);
     }
-    match ipc::new_listener("_cm").await {
+    #[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
+    let cm_ipc = {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if crate::secure_host_ui::is_ord_secure_cm(&args, true) {
+            crate::secure_host_ui::ORD_SECURE_CM_IPC
+        } else {
+            "_cm"
+        }
+    };
+    #[cfg(not(all(windows, feature = "ord-secure-host", feature = "flutter")))]
+    let cm_ipc = "_cm";
+    match ipc::new_listener(cm_ipc).await {
         Ok(mut incoming) => {
             while let Some(result) = incoming.next().await {
                 match result {

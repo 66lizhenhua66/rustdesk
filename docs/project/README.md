@@ -15,7 +15,7 @@
 | [ROADMAP.md](ROADMAP.md) | 阶段顺序、依赖、退出条件与代码入口 |
 | [PROGRESS.md](PROGRESS.md) | 唯一的当前进度入口，记录结果、证据、阻塞和下一步 |
 | [DEMO.md](DEMO.md) | Windows / HarmonyOS 非视频 DEMO 的构建、安装、连接和撤权操作说明 |
-| [OFFICIAL-SECURE-ENTRY.md](OFFICIAL-SECURE-ENTRY.md) | 正式 Windows 非媒体安全入口的构建开关、显式监听和能力边界 |
+| [OFFICIAL-SECURE-ENTRY.md](OFFICIAL-SECURE-ENTRY.md) | Windows Flutter 正式工作台的构建/启动、逐连接批准、只读视频门禁，以及 Sciter 开发壳历史证据 |
 | [research/2026-10-02-cm-approval-validation.md](research/2026-10-02-cm-approval-validation.md) | Debug CM 修复、显式模式绑定、63 项测试和真实审批待办 |
 | [DECISIONS.md](DECISIONS.md) | 已确认方向、提议及其取舍，避免反复讨论 |
 | [specs/001-baseline-and-harmony-feasibility.md](specs/001-baseline-and-harmony-feasibility.md) | 第一阶段范围草案与验收清单 |
@@ -34,6 +34,8 @@
 | [research/2026-10-02-readonly-screen-validation.md](research/2026-10-02-readonly-screen-validation.md) | 只读画面的测试、构建、模拟器与现场验收边界 |
 | [plans/2026-10-03-native-controller-ui.md](plans/2026-10-03-native-controller-ui.md) | 原型到原生工作台、会话页面的映射与 Windows 后续任务 |
 | [research/2026-10-03-native-controller-ui-validation.md](research/2026-10-03-native-controller-ui-validation.md) | 正式界面、82 项测试、双 ABI 构建与模拟器布局/会话验证 |
+| [plans/2026-10-03-windows-host-ui.md](plans/2026-10-03-windows-host-ui.md) | Windows Flutter 原型工作台、现有 CM/FRB 接线、整包构建与现场验证计划 |
+| [research/2026-10-03-windows-host-ui-validation.md](research/2026-10-03-windows-host-ui-validation.md) | Flutter Debug 整包、3 组 widget 与 7 项 Rust 测试、本机窗口截图，以及真实请求/现场批准的验收记录 |
 | [research/](research/) | 带日期和来源的调研快照，不代表当前实现能力 |
 
 ## 维护约定

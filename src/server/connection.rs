@@ -6334,11 +6334,18 @@ async fn start_ipc(
         }
         sleep(1.).await;
     }
+    #[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
+    let cm_ipc = crate::secure_host_ui::ORD_SECURE_CM_IPC;
+    #[cfg(not(all(windows, feature = "ord-secure-host", feature = "flutter")))]
+    let cm_ipc = "_cm";
     let mut stream = None;
-    if let Ok(s) = crate::ipc::connect(1000, "_cm").await {
+    if let Ok(s) = crate::ipc::connect(1000, cm_ipc).await {
         stream = Some(s);
     }
     if stream.is_none() {
+        #[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
+        let args = crate::secure_host_ui::ORD_SECURE_CM_ARGS.to_vec();
+        #[cfg(not(all(windows, feature = "ord-secure-host", feature = "flutter")))]
         let args = vec!["--cm"];
         let run_done;
         if crate::platform::is_root() {
@@ -6376,7 +6383,7 @@ async fn start_ipc(
         }
         for _ in 0..20 {
             sleep(0.3).await;
-            if let Ok(s) = crate::ipc::connect(1000, "_cm").await {
+            if let Ok(s) = crate::ipc::connect(1000, cm_ipc).await {
                 stream = Some(s);
                 break;
             }
