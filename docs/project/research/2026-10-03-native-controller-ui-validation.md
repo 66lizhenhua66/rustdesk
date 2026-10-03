@@ -1,6 +1,6 @@
 # 鸿蒙正式界面实现与验证
 
-日期：2026-10-03。分支 `feat/harmony-controller`，起始提交 `181fe5c21`。对应 [实施计划](../plans/2026-10-03-native-controller-ui.md)。本轮完成原生界面和已有能力接线；本轮真实桌面人工批准后的复验仍待用户，不将上一轮结果或合成画面作为本轮现场验收。
+日期：2026-10-03。分支 `feat/harmony-controller`，起始提交 `181fe5c21`，界面实现提交 `08e8389eb`。对应 [实施计划](../plans/2026-10-03-native-controller-ui.md)。本轮完成原生界面和已有能力接线，并在用户实际点击 Windows 本机接受后完成新界面的真实桌面复验。真机仍未验收。
 
 ## 原型与实现
 
@@ -68,7 +68,17 @@ Windows Debug 首次更新 EXE 时被运行中的测试 server 占用。核实�
 
 证据为 `final-ui-synthetic-portrait.jpeg`、`final-ui-synthetic-tools.jpeg`、`final-ui-capsule.jpeg`、`final-ui-synthetic-landscape.jpeg`；灰色是固定测试源，不能据此宣称真实 Windows 主屏验收。
 
-正式入口已在新界面实际完成预存身份核验、加密和等待批准。等待中没有画面；旋转不重新连接；未批准超时后 Surface 清除、显示明确重试入口。已准备代码/构建/安装/CM 和请求并向用户请求本机接受，但截至本记录没有收到本轮接受完成反馈，因此批准后的真实 Windows 桌面、真实画面的跨页/断开/重连最终复验仍待用户。上一轮 1152×720、500+ 帧证据只见 [上轮报告](2026-10-02-readonly-screen-validation.md)，不算本轮通过。
+正式入口在新界面完成预存身份核验、加密和等待批准。等待中没有画面；旋转不重新连接；未批准超时后 Surface 清除、显示明确重试入口。前次请求曾超时，随后手机模拟器离线；恢复原 Enjoy 90 Pro Max 手机模拟器、原设备资料及 21120 转发后，将真实 Windows CM 窗口置前。窗口实际显示 Harmony Controller 请求与普通蓝色“接受”按钮，用户亲自接受；没有自动批准或调用带盾牌的提权接受。
+
+首次获批短会话在截图前结束，没有计入截图验收；再次本机批准后完成以下真实桌面检查：
+
+1. 手机 `Desk` 显示实际 Windows 主桌面，**1152×720**，截图可见本机窗口及模拟器递归画面，非合成灰帧。
+2. 工具面板初次观察接收 **335 帧**、呈现 **336 帧**、1650 KiB；最终为 **1327 / 1328 帧、6671 KiB**。接收与呈现统计分别投递，此瞬时差值不代表额外生成帧；本次计数不是吞吐或延迟基准。
+3. 同一真实会话内切换横竖屏，画面保持源比例、工具栏适应窗口；返回设备页后仍有同一 Surface 和活动目标横幅，返回会话继续显示。
+4. 点击断开后 XComponent 数量为 **0**，显示本次批准失效；重新连接再次显示“等待本机批准”，没有复用旧画面或旧批准。取消此次 pending 请求后 XComponent 仍为 **0**。
+5. 收尾时手机回到设备页，正式 server 仅在 `127.0.0.1:21120` 监听，没有活动连接。系统键鼠、键盘、文件入口保持禁用。
+
+真实证据仅留本机忽略目录：`ui-windows-approval-visible.png`、`ui-official-real-portrait.jpeg`、`ui-official-real-landscape.jpeg`、`ui-official-real-tools-final.jpeg`、`ui-official-real-returned.jpeg`、`ui-official-real-disconnected.jpeg`、`ui-official-real-reapproval.jpeg`。真实桌面截图不进入 Git。Windows CM 在最后一条连接移除后退出是现有行为，后台 server 仍运行；不能把批准窗口消失解释为服务未启动。
 
 最后对正式入口补验：等待批准时按 Home，再回到应用明确显示“应用已离开前台，连接已结束”；重试发起新的批准请求，横屏下返回/取消按钮始终可见，取消后 XComponent 为 0。证据 `final-ui-waiting-landscape.jpeg` 及 `ui-emulator-results.txt`。最终 HAP SHA256：`BFC57973E8AAAC5575CD3AA6FB60FD9876D243E24E0499C0C39E4E40562AFAB2`，手机与 2in1 均已安装此包。
 
