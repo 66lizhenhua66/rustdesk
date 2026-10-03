@@ -52,6 +52,12 @@ Debug 整包目录：`flutter/build/windows/x64/runner/Debug/`。本次 EXE SHA2
 
 ## 独立复核
 
+补充收口验收（2026-10-03，实现仍为 `f85dfe911`）：用户再次现场批准后，手机已有真实 Windows 画面和原生 XComponent；直接关闭 Flutter 工作台，手机立即显示“连接已结束”，XComponent 为 0，原 CM 进程退出。活动视频关窗清理已实测通过。
+
+拒绝按钮另用新请求实测：UTC 15:05:04 发起，15:05:46 已结束，小于 60 秒批准超时。Flutter 活动明确记录“已提交拒绝请求”再记录连接结束；手机显示通用“无法连接被控端”并清屏，XComponent 为 0。此前控件索引失效和等待自然超时的尝试不算拒绝成功，先前口头表述已纠正。当前手机不区分本机拒绝与其他连接失败，未伪造专用拒绝原因。证据为 `flutter-active-before-window-close.jpeg`、`flutter-active-window-closed.jpeg`、`flutter-phone-reject-verified.jpeg`。
+
+至此本轮界面验收中拒绝、活动视频关窗两项已补齐；长时间资源曲线、真机、公网仍未验收。随后独立实施键鼠切片，见 [输入计划](../plans/2026-10-03-system-input.md)。
+
 修正了旧 CM `authorize` 乐观更新：专用 Flutter 窗口只发送批准，收到严格服务 Login 回执后才更新已批准；普通 CM 路径不变。CM 数据不含视频协商和首帧状态，因此窗口只声明连接获批，不将其等同画面正在传输，视频权限注明须本机启用并完成本次协商。
 
 Windows runner 原有参数修剪删除末个有效字符，直接阻塞 `--cm` 识别；本轮只增加 `+ 1` 修正边界，实际专用窗口启动与待批准接线已验证。
