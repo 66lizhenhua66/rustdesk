@@ -6,7 +6,7 @@
 
 此前本轮未提交的 Sciter UI 扩展已撤回。Windows 正式页面已在现有 Flutter 工程实现；复用 ServerModel/FRB 与严格服务，仅新增专用 CM 路由、能力查询和批准回执。鸿蒙页面、用户原型/签名/工具配置保持原样。
 
-Debug 整包构建和本轮十项定向测试已通过，Windows 已实际打开 Flutter 工作台并收到手机模拟器的连接请求。现场批准和真实画面结果在下文单独记录。原始日志与截图留在忽略的 artifacts，含真实桌面的材料不进入 Git。
+Debug 整包构建和本轮十项定向测试已通过。用户完成 Flutter 工作台现场批准后，已验收手机模拟器的真实 Windows 主屏、Windows 主动结束、清屏、重连重新等待批准，以及待批准时关闭工作台的连接清理。原始日志与截图留在忽略的 artifacts，含真实桌面的材料不进入 Git。
 
 ## 工具链与依赖
 
@@ -28,13 +28,27 @@ SDK 初始深路径触发 Windows 文件枚举失败，将隔离 SDK 移到工�
 | Flutter + ord-secure-host Rust DLL | Debug 编译通过，现有告警未扩大修复范围 |
 | Windows Flutter 整包 | `scripts/build-windows-host.ps1 -Offline` 最终退出 0，生成 Flutter EXE、匹配 Rust DLL 与运行资源 |
 | 实际 Flutter 桌面 | 三页切换、无请求常驻、最大化/还原及真实 pending 请求均已观察；截图与原型核对侧栏、绿灰配色、双栏卡片和固定操作栏 |
-| 手机联调 | 手机 API22 模拟器已发起真实请求，Flutter 收到 Harmony Controller；未获本机批准而超时，手机提示批准超时，Flutter 显示连接已结束，XComponent 为 0。批准后的真实画面仍未验收，不用历史 Sciter 结果替代 |
+| 手机联调 | 首次未批准请求按规则超时；后续用户亲自批准，真实画面、Windows 主动断开清屏和重连重新审批均通过，详见下节 |
 
 桥接首次缺 `stdbool.h`，旧 ffigen 虽报告 fatal 却返回 0，错误生成遮蔽 Dart bool 的 typedef。显式传入 `--llvm-compiler-opts` 的 Windows target 和独立 `-resource-dir "路径"` 参数后，重新生成无 SEVERE/fatal，生成文件 analyze 零问题。脚本保留诊断检查，拒绝这种错误桥接。带空格路径不可用 `-resource-dir="路径"`，旧 ffigen 分词器会拆错。
 
 最终日志：`flutter-build/windows-build-final.log`、`windows-tests-final.log`、`integration-analyze-final.log`、`frb-generate-final.log`。截图：`flutter-host-idle.png`、`flutter-host-records.png`、`flutter-host-settings.png`、`flutter-host-pending.png`、`flutter-host-timeout-ended.png`。
 
 Debug 整包目录：`flutter/build/windows/x64/runner/Debug/`。本次 EXE SHA256 为 `B13B2DA5CFC74B5D1529200749C72A865FE46A4043F1B3CEFFC0E72DF16B19B7`，DLL 为 `2ECB974DD063C739F7991654286CF759A308CDE58B6E076A14DEB5AA2BE6A456`。需保留整包目录，不能单独拷贝 EXE。
+
+## Flutter 现场批准与真实画面
+
+实现提交 `f85dfe911`，手机为已有 API22 x86_64 模拟器。用户报告“连接上了”后实测核验，Flutter 显示“连接已获本机批准”，活动先记录“已提交本机批准，等待确认”，再记录“被控端已确认本次连接批准”。这次批准由本机用户完成，没有自动代点。
+
+手机原生 XComponent 显示真实 Windows 主屏，工具面板读到 **1280×720、接收 2037 帧 / 呈现 2032 帧、9816 KiB**；截图可见当前 Windows 工作台和模拟器的递归画面。两个计数独立限频更新，差值不能直接视为丢帧率；这不是性能基准。Windows CM 不含视频状态字段，仍只陈述连接获批，由手机实际画面和统计证明视频通过。
+
+点击 Windows Flutter “结束本次连接”后，手机显示连接已结束，XComponent 数量为 **0**，Flutter 随服务回执显示“本次连接已结束”，工作台保持可见。再由手机点击重新连接，双方回到新的待批准状态，截图无旧桌面画面，没有复用上次授权。等待阶段会预建一个待显示 XComponent；不将组件存在当作收到视频，也不将未读取的统计宣称为 0 帧。
+
+另用新请求验证关闭工作台：请求于本机日志 UTC 06:51:24 发起，关闭窗口后 UTC 06:52:05 手机已显示“无法连接被控端”，XComponent 为 **0**，Flutter 窗口及对应进程退出。观察间隔小于 60 秒批准超时，与先前自然超时区分。该项覆盖待批准连接的关窗清理；**活动视频期间直接关窗、拒绝按钮实际点击、长时间资源曲线仍未验收**。
+
+新增本机证据：`flutter-host-approved.png`、`flutter-phone-approved.jpeg`、`flutter-phone-video-stats.jpeg`、`flutter-host-active-ended.png`、`flutter-phone-host-ended.jpeg`、`flutter-host-reapprove.png`、`flutter-phone-reapprove.jpeg`、`flutter-phone-window-cleanup.jpeg`。截图不进入 Git。
+
+收尾恢复可见的 Flutter 工作台，手机返回设备页，无活动连接，服务仍只监听 `127.0.0.1:21120`。PC 模拟器保持关闭。本轮仅补验证文档，运行的 EXE/DLL 与上述构建校验值不变。
 
 ## 独立复核
 

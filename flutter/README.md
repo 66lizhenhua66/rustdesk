@@ -35,4 +35,6 @@ flutter --suppress-analytics --no-version-check analyze --no-pub lib/desktop/wid
 flutter --suppress-analytics --no-version-check test --no-pub test/desktop/secure_host_workspace_test.dart
 ```
 
-FRB、匹配的 Rust DLL 与 Flutter Windows Debug 整包已构建成功并实际打开；本机访问、访问记录、安全设置及最大化/还原已有截图检查。真实手机连接已到达待批准状态，用户本机批准、真实视频与后续断开/重连清理仍待现场验收，不能从 widget tests 或请求到达推断通过。完整证据见 [Windows Flutter 验证记录](../docs/project/research/2026-10-03-windows-host-ui-validation.md)，当前状态以 [PROGRESS](../docs/project/PROGRESS.md) 为准。真机、公网和系统输入均未验收。
+FRB、匹配的 Rust DLL 与 Flutter Windows Debug 整包已构建成功并实际打开；本机访问、访问记录、安全设置及最大化/还原已有截图检查。用户本机批准后，Flutter 显示“连接已获本机批准”，活动记录按提交批准、被控端确认的顺序更新；手机模拟器通过原生 XComponent 显示真实 Windows 主屏 1280×720。Flutter 主动结束连接、手机清屏、重新连接后重新审批与不显示旧画面均已实测；待批准时关闭工作台也已确认连接失败并清屏。等待批准会创建待显示的 XComponent，不能把组件存在当成已经显示视频。
+
+有视频时直接关窗、拒绝按钮实际点击、真机、公网和系统输入仍未验收；待批准连接的关窗结果不外推至活动视频。完整证据见 [Windows Flutter 验证记录](../docs/project/research/2026-10-03-windows-host-ui-validation.md)，当前状态以 [PROGRESS](../docs/project/PROGRESS.md) 为准。

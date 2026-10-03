@@ -1,10 +1,12 @@
 # 项目进度
 
-最新更新（2026-10-03，Windows Flutter 正式工作台，进行中）：正式 Windows 桌面界面使用现有 `flutter/` 工程，新增原型对应的白色侧栏、本机访问、访问记录、安全设置、请求批准和连接状态卡片。`SecureHostWorkspace` 为纯 Flutter 视图，`SecureHostPage` 适配既有 ServerModel/FRB；通过 `--cm --ord-secure-ui` 显式进入专用窗口，普通 CM 与 feature-off 路径保留。Sciter 仅作为此前已验证的开发壳，不作为正式界面的交付产物。CM 批准只确认本次连接，界面不据此推断视频已协商或屏幕正在共享。
+最新更新（2026-10-03，Windows Flutter 正式工作台，受控联调通过）：正式 Windows 桌面界面使用现有 `flutter/` 工程，新增原型对应的白色侧栏、本机访问、访问记录、安全设置、请求批准和连接状态卡片。`SecureHostWorkspace` 为纯 Flutter 视图，`SecureHostPage` 适配既有 ServerModel/FRB；通过 `--cm --ord-secure-ui` 显式进入专用窗口，普通 CM 与 feature-off 路径保留。Sciter 仅作为此前已验证的开发壳，不作为正式界面的交付产物。CM 批准只确认本次连接，界面不据此推断视频已协商或屏幕正在共享。
 
 本轮已使用隔离 Flutter **3.24.5 / Dart 3.5.4** 生成 FRB、构建匹配的 Rust DLL 和 Flutter Windows **Debug 整包**，并实际打开正式工作台。最新 **3 组 widget tests** 与专用模式/页面/视图定向 analyze（无问题）通过；Rust 的 **2 项模式选择＋1 项批准门禁＋4 项视频回归，共 7 项通过**。Widget 测试覆盖按目标连接 ID 操作、等待批准回执、未实现能力禁用，以及 1120×760 / 840×620 / 840×420 下滚动后的固定操作栏。
 
-本机已完成本机访问、访问记录、安全设置三页及最大化/还原的截图检查，真实手机连接请求已到达新 Flutter 工作台的待批准状态；请求未获批准后超时，双方正确进入结束/超时状态，未共享画面。**用户本机批准、批准回执后的真实视频、断开清屏、重连重新审批与关闭窗口清理尚未完成本轮验收**，不能从构建或 pending 状态推断通过。证据与后续结果见 [Windows Flutter 验证记录](research/2026-10-03-windows-host-ui-validation.md)。
+本机访问、访问记录、安全设置三页及最大化/还原已截图检查。此前未获批准的请求已验证超时结束且不共享画面；随后用户在本机点击“批准连接”，Flutter 显示“连接已获本机批准”，活动记录按“提交批准 → 被控端确认”顺序更新。手机模拟器通过原生 XComponent 显示真实 Windows 主屏 **1280×720**，本次观察接收/呈现 **2037/2032 帧、9816 KiB**；统计独立更新，不作为吞吐或延迟基准。
+
+点击 Flutter“结束本次连接”后，手机进入结束页、XComponent 数为 0，Flutter 收到已结束状态。再次连接产生全新待批准请求，截图没有旧画面；等待阶段会创建 1 个待显示的 XComponent，组件存在不代表已经获准或呈现视频。随后在新请求批准超时前关闭 Flutter 窗口，手机立即显示连接失败并清屏，XComponent 数为 0。该关窗验证仅覆盖待批准连接；**有视频时直接关窗、拒绝按钮实际点击、真机、公网及系统输入仍未验收**。完整证据见 [Windows Flutter 验证记录](research/2026-10-03-windows-host-ui-validation.md)。
 
 正式构建和启动使用 `scripts/build-windows-host.ps1`、`scripts/start-windows-host.ps1`，见 [入口说明](OFFICIAL-SECURE-ENTRY.md) 与 [本轮计划](plans/2026-10-03-windows-host-ui.md)。默认回环地址 `127.0.0.1:21120`，视频必须本机显式 `-Video` 开启，每次连接仍须现场批准；系统键鼠、文件、无人值守、协助码、音频与提权均未开放。以下鸿蒙界面和真实桌面记录属于此前使用开发壳完成的验证，不作为新 Flutter 被控端已经验收的证据。
 
@@ -55,13 +57,13 @@
 | 严格身份/加密登录 A1—A6 | 完成（受控验证范围） | [38 项测试和构建报告](research/2026-09-30-secure-session-validation.md)：上游身份/加密实现按哈希复用，libsodium 双 ABI、NAPI/ArkUI 登录入口、失败/取消/重放回归通过；成功登录立即关闭且 authorized=false |
 | 非视频 DEMO P1—P6 | 完成（本机/模拟器范围） | [53 项测试及联调报告](research/2026-09-30-interactive-demo-validation.md)：EXE/HAP、独立进程加密直连、批准、只读、输入、撤权、断开通过；真机待用户验证 |
 | 官方 Windows 安全入口 S1—S5 | 完成（源码、编译和限定测试范围） | [60 项测试及构建报告](research/2026-09-30-official-secure-entry-validation.md)；CM 点击批准、媒体和输入不在完成声明内 |
-| Windows Flutter 正式被控工作台 | 构建与本机界面验证完成，现场联调进行中 | [验证记录](research/2026-10-03-windows-host-ui-validation.md)；Debug 整包、定向 analyze、3 组 widget 与 7 项 Rust 测试通过，真实窗口三页及最大化/还原已检查；真实请求到达 pending，本机批准及视频联调待验收 |
-| M1 | 进行中 | 已接入非媒体安全入口；画面、正式输入、ID/中继和公网验收未完成 |
+| Windows Flutter 正式被控工作台 | 完成（本机/手机模拟器限定范围） | [验证记录](research/2026-10-03-windows-host-ui-validation.md)；Debug 整包、定向 analyze、3 组 widget 与 7 项 Rust 测试通过；本机批准回执、真实主屏、主动断开清屏、重连重新审批与待批准窗口关闭清理通过，拒绝及视频中关窗未验收 |
+| M1 | 进行中 | 已接入正式 Flutter 被控端与鸿蒙只读主屏；正式系统输入、ID/中继和公网验收未完成 |
 | M2—M5 | 未开始 | 见 ROADMAP |
 
 ## 下一步
 
-1. 在已构建运行的新 Flutter 工作台中，由用户本机批准真实手机请求，继续验证批准回执、只读画面、断开清屏、重连重新审批与关闭窗口清理；尚未完成的现场结果保持未验收。
+1. 后续补测 Windows Flutter“拒绝”按钮及有视频时直接关闭窗口；已完成的待批准窗口关闭清理不外推为活动视频关窗验收。
 2. 下一独立切片再开放真实系统键鼠：Windows 本机明确授权、执行点撤权、释放按键与断开清理必须先落实。独立 DEMO 输入仍只作用于演示窗口。
 3. 后续接入可信控制设备身份、ID/中继、2FA 继续流程及公网门槛；无人值守不能由空密码现场批准或上次会话授权替代。多屏、窗口范围、硬件解码和性能优化另行验收。
 4. 真机验证按用户要求后移并保留“未验收”，不作为继续开发的阻塞；模拟器、ARM64 编译和 2in1 窗口测试均不能外推为真机通过。

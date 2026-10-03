@@ -19,7 +19,9 @@
 
 正式 Windows 桌面使用现有 Flutter 工程，构建与启动入口为 `scripts/build-windows-host.ps1` 和 `scripts/start-windows-host.ps1 -Video`，见 [正式入口说明](../../docs/project/OFFICIAL-SECURE-ENTRY.md)。视频必须由本机显式 `-Video`（`ORD_SECURE_VIDEO=1`）开启，默认关闭；客户端请求不能开启该门禁，也不能代替 CM 逐连接批准。启动脚本默认只绑定 `127.0.0.1:21120`，没有自动批准、公网监听扩展或系统安全设置修改。旧 `start-official-secure-host.ps1` 仅保留 Sciter 开发壳复测。
 
-新 Flutter 被控工作台的 Debug 整包已构建并实际打开；最新 3 组 widget tests、专用页面定向 analyze 和 7 项 Rust 模式/门禁/视频回归通过，本机三页与窗口缩放已截图检查。真实手机请求已到达待批准状态，用户本机批准和后续真实桌面联调尚未完成本轮验收，见 [Windows Flutter 验证记录](../../docs/project/research/2026-10-03-windows-host-ui-validation.md)。Windows 的“批准连接”只确认连接获批，CM 回执不表示视频已协商或首帧已送达；实际画面以鸿蒙原生 Surface 为准。下文的 82 项回归和真实 Windows 画面记录属于此前鸿蒙界面＋开发壳组合，不作为新 Flutter 被控端的批准与视频验收证据。
+新 Flutter 被控工作台的 Debug 整包已构建并实际打开；最新 3 组 widget tests、专用页面定向 analyze 和 7 项 Rust 模式/门禁/视频回归通过，本机三页与窗口缩放已截图检查。用户本机批准后，Flutter 收到真实批准回执，手机模拟器的原生 XComponent 显示 Windows 主屏 1280×720，本次观察接收/呈现 2037/2032 帧、9816 KiB。Flutter 主动断开后手机清屏、XComponent 数为 0；重连出现全新待批准请求，无旧画面，但会创建 1 个待显示 XComponent。关闭待批准的 Flutter 窗口后，手机立即连接失败并清屏，XComponent 数为 0。活动视频期间直接关窗、拒绝按钮实际点击、真机、公网与系统输入仍未验收。详见 [Windows Flutter 验证记录](../../docs/project/research/2026-10-03-windows-host-ui-validation.md)。
+
+Windows 的“批准连接”只确认连接获批，CM 回执不表示视频已协商或首帧已送达；上述画面结果来自鸿蒙原生 Surface 的实际观察。下文的 82 项回归和真实 Windows 画面记录属于此前鸿蒙界面＋开发壳组合，本轮 Flutter 验收以上述独立记录为准。
 
 正式表单默认端口 21120；IP 地址支持标准 literal IPv4/IPv6，端口和资料合法性由共享 Rust 核心验证。旧诊断页未填端口时仍采用原有默认值 21118。公钥和指纹是公开信任材料，必须从可信来源核对；不能从网络预检结果自动建立或替换信任。普通上游明文 IP 入口缺少所需签名握手，会被拒绝，不会降级继续。
 

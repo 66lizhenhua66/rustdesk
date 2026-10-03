@@ -8,7 +8,7 @@
 
 界面包括本机设备 ID、来源名称与自报 ID、逐连接批准/拒绝、连接及结束状态、当前运行的访问记录与安全说明。点击“批准连接”后先显示正在确认，收到服务端回执后才显示本次连接已批准。CM 的批准回执没有视频协商或首帧字段，非媒体请求也能获批，因此界面始终说明屏幕共享仍需本机启用视频并完成本次协商；显示器只表示可能的共享范围，不提供实时画面反馈。来源名称与 ID 不等于已核验的控制设备身份；无人值守、可信设备登记、协助码、键鼠与文件等未实现能力禁用。
 
-FRB、匹配的 Rust DLL 与 Flutter Windows **Debug 整包已构建成功并实际运行**。最新 3 组 widget tests、专用模式/页面/视图定向 analyze，以及 2 项模式选择、1 项批准门禁、4 项视频回归均通过；本机访问、访问记录、安全设置三页及窗口最大化/还原已截图检查。真实手机请求已进入待批准状态，并在未获批准后超时结束，**用户本机批准及其后的真实视频、断开/重连与窗口关闭清理尚未完成本轮验收**。详见 [Windows Flutter 验证记录](research/2026-10-03-windows-host-ui-validation.md) 与 [PROGRESS](PROGRESS.md)。
+FRB、匹配的 Rust DLL 与 Flutter Windows **Debug 整包已构建成功并实际运行**。最新 3 组 widget tests、专用模式/页面/视图定向 analyze，以及 2 项模式选择、1 项批准门禁、4 项视频回归均通过；本机访问、访问记录、安全设置三页及窗口最大化/还原已截图检查。用户本机批准后，Flutter 收到批准回执，手机模拟器通过原生 XComponent 显示真实 Windows 主屏 1280×720；本次观察接收/呈现 2037/2032 帧、9816 KiB。Flutter 主动结束连接后手机清屏，重连重新进入待批准且不显示旧画面；待批准阶段关闭 Flutter 窗口也已验证连接失败并清屏。**有视频时直接关窗、拒绝按钮实际点击、真机、公网与系统输入仍未验收**。详见 [Windows Flutter 验证记录](research/2026-10-03-windows-host-ui-validation.md) 与 [PROGRESS](PROGRESS.md)。
 
 准备 Flutter 3.24.5（Dart 3.5.4）、`flutter_rust_bridge_codegen` 1.80.1、`cargo-expand` 1.0.95、MSVC/Windows SDK、Windows libclang，以及仓库固定 baseline 的 `x64-windows-static` vcpkg 依赖。从仓库根运行：
 
@@ -20,7 +20,7 @@ FRB、匹配的 Rust DLL 与 Flutter Windows **Debug 整包已构建成功并实
 
 构建脚本默认使用外层工作空间的 `.tools/flutter-3.24.5/flutter`，通过 `-FlutterRoot`、`-PubCache`、`-BridgeTools`、`-VcpkgRoot`、`-LibClangPath` 可指定已有工具位置；依赖缓存完整后才使用 `-Offline`。脚本按 `pubspec.lock` 解析依赖，不使用全局最新版 Flutter。产物目录为 `flutter/build/windows/x64/runner/Debug/`；EXE、`librustdesk.dll`、`flutter_windows.dll` 和资源目录需保持同包。Release 对应 `-Configuration Release` 与同名输出目录。
 
-启动脚本分别启动严格服务与可见的 Flutter 工作台，默认监听 `127.0.0.1:21120`，公开配置输出到 `apps/harmony-controller/artifacts/official-current-profile.json`。不传 `-Video` 时视频关闭；工作台不会自动批准请求，批准后保持可见，末条会话结束后保留工作台。关闭窗口的会话清理仍需本轮实测，不将窗口代码存在写成验收通过。
+启动脚本分别启动严格服务与可见的 Flutter 工作台，默认监听 `127.0.0.1:21120`，公开配置输出到 `apps/harmony-controller/artifacts/official-current-profile.json`。不传 `-Video` 时视频关闭；工作台不会自动批准请求，批准后保持可见，末条会话结束后保留工作台。待批准连接在超时前关闭工作台后，手机立即连接失败并清屏，XComponent 数为 0；这项实测不覆盖有视频时直接关窗。
 
 ## 只读画面与鸿蒙连接
 
