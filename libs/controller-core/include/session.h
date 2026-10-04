@@ -28,7 +28,8 @@ ControllerSession *controller_session_create(const char *request_json, const cha
  * it also requires controller_session_run_video.
  * The peer must match the selected mode; there is no automatic fallback.
  * The event includes confirmationCode while awaiting approval, and x/y/textLength
- * for demo_status. Input is accepted only after explicit Keyboard permission.
+ * for demo_status. Demo input requires Keyboard permission; secure_control input
+ * requires a matching v2 controller request and host state with a current token.
  */
 ControllerSession *controller_connection_create(const char *request_json, const char *password, uint32_t handshake_ms);
 /* 0 queued, 1 disconnected, 2 input not authorized, 3 invalid argument, 4 queue full. */
@@ -38,6 +39,10 @@ int32_t controller_session_send_text(ControllerSession *task, const char *utf8);
  * Returns the same 0..4 status codes as the demo send functions.
  */
 int32_t controller_session_send_input_v1(ControllerSession *task, const char *command_json);
+/* 0 queued, 1 disconnected or wrong mode, 2 unavailable, 3 invalid boolean, 4 queue full.
+ * Closing input invalidates local authorization and pending input immediately.
+ */
+int32_t controller_session_set_input_enabled_v1(ControllerSession *task, uint8_t enabled);
 void controller_session_run(ControllerSession *task, ControllerSessionCallback callback, void *user);
 void controller_session_run_video(ControllerSession *task, ControllerSessionCallback callback,
     ControllerVideoCallback video_callback, void *user);

@@ -495,6 +495,22 @@ napi_value SendSystemInput(napi_env env, napi_callback_info info) {
     return result;
 }
 
+napi_value SetInputEnabled(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {}, result = nullptr;
+    uint32_t id = 0;
+    bool enabled = false;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 2 ||
+        !ReadBoundedInteger(env, args[0], 1, UINT32_MAX, id) ||
+        napi_get_value_bool(env, args[1], &enabled) != napi_ok) {
+        Error(env, "INVALID_ARGUMENT", "Expected task ID and input enable boolean"); return nullptr;
+    }
+    auto job = ActiveSession(env, id);
+    const int32_t status = job ? controller_session_set_input_enabled_v1(job->session, static_cast<uint8_t>(enabled)) : 1;
+    napi_create_int32(env, status, &result);
+    return result;
+}
+
 napi_value Cancel(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value arg = nullptr, result = nullptr;
@@ -541,6 +557,7 @@ napi_value Init(napi_env env, napi_value exports) {
         {"sendPointer", nullptr, SendPointer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendText", nullptr, SendText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendInput", nullptr, SendSystemInput, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setInputEnabled", nullptr, SetInputEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"dispose", nullptr, Dispose, nullptr, nullptr, nullptr, napi_default, nullptr},
     };

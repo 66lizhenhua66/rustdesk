@@ -4,7 +4,8 @@ use serde::Deserialize;
 
 use crate::protos::message::{
     self, Message, OrdInputButton, OrdInputEvent, OrdInputKeepAlive, OrdInputKey, OrdInputMove,
-    OrdInputRelativeMove, OrdInputReleaseAll, OrdInputState, OrdInputText, OrdInputWheel,
+    OrdInputRelativeMove, OrdInputReleaseAll, OrdInputRequest, OrdInputState, OrdInputText,
+    OrdInputWheel,
 };
 
 #[derive(Deserialize)]
@@ -155,6 +156,9 @@ pub(crate) struct ControlInputState {
     supported: bool,
     token: Option<[u8; 16]>,
     pending: VecDeque<InputCommand>,
+    requests: VecDeque<OrdInputRequest>,
+    latest_request_id: u64,
+    desired_enabled: bool,
 }
 
 impl ControlInputState {
@@ -162,9 +166,14 @@ impl ControlInputState {
         self.supported = false;
         self.token = None;
         self.pending.clear();
+        self.requests.clear();
+        self.desired_enabled = false;
     }
 
-    pub(crate) fn apply_state(&mut self, state: &OrdInputState) -> Result<(bool, bool), ()> {
+    pub(crate) fn apply_state(
+        &mut self,
+        state: &OrdInputState,
+    ) -> Result<Option<(bool, bool)>, ()> {
         if state.version != 1
             || state
                 .special_fields
@@ -175,7 +184,16 @@ impl ControlInputState {
             || state.enabled && !state.supported
             || state.enabled && state.grant_token.len() != 16
             || !state.enabled && !state.grant_token.is_empty()
+            || state.request_id > self.latest_request_id
+            || state.request_id == 0 && state.enabled
         {
+            self.clear();
+            return Err(());
+        }
+        if state.request_id != 0 && state.request_id < self.latest_request_id {
+            return Ok(None);
+        }
+        if state.enabled && !self.desired_enabled {
             self.clear();
             return Err(());
         }
@@ -191,7 +209,38 @@ impl ControlInputState {
         }
         self.supported = state.supported;
         self.token = token;
-        Ok((self.supported, self.token.is_some()))
+        Ok(Some((self.supported, self.token.is_some())))
+    }
+
+    pub(crate) fn request_enabled(&mut self, enabled: bool) -> Result<u64, i32> {
+        if enabled && !self.supported {
+            return Err(2);
+        }
+        if !enabled {
+            self.token = None;
+            self.pending.clear();
+            self.requests.clear();
+        } else if self.requests.len() >= 8 {
+            return Err(4);
+        }
+        let Some(request_id) = self.latest_request_id.checked_add(1) else {
+            return Err(4);
+        };
+        self.requests.try_reserve(1).map_err(|_| 4)?;
+        self.latest_request_id = request_id;
+        self.desired_enabled = enabled;
+        self.requests.push_back(OrdInputRequest {
+            version: 1,
+            enabled,
+            scope: "windows_primary".to_owned(),
+            request_id,
+            ..Default::default()
+        });
+        Ok(request_id)
+    }
+
+    pub(crate) fn pop_request(&mut self) -> Option<OrdInputRequest> {
+        self.requests.pop_front()
     }
 
     pub(crate) fn supported(&self) -> bool {
@@ -252,6 +301,33 @@ mod tests {
     use super::*;
     use crate::protos::message::OrdInputState;
 
+    fn active_state(token: u8) -> (ControlInputState, u64) {
+        let mut state = ControlInputState::default();
+        state
+            .apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                grant_token: Vec::new(),
+                request_id: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        let request_id = state.request_enabled(true).unwrap();
+        state.pop_request();
+        state
+            .apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![token; 16],
+                request_id,
+                ..Default::default()
+            })
+            .unwrap();
+        (state, request_id)
+    }
+
     #[test]
     fn bounded_control_commands_parse_with_exact_shapes() {
         assert!(matches!(
@@ -306,39 +382,55 @@ mod tests {
             state.queue(parse_command(r#"{"kind":"move","x":1,"y":2}"#).unwrap()),
             2
         );
+        state
+            .apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                request_id: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        let first_on = state.request_enabled(true).unwrap();
+        state.pop_request();
         assert_eq!(
             state.apply_state(&OrdInputState {
                 version: 1,
                 supported: true,
                 enabled: true,
                 grant_token: vec![1; 16],
+                request_id: first_on,
                 ..Default::default()
             }),
-            Ok((true, true))
+            Ok(Some((true, true)))
         );
         assert_eq!(
             state.queue(parse_command(r#"{"kind":"move","x":1,"y":2}"#).unwrap()),
             0
         );
+        let off = state.request_enabled(false).unwrap();
         assert_eq!(
             state.apply_state(&OrdInputState {
                 version: 1,
                 supported: true,
                 enabled: false,
                 grant_token: Vec::new(),
+                request_id: off,
                 ..Default::default()
             }),
-            Ok((true, false))
+            Ok(Some((true, false)))
         );
+        let second_on = state.request_enabled(true).unwrap();
         assert_eq!(
             state.apply_state(&OrdInputState {
                 version: 1,
                 supported: true,
                 enabled: true,
                 grant_token: vec![2; 16],
+                request_id: second_on,
                 ..Default::default()
             }),
-            Ok((true, true))
+            Ok(Some((true, true)))
         );
         assert!(state.pop().is_none());
         assert_eq!(
@@ -351,15 +443,15 @@ mod tests {
 
     #[test]
     fn repeated_grant_with_same_token_keeps_pending_key_release() {
+        let (mut state, request_id) = active_state(5);
         let grant = OrdInputState {
             version: 1,
             supported: true,
             enabled: true,
             grant_token: vec![5; 16],
+            request_id,
             ..Default::default()
         };
-        let mut state = ControlInputState::default();
-        state.apply_state(&grant).unwrap();
         assert_eq!(
             state.queue(parse_command(r#"{"kind":"key","code":"KeyA","down":false}"#).unwrap()),
             0
@@ -372,17 +464,7 @@ mod tests {
 
     #[test]
     fn release_all_preempts_a_full_queue() {
-        let mut state = ControlInputState::default();
-        assert_eq!(
-            state.apply_state(&OrdInputState {
-                version: 1,
-                supported: true,
-                enabled: true,
-                grant_token: vec![3; 16],
-                ..Default::default()
-            }),
-            Ok((true, true))
-        );
+        let (mut state, _) = active_state(3);
         for _ in 0..64 {
             assert_eq!(
                 state.queue(parse_command(r#"{"kind":"text","text":"a"}"#).unwrap()),
@@ -451,15 +533,8 @@ mod tests {
     fn heartbeat_uses_current_grant_and_stops_after_revoke() {
         let mut state = ControlInputState::default();
         assert!(state.keep_alive_message().is_none());
-        state
-            .apply_state(&OrdInputState {
-                version: 1,
-                supported: true,
-                enabled: true,
-                grant_token: vec![4; 16],
-                ..Default::default()
-            })
-            .unwrap();
+        let (active, _) = active_state(4);
+        state = active;
         let heartbeat = state.keep_alive_message().unwrap();
         let Some(message::message::Union::OrdInputEvent(event)) = heartbeat.union else {
             panic!("expected input heartbeat")
@@ -469,15 +544,138 @@ mod tests {
             event.command,
             Some(message::ord_input_event::Command::KeepAlive(_))
         ));
+        let off = state.request_enabled(false).unwrap();
         state
             .apply_state(&OrdInputState {
                 version: 1,
                 supported: true,
                 enabled: false,
                 grant_token: Vec::new(),
+                request_id: off,
                 ..Default::default()
             })
             .unwrap();
         assert!(state.keep_alive_message().is_none());
+    }
+
+    #[test]
+    fn rapid_off_then_on_sends_revoke_first_and_ignores_old_grant() {
+        let mut state = ControlInputState::default();
+        state
+            .apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                grant_token: Vec::new(),
+                request_id: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        let first_on = state.request_enabled(true).unwrap();
+        let first_request = state.pop_request().unwrap();
+        assert_eq!(
+            (first_request.request_id, first_request.enabled),
+            (first_on, true)
+        );
+        let off = state.request_enabled(false).unwrap();
+        let second_on = state.request_enabled(true).unwrap();
+        assert!(first_on < off && off < second_on);
+        let revoke = state.pop_request().unwrap();
+        let regrant = state.pop_request().unwrap();
+        assert_eq!((revoke.request_id, revoke.enabled), (off, false));
+        assert_eq!((regrant.request_id, regrant.enabled), (second_on, true));
+        assert!(state.pop_request().is_none());
+        assert_eq!(
+            state.apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![1; 16],
+                request_id: first_on,
+                ..Default::default()
+            }),
+            Ok(None)
+        );
+        assert!(!state.allowed());
+        assert_eq!(
+            state.apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                grant_token: Vec::new(),
+                request_id: off,
+                ..Default::default()
+            }),
+            Ok(None)
+        );
+        assert_eq!(
+            state.apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![2; 16],
+                request_id: second_on,
+                ..Default::default()
+            }),
+            Ok(Some((true, true)))
+        );
+        assert!(state.allowed());
+    }
+
+    #[test]
+    fn off_clears_input_immediately_and_unrequested_grants_fail_closed() {
+        let mut state = ControlInputState::default();
+        assert!(state
+            .apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![1; 16],
+                request_id: 0,
+                ..Default::default()
+            })
+            .is_err());
+        state
+            .apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                grant_token: Vec::new(),
+                request_id: 0,
+                ..Default::default()
+            })
+            .unwrap();
+        let on = state.request_enabled(true).unwrap();
+        state.pop_request();
+        state
+            .apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![3; 16],
+                request_id: on,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            state.queue(parse_command(r#"{"kind":"key","code":"KeyA","down":true}"#).unwrap()),
+            0
+        );
+        let off = state.request_enabled(false).unwrap();
+        assert!(!state.allowed());
+        assert!(state.pop().is_none());
+        assert_eq!(state.pop_request().unwrap().request_id, off);
+        assert_eq!(
+            state.apply_state(&OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: true,
+                grant_token: vec![3; 16],
+                request_id: on,
+                ..Default::default()
+            }),
+            Ok(None)
+        );
+        assert!(!state.allowed());
     }
 }

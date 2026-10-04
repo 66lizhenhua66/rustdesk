@@ -14,6 +14,7 @@ pub use sodiumoxide;
 mod policy;
 
 use message_proto::{message, misc, LoginRequest, Message, MouseEvent, PublicKey};
+use protobuf::Message as _;
 use sodiumoxide::crypto::sign;
 
 #[test]
@@ -255,10 +256,10 @@ fn control_version_requires_vp8_and_keeps_read_only_peer_distinct() {
         ..Default::default()
     })
     .into();
-    for (version, accepted) in [(0, false), (1, true), (2, false)] {
+    for (version, accepted) in [(0, false), (1, false), (2, true)] {
         login.ord_input_version = version;
         assert_eq!(policy::requests_input(&login), accepted);
-        assert_eq!(policy::valid_login(&login, "123456789"), version != 2);
+        assert_eq!(policy::valid_login(&login, "123456789"), version != 1);
     }
 
     let control = policy::approved_control_peer_info("1.5.0", 1280, 720);
@@ -271,7 +272,7 @@ fn control_version_requires_vp8_and_keeps_read_only_peer_distinct() {
     let additions: serde_json::Value = serde_json::from_str(&peer.platform_additions).unwrap();
     assert_eq!(additions.as_object().unwrap().len(), 5);
     assert_eq!(additions["input_scope"], "windows_primary");
-    assert_eq!(additions["input_version"], 1);
+    assert_eq!(additions["input_version"], 2);
     assert_eq!(additions["video_codec"], "vp8");
 
     let read_only = policy::approved_video_peer_info("1.5.0", 1280, 720);
@@ -280,4 +281,26 @@ fn control_version_requires_vp8_and_keeps_read_only_peer_distinct() {
     assert_eq!(additions.as_object().unwrap().len(), 4);
     assert_eq!(additions["input_scope"], "none");
     assert!(additions.get("input_version").is_none());
+
+    let mut request = message_proto::OrdInputRequest {
+        version: 1,
+        enabled: false,
+        scope: "windows_primary".into(),
+        request_id: 1,
+        ..Default::default()
+    };
+    let mut message = Message::new();
+    message.set_ord_input_request(request.clone());
+    assert!(message.write_to_bytes().unwrap().len() > 16);
+    assert_eq!(
+        policy::classify_message(&message),
+        policy::Request::InputRequest
+    );
+    request.scope = "audio".into();
+    message.set_ord_input_request(request.clone());
+    assert_eq!(policy::classify_message(&message), policy::Request::Denied);
+    request.scope = "windows_primary".into();
+    request.request_id = 0;
+    message.set_ord_input_request(request);
+    assert_eq!(policy::classify_message(&message), policy::Request::Denied);
 }

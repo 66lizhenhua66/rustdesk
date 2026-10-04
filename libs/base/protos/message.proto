@@ -315,6 +315,14 @@ message OrdInputState {
   bool supported = 2;
   bool enabled = 3;
   bytes grant_token = 4;
+  uint64 request_id = 5;
+}
+
+message OrdInputRequest {
+  uint32 version = 1;
+  bool enabled = 2;
+  string scope = 3;
+  uint64 request_id = 4;
 }
 
 message OrdInputMove {
@@ -1089,5 +1097,6 @@ message Message {
     PortForwardChannel port_forward_channel = 33;
     OrdInputState ord_input_state = 34;
     OrdInputEvent ord_input_event = 35;
+    OrdInputRequest ord_input_request = 36;
   }
 }

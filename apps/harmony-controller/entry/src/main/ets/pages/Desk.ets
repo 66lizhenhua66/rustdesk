@@ -1,9 +1,9 @@
 import controller, { ControllerEvent } from 'libcontroller.so';
 import { preferences } from '@kit.ArkData';
 import { RemoteSession } from '../components/RemoteSession';
-import { Profile, ScreenState, initialScreenState, projectScreenEvent, endedScreenState,
+import { Profile, ScreenState, initialScreenState, projectScreenEvent, endedScreenState, markInputRequest,
   screenIsLive, splitEndpoint, joinEndpoint, canConnectProfile } from '../model/DeskModels';
-import { canSendSystemInput } from '../model/InputModels';
+import { canRequestSystemInput, canSendSystemInput } from '../model/InputModels';
 
 interface ValidationResult {
   ok: boolean;
@@ -342,6 +342,10 @@ struct Desk {
 
   private disconnect(detail: string = '已停止共享画面。本次批准已失效，重新连接需要 Windows 本机再次批准。', code: string = 'CANCELLED'): void {
     const task = this.task;
+    if (task > 0) {
+      try { controller.setInputEnabled(task, false); }
+      catch { /* Socket cancellation below remains mandatory if the toggle cannot be queued. */ }
+    }
     this.generation++;
     this.task = 0;
     this.surfaceId = '';
@@ -353,6 +357,22 @@ struct Desk {
     if (!this.visible || this.task <= 0 || !canSendSystemInput(this.screen, this.sessionOpen, true)) { return 2; }
     try { return controller.sendInput(this.task, command); }
     catch { return 1; }
+  }
+
+  private setInputEnabled(enabled: boolean): number {
+    if (this.task <= 0) { return 1; }
+    if (enabled && (!this.visible || !canRequestSystemInput(this.screen, this.sessionOpen))) { return 2; }
+    if (!enabled && (this.screen.code === 'INPUT_DISABLING' ||
+      (!this.screen.inputGranted && this.screen.code !== 'INPUT_ENABLING'))) { return 0; }
+    try {
+      const result = controller.setInputEnabled(this.task, enabled);
+      if (result === 0) { this.screen = markInputRequest(this.screen, enabled); }
+      else if (!enabled) { this.disconnect('无法确认键鼠关闭，已结束整个连接。请重新连接。'); }
+      return result;
+    } catch {
+      if (!enabled) { this.disconnect('键鼠开关通道不可用，连接已结束。请重新连接。'); }
+      return 1;
+    }
   }
 
   private releaseInput(): void {
@@ -368,7 +388,7 @@ struct Desk {
   }
 
   private hideSession(): void {
-    this.releaseInput();
+    this.setInputEnabled(false);
     this.sessionOpen = false;
   }
 
@@ -566,7 +586,7 @@ struct Desk {
     }.width('100%').padding(24).alignItems(HorizontalAlign.Start).backgroundColor('#FFFFFF').borderRadius(18)
     Column({ space: 4 }) {
       Text('远程桌面').fontSize(19).fontWeight(FontWeight.Medium).fontColor('#20352F')
-      this.setting('进入模式', '默认仅查看；Windows 本机独立允许后可切换键鼠控制')
+      this.setting('进入模式', '默认仅查看；接入批准后在控制端开关键鼠')
       this.setting('文字输入', '在键盘面板选词并确认发送；不发送输入法预编辑文本')
       this.setting('画面显示', '保持比例，适应窗口；单主屏')
       this.setting('画面质量', 'VP8 软件视频 · 最大 1280 × 720 · 约 8 fps 上限；画质切换尚未实现')
@@ -690,6 +710,7 @@ struct Desk {
             surfaceActive: screenIsLive(this.screen), sessionVisible: this.sessionOpen, controller: this.surfaceController,
             onBack: () => this.hideSession(), onDisconnect: () => this.disconnect(),
             onInput: (command: string) => this.sendSystemInput(command), onReleaseInput: () => this.releaseInput(),
+            onSetInputEnabled: (enabled: boolean) => this.setInputEnabled(enabled),
             onRetry: () => { if (this.sessionProfile) { this.connect(this.sessionProfile); } } })
         }, (key: number) => String(key))
       }

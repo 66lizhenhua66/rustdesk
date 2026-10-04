@@ -69,6 +69,25 @@ export function screenIsLive(state: ScreenState): boolean {
     state.phase === 'awaiting' || state.phase === 'approved' || state.phase === 'viewing';
 }
 
+export function markInputRequest(previous: ScreenState, enabled: boolean): ScreenState {
+  if (!previous.approved || !screenIsLive(previous)) { return previous; }
+  const state = new ScreenState();
+  state.phase = previous.phase;
+  state.title = previous.title;
+  state.detail = previous.detail;
+  state.verified = previous.verified;
+  state.approved = previous.approved;
+  state.inputSupported = previous.inputSupported;
+  state.inputGranted = previous.inputGranted;
+  state.width = previous.width;
+  state.height = previous.height;
+  state.frames = previous.frames;
+  state.rendered = previous.rendered;
+  state.bytes = previous.bytes;
+  state.code = enabled ? 'INPUT_ENABLING' : 'INPUT_DISABLING';
+  return state;
+}
+
 function failureDetail(code: string): string {
   if (code === 'INPUT_RELEASE_FAILED') {
     return '输入许可已失效，但 Windows 按键释放失败。请在本机检查按键状态，并重启被控服务后重试。';
@@ -181,13 +200,15 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
   state.frames = previous.frames;
   state.rendered = previous.rendered;
   state.bytes = previous.bytes;
-  state.code = event.code;
+  const inputCode = previous.code === 'INPUT_STATE' || previous.code === 'INPUT_ENABLING' || previous.code === 'INPUT_DISABLING';
+  state.code = inputCode && (event.state === 'video_status' || event.state === 'video_rendered') ? previous.code : event.code;
   if (!state.approved) {
     return state;
   }
   if (event.state === 'input_state') {
     state.inputSupported = event.verified && event.authenticated && event.inputSupported === true;
     state.inputGranted = state.inputSupported && event.authorized === true;
+    if (previous.code === 'INPUT_DISABLING' && state.inputGranted) { state.code = 'INPUT_DISABLING'; }
   } else if (event.state === 'video_status') {
     if (event.frames !== undefined && event.frames >= 0) {
       state.frames = event.frames;
@@ -200,7 +221,7 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
     state.rendered = event.renderedFrames;
     state.phase = 'viewing';
     state.title = '正在查看远程桌面';
-    state.detail = '正在查看 Windows 主显示器；键鼠需要 Windows 本机独立允许。';
+    state.detail = '正在查看 Windows 主显示器；可在控制端开关已支持的键鼠能力。';
   }
   return state;
 }

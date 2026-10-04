@@ -236,6 +236,44 @@ pub extern "C" fn controller_session_send_input_v1(
     input.queue(command)
 }
 
+#[no_mangle]
+pub extern "C" fn controller_session_set_input_enabled_v1(
+    task: *mut ControllerSession,
+    enabled: u8,
+) -> i32 {
+    if enabled > 1 {
+        return 3;
+    }
+    let Some(session) = (unsafe { task.as_ref() }) else {
+        return 3;
+    };
+    if session.expected_peer != PersistentPeer::SecureControl
+        || !session.connected.load(Ordering::Acquire)
+        || session.cancelled.load(Ordering::Acquire)
+    {
+        return 1;
+    }
+    let result = {
+        let mut input = session.control_input.lock().unwrap();
+        if !session.connected.load(Ordering::Acquire) || session.cancelled.load(Ordering::Acquire) {
+            return 1;
+        }
+        input.request_enabled(enabled == 1)
+    };
+    if enabled == 0 {
+        session.authorized.store(false, Ordering::Release);
+    }
+    match result {
+        Ok(_) => 0,
+        Err(code) => {
+            if enabled == 0 {
+                controller_session_cancel(task);
+            }
+            code
+        }
+    }
+}
+
 fn queue_input(task: &ControllerSession, input: DemoInput) -> i32 {
     if !task.demo
         || !task.connected.load(Ordering::Acquire)
@@ -598,7 +636,7 @@ fn response(
         password: digest,
         my_id: "123456789".to_owned(),
         my_name: "Harmony Controller".to_owned(),
-        ord_input_version: if control { 1 } else { 0 },
+        ord_input_version: if control { 2 } else { 0 },
         option: MessageField::some(option),
         ..Default::default()
     });
@@ -642,7 +680,7 @@ fn control_video_dimensions(peer: &message::PeerInfo) -> Option<(u32, u32)> {
         || fields.get("media")?.as_bool()? != true
         || fields.get("video_codec")?.as_str()? != "vp8"
         || fields.get("input_scope")?.as_str()? != "windows_primary"
-        || fields.get("input_version")?.as_u64()? != 1
+        || fields.get("input_version")?.as_u64()? != 2
         || peer.displays.len() != 1
         || peer.current_display != 0
         || !peer.displays[0].online
@@ -800,7 +838,7 @@ fn run_secure_control(
                     "Unknown control message",
                 ));
             }
-            last_inbound = Instant::now();
+            let mut refresh_inbound = true;
             match message.union {
                 Some(message::message::Union::VideoFrame(video)) => {
                     let Some(message::video_frame::Union::Vp8s(vp8)) = video.union else {
@@ -867,7 +905,7 @@ fn run_secure_control(
                     }
                 }
                 Some(message::message::Union::OrdInputState(state)) => {
-                    let (supported, allowed) = {
+                    let state_result = {
                         let mut input = task.control_input.lock().unwrap();
                         let result = input.apply_state(&state);
                         task.authorized.store(input.allowed(), Ordering::Release);
@@ -876,17 +914,19 @@ fn run_secure_control(
                     .map_err(|_| {
                         Failure::failed("INVALID_INPUT_STATE", "Invalid input permission state")
                     })?;
-                    demo_event(
-                        callback,
-                        user,
-                        "input_state",
-                        "INPUT_STATE",
-                        "Input permission changed",
-                        true,
-                        true,
-                        allowed,
-                        json!({"inputSupported":supported}),
-                    );
+                    if let Some((supported, allowed)) = state_result {
+                        demo_event(
+                            callback,
+                            user,
+                            "input_state",
+                            "INPUT_STATE",
+                            "Input permission changed",
+                            true,
+                            true,
+                            allowed,
+                            json!({"inputSupported":supported}),
+                        );
+                    }
                 }
                 Some(message::message::Union::OrdInputEvent(event)) => {
                     let valid_echo = event.version == 1
@@ -904,26 +944,26 @@ fn run_secure_control(
                     if valid_echo {
                         token.copy_from_slice(&event.grant_token);
                     }
-                    if !valid_echo || !task.control_input.lock().unwrap().matches_token(token) {
+                    if !valid_echo {
                         return Err(Failure::failed(
                             "INVALID_INPUT_HEARTBEAT",
                             "Invalid input heartbeat echo",
                         ));
                     }
+                    if !task.control_input.lock().unwrap().matches_token(token) {
+                        refresh_inbound = false;
+                    }
                 }
                 Some(message::message::Union::Misc(misc)) => match misc.union {
                     Some(message::misc::Union::PermissionInfo(permission))
-                        if permission.enabled =>
+                        if permission.enabled
+                            && permission.permission.enum_value()
+                                != Ok(permission_info::Permission::Keyboard) =>
                     {
-                        if permission.permission.enum_value()
-                            != Ok(permission_info::Permission::Keyboard)
-                            || !task.control_input.lock().unwrap().allowed()
-                        {
-                            return Err(Failure::failed(
-                                "UNEXPECTED_PERMISSION",
-                                "Legacy permission cannot grant control",
-                            ));
-                        }
+                        return Err(Failure::failed(
+                            "UNEXPECTED_PERMISSION",
+                            "Legacy permission cannot grant control",
+                        ));
                     }
                     Some(message::misc::Union::PermissionInfo(_)) => {}
                     Some(message::misc::Union::CloseReason(reason)) => {
@@ -953,6 +993,9 @@ fn run_secure_control(
                     ))
                 }
             }
+            if refresh_inbound {
+                last_inbound = Instant::now();
+            }
         }
         if task.control_input.lock().unwrap().allowed()
             && last_inbound.elapsed() >= Duration::from_secs(5)
@@ -961,6 +1004,13 @@ fn run_secure_control(
                 "TRANSPORT_STALLED",
                 "Control peer stopped responding",
             ));
+        }
+        let request = { task.control_input.lock().unwrap().pop_request() };
+        if let Some(request) = request {
+            let mut message = Message::new();
+            message.set_ord_input_request(request);
+            let send_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+            wire.send_message(task, send_deadline, cipher, &message)?;
         }
         for _ in 0..8 {
             let next_input = { task.control_input.lock().unwrap().pop() };

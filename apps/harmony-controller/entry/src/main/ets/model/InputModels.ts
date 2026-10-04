@@ -17,9 +17,14 @@ export class PointerDelta {
   dy: number = 0;
 }
 
-export function canSendSystemInput(screen: ScreenState, visible: boolean, controlMode: boolean): boolean {
-  return visible && controlMode && screen.approved && screen.inputSupported && screen.inputGranted &&
+export function canRequestSystemInput(screen: ScreenState, visible: boolean): boolean {
+  return visible && screen.approved && screen.inputSupported &&
     screen.phase === 'viewing' && screen.rendered > 0;
+}
+
+export function canSendSystemInput(screen: ScreenState, visible: boolean, controlMode: boolean): boolean {
+  return canRequestSystemInput(screen, visible) && controlMode && screen.inputGranted &&
+    screen.code !== 'INPUT_ENABLING' && screen.code !== 'INPUT_DISABLING';
 }
 
 export function normalizePointerDelta(dx: number, dy: number, viewWidth: number, viewHeight: number): PointerDelta {

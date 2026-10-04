@@ -4,19 +4,19 @@
 
 ## 系统键鼠（2026-10-04）
 
-新版正式 Desk 使用 `expectedPeer=secure_control`，显式协商输入 v1 与 VP8。旧 Index 保留 `secure_video` 只读和 DEMO 路径；旧 host 不具备新版能力时失败，不自动降级。查看批准不授予键鼠：Windows 须本机显式启动输入入口，并对该连接另行“允许键鼠”；授权与撤销均以服务端回执为准，同一时刻只允许一个输入拥有者。
+新版正式 Desk 使用 `expectedPeer=secure_control`，显式协商 `input_version=2` 与 VP8。旧 Index 保留 `secure_video` 只读和 DEMO 路径；旧 host 不具备新版能力时失败，不自动降级。Windows 每次连接只批准或拒绝一次；准入后默认仅查看，由控制端选择是否启用键鼠，不再需要 Windows 第二次点击“允许键鼠”。控制端点击“控制”发出启用请求，实际输入等待真实 `input_state` 回执；切回查看、关闭输入面板或隐藏会话时立即停止本地输入并请求关闭。同一时刻只允许一个输入拥有者。
 
 ```powershell
 & ./scripts/start-windows-host.ps1 -Configuration Debug -Video -Input
 ```
 
-`-Input` 是 `-EnableInput` 的别名，设置 `ORD_SECURE_INPUT=1`，且必须同时指定 `-Video`；不传时为 0。默认仍只监听 `127.0.0.1:21120`，不改变防火墙或系统安全设置。每次授权产生新随机令牌，令牌不进入 ArkUI/NAPI；撤权、断开或取消清除待发输入，Windows 执行前再检查本次令牌、独立许可、主屏和交互桌面。本机撤销与结束不受远端输入频率阻挡。
+`-Input` 是 `-EnableInput` 的别名，设置 `ORD_SECURE_INPUT=1`，且必须同时指定 `-Video`；不传时为 0。这是默认关闭的本机实现能力门禁，不是第二次用户批准。默认仍只监听 `127.0.0.1:21120`，不改变防火墙或系统安全设置。每次启用产生新随机令牌，令牌不进入 ArkUI/NAPI；关闭输入、断开或取消清除待发输入，Windows 执行前再检查本次令牌、有效输入状态、主屏和交互桌面。Windows 工作台显示真实键鼠状态并保留“结束本次连接”。
 
 第一片实现相对移动、主屏绝对定位、鼠标按钮/拖动、滚轮、白名单按键及最多 512 UTF-8 字节的确认文本。手机触控板发送相对增量，Windows 读取真实光标位置后执行并限制在主屏；仅 control 视频路径使用 GDI 叠加真实光标，不使用手机预测位置。系统安全桌面、UAC、提权、文件与剪贴板通道仍未开放。
 
 授权期间使用每秒一次的内部双向心跳。Windows 以 3 秒无有效输入/心跳为阈值撤权并释放；核心以 5 秒无服务端消息为阈值断开。释放失败会显式失败关闭并阻止新授权，需要重启被控进程，不能宣称所有按键已经释放。
 
-Windows Debug 与鸿蒙双 ABI/HAP 构建已通过，新 HAP 已安装手机模拟器，`-Video -Input` 回环服务已启动。自动化 **116 项通过**：core 80、旧 DEMO 9、Windows 14（模式选择 2、批准门禁 1、视频 5、输入 6）、Flutter widget 4、鸿蒙模型 9。**新版现场只观察到 pending 和超时，尚未由用户允许键鼠；真实系统输入、中文与撤权未实测通过。** 真机、公网和硬件解码等仍未验收，详见 [系统输入验证记录](research/2026-10-04-system-input-validation.md)。
+Windows Debug 与鸿蒙双 ABI/HAP 构建已通过并已安装，`-Video -Input` 回环服务已启动。自动化 **122 项通过**：core 84、旧 DEMO 9、Windows 15（模式选择 2、批准门禁 1、视频 5、输入 7）、Flutter widget 4、鸿蒙模型 10。**正在等待新的本机连接批准，v2 的真实系统输入、中文、开关切换与清理尚未实测通过。** 真机、公网和硬件解码等仍未验收，详见 [控制端能力切换验证记录](research/2026-10-04-controller-capability-validation.md)。[输入 v1 记录](research/2026-10-04-system-input-validation.md) 保留为历史快照。
 
 ## 正式 Flutter 工作台（2026-10-03）
 
@@ -36,7 +36,7 @@ Windows Debug 与鸿蒙双 ABI/HAP 构建已通过，新 HAP 已安装手机模�
 
 构建脚本默认使用外层工作空间的 `.tools/flutter-3.24.5/flutter`，通过 `-FlutterRoot`、`-PubCache`、`-BridgeTools`、`-VcpkgRoot`、`-LibClangPath` 可指定已有工具位置；依赖缓存完整后才使用 `-Offline`。脚本按 `pubspec.lock` 解析依赖，不使用全局最新版 Flutter。产物目录为 `flutter/build/windows/x64/runner/Debug/`；EXE、`librustdesk.dll`、`flutter_windows.dll` 和资源目录需保持同包。Release 对应 `-Configuration Release` 与同名输出目录。
 
-启动脚本分别启动严格服务与可见的 Flutter 工作台，默认监听 `127.0.0.1:21120`，公开配置输出到 `apps/harmony-controller/artifacts/official-current-profile.json`。不传 `-Video`/`-Input` 时对应入口关闭；工作台不会自动批准或自动允许键鼠，批准后保持可见，末条会话结束后保留工作台。前轮待批准和活动视频关窗均已验证清屏；新增输入按下状态的关窗释放仍待本轮实际授权后验证。
+启动脚本分别启动严格服务与可见的 Flutter 工作台，默认监听 `127.0.0.1:21120`，公开配置输出到 `apps/harmony-controller/artifacts/official-current-profile.json`。不传 `-Video`/`-Input` 时对应入口关闭；工作台不会自动批准，连接获批后控制端仍默认仅查看，批准后保持可见，末条会话结束后保留工作台。前轮待批准和活动视频关窗均已验证清屏；新增输入按下状态的关窗释放仍待本轮实际启用后验证。
 
 ## 只读画面与鸿蒙连接
 
@@ -86,7 +86,7 @@ $env:ORD_SECURE_PROFILE_OUT = "$PWD\secure-host-public.json"
 - 握手要求 TCP、有效签名身份和密钥交换 v1。空公钥更新、v0、未知版本和非预期消息直接拒绝。
 - 仅接受一次普通远程登录请求；只读画面仅识别 VP8 解码能力和明确的 VP8 偏好，其余 `option`、客户端版本/平台元数据不调用旧选项处理；拒绝 OS 凭据、文件/摄像头/终端/隧道登录及可信设备标签。
 - 本切片只允许空密码 + 本地批准。已有密码自动批准、最近会话复用、切换控制方向都不可达；配置了 2FA 则拒绝本轮连接，不把点击批准当作绕过必要因子的许可。
-- 原非媒体批准发送 `ord_secure_host=1, media=false, input_scope=none`；原只读视频批准发送 `media=true, video_codec=vp8` 及单个缩放尺寸，两者不接受正式键鼠提升。新 control 路径必须显式协商 input v1，初始不授予输入，仅独立本机授权后发放新令牌。批准前不采集、不发送显示资料。
+- 原非媒体批准发送 `ord_secure_host=1, media=false, input_scope=none`；原只读视频批准发送 `media=true, video_codec=vp8` 及单个缩放尺寸，两者不接受正式键鼠提升。新 control 路径必须显式协商 `input_version=2`，初始不启用输入，连接经本机批准且本机能力门禁开启后，控制端可请求启用并获取真实状态回执；请求及回执通过 `request_id` 关联，令牌仅在 Rust 内维护。批准前不采集、不发送显示资料。
 - 保持请求大小上限、未认证连接预算及有限会话寿命。系统输入在执行点重新核验授权，撤权清队列并释放；实际输入与动态撤权的现场验收仍待完成。
 
 现有上游 Stream 对极短密文存在历史透传兼容逻辑。安全会话保守拒绝解码后不超过 16 字节的消息，防止短明文被当作加密指令；这也会关闭使用极短合法心跳/关闭包的连接。当前登录、关闭与输入心跳继续遵守严格传输边界，不能移除检查后直接开放操作。

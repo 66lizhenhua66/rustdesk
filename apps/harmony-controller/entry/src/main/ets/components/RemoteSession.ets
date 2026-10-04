@@ -1,6 +1,6 @@
 import { ScreenState } from '../model/DeskModels';
 import { KeyCode } from '@kit.InputKit';
-import { SystemInputCommand, normalizePointerDelta, canSendSystemInput, canSubmitInputText } from '../model/InputModels';
+import { SystemInputCommand, normalizePointerDelta, canRequestSystemInput, canSendSystemInput, canSubmitInputText } from '../model/InputModels';
 
 @Component
 export struct RemoteSession {
@@ -15,6 +15,7 @@ export struct RemoteSession {
   onRetry: () => void = () => {};
   onInput: (command: string) => number = () => 1;
   onReleaseInput: () => void = () => {};
+  onSetInputEnabled: (enabled: boolean) => number = () => 1;
   @State private areaWidth: number = 390;
   @State private areaHeight: number = 720;
   @State private toolbarCollapsed: boolean = false;
@@ -43,17 +44,21 @@ export struct RemoteSession {
   }
 
   private inputAvailabilityChanged(): void {
-    if (!canSendSystemInput(this.screen, this.sessionVisible, true)) { this.stopInput(); }
+    if (!canRequestSystemInput(this.screen, this.sessionVisible)) { this.stopInput(false); }
+    else if (this.screen.code === 'INPUT_STATE' && !this.screen.inputGranted && this.controlMode) {
+      this.stopInput(false);
+      this.inputNotice = '键鼠未启用或已关闭，当前仅查看。';
+    }
   }
 
-  private releasePressed(force: boolean = false): void {
+  private releasePressed(force: boolean = false, notifyServer: boolean = true): void {
     const release = force || this.leftHeld || this.heldKeys.size > 0;
     this.leftHeld = false;
     this.heldKeys.clear();
     this.touchId = -1;
     this.pendingDx = 0;
     this.pendingDy = 0;
-    if (release) { this.onReleaseInput(); }
+    if (release && notifyServer) { this.onReleaseInput(); }
   }
 
   private flushPointer(): boolean {
@@ -67,28 +72,53 @@ export struct RemoteSession {
   }
 
   private inputBlur(): void {
+    if (!this.controlMode) { this.releasePressed(false, false); return; }
     this.flushPointer();
     this.releasePressed(true);
   }
 
-  private stopInput(): void {
-    const controlling = this.controlMode;
+  private stopInput(notifyServer: boolean = true): void {
+    const shouldDisable = this.controlMode || this.screen.inputGranted || this.screen.code === 'INPUT_ENABLING';
+    const wasEditing = this.inputPanel === 'keyboard';
     this.controlMode = false;
-    this.releasePressed(controlling);
-    if (this.inputPanel === 'keyboard') { this.textController.stopEditing(); }
+    this.releasePressed(false, false);
     this.inputPanel = '';
     this.inputText = '';
     this.previewActive = false;
     this.inputNotice = '';
+    if (notifyServer && shouldDisable && this.onSetInputEnabled(false) !== 0) {
+      this.inputNotice = '无法确认键鼠关闭，正在结束连接。';
+    }
+    if (wasEditing) { this.textController.stopEditing(); }
   }
 
   private openInput(panel: string): void {
-    this.stopInput();
-    if (!canSendSystemInput(this.screen, this.sessionVisible, true)) { return; }
-    this.controlMode = true;
-    this.inputPanel = panel;
+    if (!canRequestSystemInput(this.screen, this.sessionVisible)) { return; }
+    if (this.controlMode && (this.screen.inputGranted || this.screen.code === 'INPUT_ENABLING')) {
+      this.releasePressed();
+      const wasEditing = this.inputPanel === 'keyboard';
+      this.inputPanel = panel;
+      this.inputText = '';
+      this.previewActive = false;
+      if (wasEditing) { this.textController.stopEditing(); }
+    } else {
+      this.stopInput(false);
+      if (this.onSetInputEnabled(true) !== 0) {
+        this.inputNotice = '键鼠开启请求未能提交，请检查连接与设备能力。';
+        return;
+      }
+      this.controlMode = true;
+      this.inputPanel = panel;
+    }
     this.inputNotice = '';
     this.toolsOpen = false;
+  }
+
+  private inputStatus(): string {
+    if (this.screen.code === 'INPUT_ENABLING') { return '正在启用键鼠 · 等待设备确认'; }
+    if (this.screen.code === 'INPUT_DISABLING') { return '正在关闭键鼠 · 本地输入已停止'; }
+    if (this.readyForInput()) { return '控制中 · 键鼠已开启'; }
+    return this.screen.inputSupported ? '仅查看 · 点“控制”开始操作' : '仅查看 · 当前设备未开放键鼠能力';
   }
 
   private send(command: SystemInputCommand): boolean {
@@ -97,7 +127,7 @@ export struct RemoteSession {
     const status = this.onInput(JSON.stringify(command));
     if (status !== 0) {
       this.stopInput();
-      this.inputNotice = status === 2 ? '输入许可已失效，当前仅查看。' : '输入未能排队，已暂停控制。请检查连接后重试。';
+      this.inputNotice = status === 2 ? '键鼠已关闭或不可用，当前仅查看。' : '输入未能排队，已暂停控制。请检查连接后重试。';
       return false;
     }
     return true;
@@ -285,9 +315,9 @@ export struct RemoteSession {
       Button('仅查看', { type: ButtonType.Normal }).fontSize(12).height(38).fontColor('#196B52')
         .padding({ left: 9, right: 9 }).backgroundColor(this.controlMode ? Color.Transparent : '#FFFFFF').borderRadius(6)
         .onClick(() => this.stopInput())
-      Button('控制', { type: ButtonType.Normal }).fontSize(12).height(38)
+      Button(this.screen.code === 'INPUT_ENABLING' ? '开启中' : '控制', { type: ButtonType.Normal }).fontSize(12).height(38)
         .padding({ left: 9, right: 9 }).borderRadius(6).backgroundColor(this.controlMode ? '#FFFFFF' : Color.Transparent)
-        .fontColor('#196B52').enabled(canSendSystemInput(this.screen, this.sessionVisible, true))
+        .fontColor('#196B52').enabled(canRequestSystemInput(this.screen, this.sessionVisible))
         .onClick(() => this.openInput('pointer'))
     }.padding(3).borderRadius(9).backgroundColor('#EEF3E9').border({ width: 1, color: '#DCE6D7' })
   }
@@ -313,7 +343,7 @@ export struct RemoteSession {
           Text('键盘').fontSize(10).fontColor('#426A4D')
         }
       }.width(44).height(44).borderRadius(8).backgroundColor(this.inputPanel === 'keyboard' ? '#E4EFDF' : Color.Transparent)
-        .enabled(canSendSystemInput(this.screen, this.sessionVisible, true)).accessibilityText('键盘与确认文本')
+        .enabled(canRequestSystemInput(this.screen, this.sessionVisible)).accessibilityText('键盘与确认文本')
         .onClick(() => this.openInput('keyboard'))
       Button({ type: ButtonType.Normal }) {
         Column({ space: 2 }) {
@@ -376,7 +406,7 @@ export struct RemoteSession {
         Image($r('app.media.desk_session_monitor')).width(18).height(18)
         Text(this.deviceName || '远程设备').fontSize(12).fontColor('#20352F')
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-        Text(this.controlMode ? '控制中' : '仅查看').fontSize(10).fontColor('#426A4D').padding(5).backgroundColor('#E3EFDB').borderRadius(5)
+        Text(this.readyForInput() ? '控制中' : this.screen.code === 'INPUT_DISABLING' ? '关闭中' : '仅查看').fontSize(10).fontColor('#426A4D').padding(5).backgroundColor('#E3EFDB').borderRadius(5)
         Image($r('app.media.desk_session_down')).width(16).height(16)
       }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 12 })
     }.width(Math.min(this.areaWidth - 24, 360)).borderRadius({ bottomLeft: 12, bottomRight: 12 })
@@ -405,16 +435,16 @@ export struct RemoteSession {
       Scroll() {
         Column({ space: 12 }) {
           Column({ space: 7 }) {
-            Text(this.screen.inputGranted ? 'Windows 本机已允许键鼠' : '当前仅允许查看').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#196B52')
-            Text(this.screen.inputSupported ? '请在 Windows 本机单独允许键鼠，再切换控制。文件与剪贴板仍未开放。' : '当前被控入口未开放键鼠。需在 Windows 本机启用输入入口，重新连接并单独允许。')
+            Text(this.inputStatus()).fontSize(15).fontWeight(FontWeight.Medium).fontColor('#196B52')
+            Text(this.screen.inputSupported ? '接入已获批准，可在这里开关键鼠。关闭输入面板会请求关闭键鼠。声音、文件与剪贴板尚未实现。' : '当前被控入口未开放键鼠能力。声音、文件与剪贴板尚未实现。')
               .fontSize(12).fontColor('#778780').lineHeight(20)
           }.alignItems(HorizontalAlign.Start).width('100%').padding(14).borderRadius(10).backgroundColor('#EDF4E6')
           this.stat('连接地址', () => this.endpoint || '未提供')
           this.stat('设备身份', () => this.screen.verified ? '已通过可信身份核验' : '尚未完成核验')
           this.stat('本次授权', () => this.screen.approved ? 'Windows 本机已批准查看' : '尚未批准查看')
-          this.stat('键盘与鼠标', () => this.screen.inputGranted ? '本机已独立允许；当前仅查看' : '尚未获得本次输入许可')
+          this.stat('键盘与鼠标', () => this.screen.code === 'INPUT_ENABLING' ? '正在开启，等待状态回执' : this.screen.code === 'INPUT_DISABLING' ? '正在关闭，等待状态回执' : this.screen.inputGranted ? '设备已确认开启' : '设备当前未开启')
           Button('打开触控板', { type: ButtonType.Normal }).height(44).width('100%').fontColor('#FFFFFF').backgroundColor('#196B52').borderRadius(10)
-            .enabled(canSendSystemInput(this.screen, this.sessionVisible, true)).onClick(() => this.openInput('pointer'))
+            .enabled(canRequestSystemInput(this.screen, this.sessionVisible)).onClick(() => this.openInput('pointer'))
           this.stat('远端画面', () => this.screen.approved && this.screen.width > 0 && this.screen.height > 0 ?
             `${this.screen.width} × ${this.screen.height}` : '等待画面协商')
           this.stat('实际接收 / 呈现', () => `${this.screen.frames} 帧 / ${this.screen.rendered} 帧`)
@@ -559,7 +589,7 @@ export struct RemoteSession {
               .onClick(() => this.disconnect())
           }
         }.width('100%')
-        Text(this.terminal() ? '当前没有有效授权 · 重连需要重新批准' : '查看批准不授予键鼠 · 输入需要本机另行允许')
+        Text(this.terminal() ? '当前没有有效授权 · 重连需要重新批准' : '接入批准后，由控制端开关已支持的键鼠能力')
           .fontSize(11).fontColor('#778780').textAlign(TextAlign.Center).lineHeight(18)
       }.width('100%').padding({ top: 14 }).border({ width: { top: 1 }, color: '#E4EAE5' })
     }.width(Math.min(this.areaWidth - 24, 500)).height(Math.min(this.areaHeight - 24, this.terminal() ? 400 : 650))
@@ -579,7 +609,7 @@ export struct RemoteSession {
           this.stateCard()
         }.width('100%').height('100%').backgroundColor('#344B45')
       } else {
-        Text(this.inputNotice.length > 0 && this.inputPanel.length === 0 ? this.inputNotice : this.controlMode ? '控制中 · Windows 本机已允许键鼠' : this.screen.inputGranted ? '仅查看 · 已暂停键鼠' : '仅查看 · 键鼠尚未获准').fontSize(11).fontColor('#426A4D')
+        Text(this.inputNotice.length > 0 && this.inputPanel.length === 0 && this.screen.code !== 'INPUT_DISABLING' ? this.inputNotice : this.inputStatus()).fontSize(11).fontColor('#426A4D')
           .padding({ left: 12, right: 12, top: 9, bottom: 9 }).borderRadius(8).backgroundColor('#EDF4E6')
           .height(32).constraintSize({ maxWidth: this.areaWidth - 24 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           .position({ x: 12, y: this.areaHeight - 44 })
@@ -591,7 +621,7 @@ export struct RemoteSession {
         if (this.toolsOpen) {
           this.toolsPanel()
         }
-        if (this.inputPanel.length > 0) { this.inputControls() }
+        if (this.inputPanel.length > 0 && this.readyForInput()) { this.inputControls() }
       }
     }.width('100%').height('100%').backgroundColor('#344B45').clip(true)
       .onAreaChange((_oldArea: Area, area: Area) => {

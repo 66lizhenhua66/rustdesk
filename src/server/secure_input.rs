@@ -311,6 +311,15 @@ fn semantic_key(code: &str) -> Option<Held> {
     Some(Held::Key(key, extended))
 }
 
+fn consume_request_budget(remaining: &mut usize, enabled: bool) -> Result<(), String> {
+    if enabled {
+        *remaining = remaining
+            .checked_sub(1)
+            .ok_or("Input rate limit exceeded")?;
+    }
+    Ok(())
+}
+
 #[cfg(feature = "ord-secure-host")]
 pub use runtime::Control;
 
@@ -382,6 +391,19 @@ mod runtime {
             self.session.revoke()
         }
 
+        pub fn request_enabled(&mut self, enabled: bool) -> Result<(), String> {
+            if !enabled {
+                return self.revoke();
+            }
+            let result =
+                consume_request_budget(&mut self.remaining, enabled).and_then(|_| self.grant());
+            if let Err(error) = result {
+                self.revoke()?;
+                return Err(error);
+            }
+            Ok(())
+        }
+
         pub fn tick(&mut self) -> Result<bool, String> {
             self.remaining = MAX_ACTIONS_PER_SECOND;
             if self.enabled() && !local_allowed() {
@@ -392,12 +414,13 @@ mod runtime {
             self.session.expire(Instant::now())
         }
 
-        pub fn state(&self) -> Message {
+        pub fn state(&self, request_id: u64) -> Message {
             let mut message = Message::new();
             message.set_ord_input_state(OrdInputState {
                 version: 1,
                 supported: self.supported(),
                 enabled: self.enabled(),
+                request_id,
                 grant_token: self
                     .session
                     .token
@@ -626,6 +649,14 @@ mod runtime {
 mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn disabling_input_is_available_after_request_budget_is_exhausted() {
+        let mut remaining = 1;
+        assert!(consume_request_budget(&mut remaining, true).is_ok());
+        assert!(consume_request_budget(&mut remaining, true).is_err());
+        assert!(consume_request_budget(&mut remaining, false).is_ok());
+    }
 
     struct FakeInjector {
         events: Rc<RefCell<Vec<Action>>>,

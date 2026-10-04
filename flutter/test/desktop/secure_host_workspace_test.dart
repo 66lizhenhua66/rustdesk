@@ -18,7 +18,6 @@ Widget workspace({
   ValueChanged<int>? onReject,
   ValueChanged<int>? onDisconnect,
   ValueChanged<int>? onSelect,
-  void Function(int, bool)? onInputPermission,
 }) {
   return MaterialApp(
     home: SecureHostWorkspace(
@@ -31,7 +30,6 @@ Widget workspace({
       onApprove: onApprove ?? (_) {},
       onReject: onReject ?? (_) {},
       onDisconnect: onDisconnect ?? (_) {},
-      onInputPermission: onInputPermission,
     ),
   );
 }
@@ -43,13 +41,12 @@ Future<void> setWindow(WidgetTester tester, Size size) async {
 }
 
 void main() {
-  testWidgets(
-      'input needs native support and changes only after real permission',
+  testWidgets('host approves access once and reports controller input state',
       (tester) async {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await setWindow(tester, const Size(840, 620));
-    final commands = <String>[];
+    final disconnected = <int>[];
     Widget current(SecureHostStatus status, bool supported, bool enabled) =>
         workspace(
           connections: [
@@ -62,21 +59,22 @@ void main() {
                 inputEnabled: enabled)
           ],
           selectedId: 9,
-          onInputPermission: (id, value) => commands.add('$id:$value'),
+          onDisconnect: disconnected.add,
         );
     await tester.pumpWidget(current(SecureHostStatus.pending, true, false));
     expect(find.byKey(const ValueKey('secure-host-input')), findsNothing);
     await tester.pumpWidget(current(SecureHostStatus.active, false, false));
     expect(find.byKey(const ValueKey('secure-host-input')), findsNothing);
     await tester.pumpWidget(current(SecureHostStatus.active, true, false));
-    await tester.tap(find.byKey(const ValueKey('secure-host-input')));
-    expect(commands, ['9:true']);
-    expect(find.text('允许键鼠'), findsOneWidget);
+    expect(find.byKey(const ValueKey('secure-host-input')), findsNothing);
+    expect(find.text('控制端已关闭'), findsOneWidget);
+    expect(find.text('允许键鼠'), findsNothing);
     expect(find.text('撤销键鼠'), findsNothing);
     await tester.pumpWidget(current(SecureHostStatus.active, true, true));
-    expect(find.text('撤销键鼠'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('secure-host-input')));
-    expect(commands, ['9:true', '9:false']);
+    expect(find.text('控制端已开启'), findsOneWidget);
+    expect(find.text('撤销键鼠'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('secure-host-disconnect')));
+    expect(disconnected, [9]);
     expect(tester.takeException(), isNull);
   });
 

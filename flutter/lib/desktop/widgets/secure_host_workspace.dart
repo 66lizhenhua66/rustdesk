@@ -48,7 +48,6 @@ class SecureHostWorkspace extends StatefulWidget {
   final ValueChanged<int> onApprove;
   final ValueChanged<int> onReject;
   final ValueChanged<int> onDisconnect;
-  final void Function(int, bool)? onInputPermission;
   final String? notice;
   final VoidCallback? onCopyLocalId;
 
@@ -63,7 +62,6 @@ class SecureHostWorkspace extends StatefulWidget {
     required this.onApprove,
     required this.onReject,
     required this.onDisconnect,
-    this.onInputPermission,
     this.notice,
     this.onCopyLocalId,
   });
@@ -345,7 +343,7 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
   String _statusDetail(SecureHostConnection? connection) {
     switch (connection?.status) {
       case SecureHostStatus.pending:
-        return '等待本机决定，键鼠和文件能力未开放。';
+        return '批准接入后，控制端可使用本机已开放的能力。';
       case SecureHostStatus.confirming:
         return '已提交本机决定，等待被控端确认。';
       case SecureHostStatus.active:
@@ -525,10 +523,10 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
               ? '本次连接授权已结束，再次连接需要重新批准。'
               : active
                   ? (connection.inputEnabled
-                      ? '本机已单独允许此次键鼠操作，可随时撤销或结束连接。文件权限未开放。'
-                      : '连接已获本机批准。键鼠需要本机单独允许，文件权限未开放。')
+                      ? '控制端已开启键鼠，可在控制端关闭，或在这里结束连接。文件权限未开放。'
+                      : '连接已获本机批准，控制端可选择使用本机已开放的能力。')
                   : confirming
-                      ? '已提交本机决定，等待被控端确认。本次请求不会获得键鼠或文件权限。'
+                      ? '已提交本机决定，等待被控端确认。接入后由控制端选择已开放的能力，文件权限未开放。'
                       : closing
                           ? '结束请求已提交，请等待连接关闭。'
                           : '请确认这是预期的连接请求，再允许对方连接。')),
@@ -662,16 +660,18 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
             Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       const _CardHeading('本次会话权限', Icons.shield_outlined),
       const SizedBox(height: 8),
-      _body('连接批准不会授予键鼠或文件权限。'),
+      _body('接入获准后，由控制端选择开启已开放的能力。'),
       _permission(Icons.desktop_windows_outlined, '查看屏幕', '需本机启用视频，并完成本次视频协商',
           '需视频启用并协商', false),
       _permission(
           Icons.mouse_outlined,
           '键盘与鼠标',
-          inputEnabled ? '对方可操作主屏，随时可在本机撤销' : '需本机对当前连接单独允许',
-          inputEnabled ? '本次已允许' : '未允许',
+          inputEnabled ? '对方可操作主屏，本机可随时结束连接' : '接入后由控制端开关',
+          inputEnabled ? '控制端已开启' : '控制端已关闭',
           inputEnabled),
-      if (connection?.inputSupported != true) _body('本机未启用键鼠，或当前连接未协商控制能力。'),
+      if (connection?.status == SecureHostStatus.active &&
+          connection?.inputSupported != true)
+        _body('当前连接未开放键鼠能力。'),
       _permission(Icons.folder_outlined, '上传到本机', '文件权限不随查看开放', '尚未实现', false),
       _permission(Icons.folder_outlined, '从本机下载', '未开放文件与目录浏览', '尚未实现', false),
       _note('剪贴板、音频、终端、远程重启和管理员提权均未开放。'),
@@ -717,7 +717,7 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
             Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       const _CardHeading('连接方式，各有边界', Icons.lock_outline),
       _boundary('每次连接，现场批准', '由本机决定是否允许当前连接。'),
-      _boundary('查看与操作，分别授权', '屏幕共享需启用视频；键鼠需要单独允许，文件未开放。'),
+      _boundary('接入后，由控制端选择', '键鼠由控制端开关；结束连接会停止所有本次能力。'),
       _boundary('结束即收回本次许可', '断开后旧授权失效，再次连接需要重新批准。'),
     ]));
   }
@@ -800,7 +800,7 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
       _setting('连接方式', 'IP 直连'),
       _setting('通信保护', 'v1 加密通道'),
       _setting('连接许可', '每次由本机批准'),
-      _setting('键鼠许可', '本机逐连接单独允许，可撤销'),
+      _setting('能力使用', '控制端选择，本机可结束接入'),
       _setting('重连策略', '重新批准'),
       _localIdentity(),
       _note('本页面展示访问边界，不改变系统服务或远程访问的启动配置。'),
@@ -878,24 +878,6 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
     final closing = connection.status == SecureHostStatus.closing;
     final active = connection.status == SecureHostStatus.active;
     final actions = <Widget>[
-      if (active && connection.inputSupported) ...[
-        OutlinedButton(
-          key: const ValueKey('secure-host-input'),
-          onPressed: widget.onInputPermission == null
-              ? null
-              : () => widget.onInputPermission!(
-                  connection.id, !connection.inputEnabled),
-          style: OutlinedButton.styleFrom(
-            foregroundColor:
-                connection.inputEnabled ? _Palette.danger : _Palette.green,
-            minimumSize: const Size(0, 44),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
-          ),
-          child: Text(connection.inputEnabled ? '撤销键鼠' : '允许键鼠'),
-        ),
-        const SizedBox(width: 10),
-      ],
       if (active || closing)
         OutlinedButton(
           key: const ValueKey('secure-host-disconnect'),
@@ -953,9 +935,7 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
                   const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
           Text(
               active
-                  ? (connection.inputEnabled
-                      ? '键鼠已允许 · 可操作当前电脑'
-                      : '连接已批准 · 键鼠未允许')
+                  ? (connection.inputEnabled ? '控制端已开启键鼠' : '仅查看 · 键鼠未开启')
                   : confirming
                       ? '等待被控端确认批准'
                       : closing

@@ -21,7 +21,7 @@ v1, and accepts only encrypted challenges/results. A successful login reports
 | `demo` (default) | Requires the DEMO capability marker. Existing 800x450 pointer and 512-byte UTF-8 text APIs affect only `apps/windows-demo-host`, after its encrypted Keyboard grant. |
 | `secure_host` | Formal non-media connection, with pinned identity, v1 encryption and local CM approval; input remains disabled. |
 | `secure_video` | Formal read-only VP8; requires `controller_session_run_video`, rejects input permission escalation. |
-| `secure_control` | Explicit input-v1 negotiation plus VP8; also uses `controller_session_run_video`. Connection approval alone never grants input. |
+| `secure_control` | Explicit input-v2 negotiation plus VP8; also uses `controller_session_run_video`. Connection approval admits the session, while input remains disabled until the controller requests it. |
 
 Mode and capability mismatches fail; there is no automatic downgrade. New Harmony
 Desk uses `secure_control`; the diagnostic Index retains its old read-only and
@@ -29,7 +29,7 @@ DEMO paths. Video bytes go directly to the native video callback, never through
 ArkTS/JSON. Media decoding, OS injection, file transfer, ID discovery and relay
 transport are not implemented by this crate.
 
-## System input v1
+## System input capability v2
 
 `controller_session_send_input_v1(session, json)` accepts `move` (0..65535 primary
 screen coordinates), `move_relative` (signed normalized deltas -65535..65535),
@@ -37,12 +37,23 @@ screen coordinates), `move_relative` (signed normalized deltas -65535..65535),
 `text` (1..512 UTF-8 bytes) and `release_all`. Unknown fields and unsupported input
 are rejected. Existing DEMO send APIs keep their original scope.
 
-Windows requires local `ORD_SECURE_INPUT=1` in addition to its video gate, then an
-independent grant for the current approved connection. Only one connection owns
-input at a time. Each grant uses a fresh random 16-byte token, held exclusively in
-Rust and attached at send time. Neither the C ABI command JSON nor ArkUI receives
-the token. The authenticated `input_state` event reports `inputSupported` and
-`authorized`; video statistics do not replace this permission state.
+Windows requires local `ORD_SECURE_INPUT=1` in addition to its video gate. This is an
+implementation capability gate, not a second user approval. Windows approves or
+rejects each connection once; after admission the controller requests enable/disable
+with `OrdInputRequest` (scope `windows_primary`, `request_id`). Only one connection
+owns input at a time. Each enable uses a fresh random 16-byte token, held exclusively
+in Rust and attached at send time. Neither the C ABI command JSON nor ArkUI receives the
+token. The authenticated `input_state` event reports `inputSupported`, `authorized`
+and the correlated `request_id`; stale responses cannot reverse a newer choice. The
+controller defaults to read-only and must wait for the real state before sending input.
+
+The C ABI `controller_session_set_input_enabled_v1(session, uint8_t enabled)` requests
+the controller's choice; `_v1` versions the C ABI and does not name the negotiated
+input capability. `controller_session_send_input_v1` remains the event API for
+move/move_relative/button/wheel/key/text/release_all, but queue acceptance never
+implicitly enables input. Selecting read-only, closing controls, hiding a session or
+disconnecting requests disable and stops local input immediately. Grant tokens remain
+inside Rust.
 
 The bounded queue validates authorization before enqueueing and sending. Revocation,
 cancellation and disconnect clear pending commands; release commands preempt a full
@@ -56,12 +67,12 @@ current grant, interactive desktop and primary display at the actual injection p
 Failed cleanup explicitly fails closed and blocks further grants until the host
 process restarts. These checks do not open UAC, elevation or secure desktops.
 
-2026-10-04 validation: 80 core tests passed. Combined with 9 legacy DEMO, 14 Windows,
-4 Flutter widget and 9 Harmony model tests, the slice has 116 automated passes.
+2026-10-04 validation: 84 core tests passed. Combined with 9 legacy DEMO, 15 Windows,
+4 Flutter widget and 10 Harmony model tests, the slice has 122 automated passes.
 Windows Debug and both OHOS ABI/HAP builds passed; the phone emulator has the new
-HAP. Actual Windows input, Chinese text entry and revocation have **not** been verified:
-the new runtime trial has reached pending/timeout only, without a user input grant.
-See the [system-input validation record](../../docs/project/research/2026-10-04-system-input-validation.md).
+HAP. The v2 runtime trial is awaiting a new local connection approval, so actual
+Windows input, Chinese text entry, enable/disable switching and cleanup have **not**
+been verified. See the [controller capability validation record](../../docs/project/research/2026-10-04-controller-capability-validation.md).
 
 Passwords are passed separately for one call and held in zeroizing Rust buffers;
 they are not part of saved profiles. An empty password waits for the peer's

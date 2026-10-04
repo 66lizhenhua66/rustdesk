@@ -4,6 +4,7 @@ import {
   canConnectProfile,
   endedScreenState,
   initialScreenState,
+  markInputRequest,
   joinEndpoint,
   projectScreenEvent,
   screenIsLive,
@@ -120,6 +121,37 @@ test('only an authenticated input-state event grants control and revocation pres
   assert.equal(ended.inputGranted, false);
   assert.equal(ended.inputSupported, false);
   assert.equal(projectScreenEvent(ended, input).inputGranted, false);
+});
+
+test('capability requests wait for input-state confirmation across video callbacks', () => {
+  const approved = projectScreenEvent(initialScreenState(), screenEvent('connected', 'CONNECTED', true, true));
+  const state = screenEvent('input_state', 'INPUT_STATE', true, true);
+  state.inputSupported = true;
+  const supported = projectScreenEvent(approved, state);
+  const enabling = markInputRequest(supported, true);
+  assert.equal(enabling.code, 'INPUT_ENABLING');
+  assert.equal(enabling.inputGranted, false);
+  assert.equal(supported.code, 'INPUT_STATE');
+  const frame = screenEvent('video_rendered', 'VIDEO_RENDERED', true, true);
+  frame.renderedFrames = 2;
+  const waiting = projectScreenEvent(enabling, frame);
+  assert.equal(waiting.code, 'INPUT_ENABLING');
+  assert.equal(waiting.inputGranted, false);
+  state.authorized = true;
+  const enabled = projectScreenEvent(waiting, state);
+  assert.equal(enabled.code, 'INPUT_STATE');
+  assert.equal(enabled.inputGranted, true);
+  const disabling = markInputRequest(enabled, false);
+  assert.equal(disabling.inputGranted, true);
+  assert.equal(projectScreenEvent(disabling, state).code, 'INPUT_DISABLING');
+  const stats = screenEvent('video_status', 'VIDEO_STATUS', true, true);
+  stats.frames = 4;
+  assert.equal(projectScreenEvent(disabling, stats).code, 'INPUT_DISABLING');
+  state.authorized = false;
+  const disabled = projectScreenEvent(disabling, state);
+  assert.equal(disabled.inputGranted, false);
+  assert.equal(projectScreenEvent(disabled, frame).code, 'INPUT_STATE');
+  assert.equal(markInputRequest(endedScreenState('ended'), true).phase, 'ended');
 });
 
 test('terminal events clear approval and statistics and explain the next action', () => {

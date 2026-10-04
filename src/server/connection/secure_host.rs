@@ -16,11 +16,11 @@ fn local_approval_allowed() -> bool {
 }
 
 impl Connection {
-    async fn send_secure_input_state(&mut self, input: &secure_input::Control) -> bool {
+    async fn send_secure_input_state(&mut self, input: &secure_input::Control, request_id: u64) -> bool {
         self.keyboard = input.enabled();
         self.send_to_cm(ipc::Data::SwitchPermission { name: "ord_input_supported".into(), enabled: input.supported() });
         self.send_to_cm(ipc::Data::SwitchPermission { name: "keyboard".into(), enabled: self.keyboard });
-        if self.stream.send(&input.state()).await.is_err() { return false; }
+        if self.stream.send(&input.state(request_id)).await.is_err() { return false; }
         let mut misc = Misc::new();
         misc.set_permission_info(PermissionInfo { permission: Permission::Keyboard.into(), enabled: self.keyboard, ..Default::default() });
         let mut message = Message::new();
@@ -111,7 +111,7 @@ impl Connection {
                     }
                     match input.tick() {
                         Ok(true) => {
-                            self.send_secure_input_state(&input).await;
+                            self.send_secure_input_state(&input, 0).await;
                             break;
                         }
                         Err(error) => { log::warn!("Secure input watchdog stopped: {error}"); break; }
@@ -175,23 +175,15 @@ impl Connection {
                             self.try_start_cm(self.lr.my_id.clone(), self.lr.my_name.clone(), true);
                             if input_requested {
                                 input.configure(Self::permission(keys::OPTION_ENABLE_KEYBOARD, &self.control_permissions));
-                                if !self.send_secure_input_state(&input).await { break; }
+                                if !self.send_secure_input_state(&input, 0).await { break; }
                             }
                         }
                         ipc::Data::Close => break,
                         ipc::Data::CmErr(_) => break,
-                        ipc::Data::SwitchPermission { name, enabled } => {
+                        ipc::Data::SwitchPermission { .. } => {
                             if self.authorized && secure_host_policy::requests_input(&self.lr) {
-                                if name == "keyboard" {
-                                    let result = if enabled {
-                                        if local_approval_allowed() && Self::permission(keys::OPTION_ENABLE_KEYBOARD, &self.control_permissions) {
-                                            input.grant()
-                                        } else { Err("Local input approval was blocked".to_owned()) }
-                                    } else { input.revoke() };
-                                    if let Err(error) = result { log::warn!("Secure input permission unchanged: {error}"); }
-                                    if input.poisoned() { break; }
-                                }
-                                if !self.send_secure_input_state(&input).await { break; }
+                                self.send_to_cm(ipc::Data::SwitchPermission { name: "ord_input_supported".into(), enabled: input.supported() });
+                                self.send_to_cm(ipc::Data::SwitchPermission { name: "keyboard".into(), enabled: input.enabled() });
                             } else if !self.send_secure_permissions().await {
                                 break;
                             }
@@ -226,6 +218,18 @@ impl Connection {
                         break;
                     }
                     let Ok(message) = Message::parse_from_bytes(&bytes) else { break; };
+                    if secure_host_policy::classify_message(&message) == Request::InputRequest {
+                        if !self.authorized || !secure_host_policy::requests_input(&self.lr) { break; }
+                        let Some(message::Union::OrdInputRequest(request)) = message.union else { break; };
+                        if let Err(error) = input.request_enabled(request.enabled) {
+                            log::trace!("Secure input request was not applied: {error}");
+                        }
+                        if input.poisoned() {
+                            self.send_to_cm(ipc::Data::SwitchPermission { name: "ord_input_release_failed".into(), enabled: true });
+                        }
+                        if !self.send_secure_input_state(&input, request.request_id).await || input.poisoned() { break; }
+                        continue;
+                    }
                     if secure_host_policy::classify_message(&message) == Request::Input {
                         if !self.authorized || !secure_host_policy::requests_input(&self.lr) { break; }
                         let Some(message::Union::OrdInputEvent(event)) = message.union else { break; };
@@ -254,11 +258,11 @@ impl Connection {
             self.keyboard = false;
             log::error!("Secure input cleanup failed: {error}");
             if secure_host_policy::requests_input(&self.lr) {
-                self.send_secure_input_state(&input).await;
+                self.send_secure_input_state(&input, 0).await;
                 self.send_secure_input_error("Input release failed").await;
             }
         } else if self.authorized && secure_host_policy::requests_input(&self.lr) {
-            self.send_secure_input_state(&input).await;
+            self.send_secure_input_state(&input, 0).await;
         }
         drop(video_worker);
         self.secure_login_pending = false;
@@ -301,7 +305,7 @@ impl Connection {
                 true
             }
             Request::Close => false,
-            Request::Login | Request::Input | Request::Denied => false,
+            Request::Login | Request::Input | Request::InputRequest | Request::Denied => false,
         }
     }
 }

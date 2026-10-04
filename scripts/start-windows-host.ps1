@@ -39,7 +39,7 @@ try {
   Write-Output "Flutter host server PID: $($hostServer.Id); workspace PID: $($hostWindow.Id)"
   Write-Output "Public profile: $hostProfile"
   Write-Output 'Approve each request in the Flutter workspace. Video is enabled only with -Video.'
-  Write-Output 'Keyboard and mouse also require -Input and a separate local grant for each connection.'
+  Write-Output 'After local connection approval, the controller chooses keyboard/mouse on or off; -Input enables that capability.'
 } finally {
   foreach ($hostKey in $hostSaved.Keys) {
     if ($null -eq $hostSaved[$hostKey]) { Remove-Item -LiteralPath "Env:$hostKey" -ErrorAction SilentlyContinue }

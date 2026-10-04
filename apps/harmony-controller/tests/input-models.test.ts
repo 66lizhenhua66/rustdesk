@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ScreenState } from '../entry/src/main/ets/model/DeskModels.ts';
-import { normalizePointerDelta, canSendSystemInput, canSubmitInputText } from '../entry/src/main/ets/model/InputModels.ts';
+import { normalizePointerDelta, canRequestSystemInput, canSendSystemInput, canSubmitInputText } from '../entry/src/main/ets/model/InputModels.ts';
 
 test('input requires visible rendered video, independent permission and local control mode', () => {
   const screen = new ScreenState();
@@ -10,11 +10,19 @@ test('input requires visible rendered video, independent permission and local co
   screen.rendered = 1;
   assert.equal(canSendSystemInput(screen, true, true), false);
   screen.inputSupported = true;
+  assert.equal(canRequestSystemInput(screen, true), true);
+  assert.equal(canSendSystemInput(screen, true, true), false);
   screen.inputGranted = true;
   assert.equal(canSendSystemInput(screen, true, true), true);
   assert.equal(canSendSystemInput(screen, false, true), false);
   assert.equal(canSendSystemInput(screen, true, false), false);
+  screen.code = 'INPUT_ENABLING';
+  assert.equal(canSendSystemInput(screen, true, true), false);
+  screen.code = 'INPUT_DISABLING';
+  assert.equal(canSendSystemInput(screen, true, true), false);
+  screen.code = 'INPUT_STATE';
   screen.rendered = 0;
+  assert.equal(canRequestSystemInput(screen, true), false);
   assert.equal(canSendSystemInput(screen, true, true), false);
   screen.rendered = 1;
   screen.phase = 'ended';

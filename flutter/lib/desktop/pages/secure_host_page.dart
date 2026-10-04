@@ -101,7 +101,7 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
       if (old != null &&
           old.inputEnabled != item.inputEnabled &&
           !client.ordInputReleaseFailed) {
-        _record(item.inputEnabled ? '被控端已允许本次键鼠操作' : '被控端已撤销键鼠操作', item.name);
+        _record(item.inputEnabled ? '控制端已开启键鼠' : '键鼠已关闭', item.name);
         _notice = null;
       }
       if (client.ordInputReleaseFailed) {
@@ -200,32 +200,6 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
     }
   }
 
-  void _setInputPermission(int id, bool enabled) {
-    Future<void> submit() async {
-      final client = _liveClient(id);
-      if (!mounted ||
-          client == null ||
-          !client.authorized ||
-          (enabled && !client.ordInputSupported) ||
-          _closing.contains(id)) return;
-      setState(() => _notice = enabled
-          ? '已提交允许键鼠请求；会话权限将显示本机确认结果。同一时刻仅一个连接可操作。'
-          : '已提交撤销请求，正在等待本机清理按键并确认。');
-      try {
-        await bind.cmSwitchPermission(
-            connId: id, name: 'keyboard', enabled: enabled);
-      } catch (_) {
-        if (mounted) setState(() => _notice = '键鼠权限请求未能提交，请重试。');
-      }
-    }
-
-    if (enabled) {
-      _withLocalDecision(id, submit);
-    } else {
-      submit();
-    }
-  }
-
   Future<void> _withLocalDecision(
       int id, Future<void> Function() action) async {
     // Strict approval never uses the legacy allow-remote-CM-modification option.
@@ -238,7 +212,7 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
       if (clickedAt - lastRemoteInput > 120) {
         await action();
       } else {
-        setState(() => _notice = '刚检测到远端输入，请先停止远端操作，再在本机确认。撤销与结束始终可用。');
+        setState(() => _notice = '刚检测到远端输入，请先停止远端操作，再在本机确认。结束连接始终可用。');
       }
     } catch (_) {
       if (mounted) setState(() => _notice = '无法确认本机操作，请重试。');
@@ -314,7 +288,6 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
         onApprove: _approve,
         onReject: _end,
         onDisconnect: _end,
-        onInputPermission: _setInputPermission,
         onCopyLocalId: _localId.isEmpty ? null : _copyIdentity,
       );
 }

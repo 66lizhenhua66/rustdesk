@@ -15,6 +15,7 @@ use remote_controller_core::session::{
     controller_session_create, controller_session_destroy, controller_session_run,
     controller_session_run_video, controller_session_send_input_v1,
     controller_session_send_pointer, controller_session_send_text,
+    controller_session_set_input_enabled_v1,
 };
 use remote_controller_core::{
     protos::{
@@ -102,6 +103,8 @@ fn secure_control_input_api_rejects_bad_commands_and_disconnected_sessions() {
         ),
         1
     );
+    assert_eq!(controller_session_set_input_enabled_v1(task, 1), 1);
+    assert_eq!(controller_session_set_input_enabled_v1(task, 2), 3);
     controller_session_destroy(task);
 }
 
@@ -765,7 +768,7 @@ where
 
 const VIDEO_ADDITIONS: &str =
     r#"{"ord_secure_host":1,"media":true,"video_codec":"vp8","input_scope":"none"}"#;
-const CONTROL_ADDITIONS: &str = r#"{"ord_secure_host":1,"media":true,"video_codec":"vp8","input_scope":"windows_primary","input_version":1}"#;
+const CONTROL_ADDITIONS: &str = r#"{"ord_secure_host":1,"media":true,"video_codec":"vp8","input_scope":"windows_primary","input_version":2}"#;
 
 fn control_login(stream: &mut TcpStream, cipher: &mut Encrypt, additions: &str) {
     let mut challenge = Message::new();
@@ -779,7 +782,7 @@ fn control_login(stream: &mut TcpStream, cipher: &mut Encrypt, additions: &str) 
     let Some(message::message::Union::LoginRequest(login)) = login.union else {
         panic!("expected login request")
     };
-    assert_eq!(login.ord_input_version, 1);
+    assert_eq!(login.ord_input_version, 2);
     assert_eq!(
         login.option.unwrap().disable_keyboard.enum_value(),
         Ok(option_message::BoolOption::No)
@@ -802,17 +805,78 @@ fn control_login(stream: &mut TcpStream, cipher: &mut Encrypt, additions: &str) 
     send_encrypted(stream, cipher, &response);
 }
 
+fn send_initial_control_state(stream: &mut TcpStream, cipher: &mut Encrypt) {
+    let mut state = Message::new();
+    state.set_ord_input_state(message::OrdInputState {
+        version: 1,
+        supported: true,
+        enabled: false,
+        request_id: 0,
+        ..Default::default()
+    });
+    send_encrypted(stream, cipher, &state);
+}
+
+fn grant_control(stream: &mut TcpStream, cipher: &mut Encrypt, token: Vec<u8>) -> u64 {
+    send_initial_control_state(stream, cipher);
+    let request = receive_encrypted(stream, cipher);
+    let Some(message::message::Union::OrdInputRequest(request)) = request.union else {
+        panic!("expected controller input request")
+    };
+    assert_eq!(request.version, 1);
+    assert!(request.enabled);
+    assert_eq!(request.scope, "windows_primary");
+    assert!(request.request_id > 0);
+    let mut state = Message::new();
+    state.set_ord_input_state(message::OrdInputState {
+        version: 1,
+        supported: true,
+        enabled: true,
+        grant_token: token,
+        request_id: request.request_id,
+        ..Default::default()
+    });
+    send_encrypted(stream, cipher, &state);
+    request.request_id
+}
+
 struct ControlCollector {
     events: Vec<Value>,
     sends: Vec<i32>,
     legacy_sends: Vec<i32>,
     task: *mut remote_controller_core::session::ControllerSession,
     submit_input: bool,
+    request_input: bool,
+    requested: bool,
+    request_codes: Vec<i32>,
+    off_on_grant: bool,
+    off_sent: bool,
+    off_codes: Vec<i32>,
 }
 
 unsafe extern "C" fn collect_control_event(event: *const c_char, user: *mut c_void) {
     let context = &mut *(user as *mut ControlCollector);
     let event: Value = serde_json::from_str(CStr::from_ptr(event).to_str().unwrap()).unwrap();
+    if context.request_input
+        && !context.requested
+        && event["state"] == "input_state"
+        && event["inputSupported"] == true
+    {
+        context.requested = true;
+        context
+            .request_codes
+            .push(controller_session_set_input_enabled_v1(context.task, 1));
+    }
+    if context.off_on_grant
+        && !context.off_sent
+        && event["state"] == "input_state"
+        && event["authorized"] == true
+    {
+        context.off_sent = true;
+        context
+            .off_codes
+            .push(controller_session_set_input_enabled_v1(context.task, 0));
+    }
     if context.submit_input && event["state"] == "input_state" {
         context.sends.push(controller_session_send_input_v1(
             context.task,
@@ -833,7 +897,19 @@ unsafe extern "C" fn collect_control_event(event: *const c_char, user: *mut c_vo
     context.events.push(event);
 }
 
-fn execute_control<F>(server_fn: F, submit_input: bool) -> ControlCollector
+fn execute_control<F>(server_fn: F, submit_input: bool, request_input: bool) -> ControlCollector
+where
+    F: FnOnce(TcpStream, sign::SecretKey) + Send + 'static,
+{
+    execute_control_with_off(server_fn, submit_input, request_input, false)
+}
+
+fn execute_control_with_off<F>(
+    server_fn: F,
+    submit_input: bool,
+    request_input: bool,
+    off_on_grant: bool,
+) -> ControlCollector
 where
     F: FnOnce(TcpStream, sign::SecretKey) + Send + 'static,
 {
@@ -881,6 +957,12 @@ where
         legacy_sends: Vec::new(),
         task,
         submit_input,
+        request_input,
+        requested: false,
+        request_codes: Vec::new(),
+        off_on_grant,
+        off_sent: false,
+        off_codes: Vec::new(),
     };
     controller_session_run_video(
         task,
@@ -902,6 +984,7 @@ fn control_mode_rejects_old_read_only_peer_metadata() {
             assert!(receive_encrypted(&mut stream, &mut cipher).has_misc());
         },
         false,
+        false,
     );
     assert!(result
         .events
@@ -921,17 +1004,7 @@ fn control_mode_requires_real_state_and_revokes_input() {
         move |mut stream, key| {
             let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
             control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
-            for (enabled, grant_token) in [(false, Vec::new()), (true, server_token.clone())] {
-                let mut state = Message::new();
-                state.set_ord_input_state(message::OrdInputState {
-                    version: 1,
-                    supported: true,
-                    enabled,
-                    grant_token,
-                    ..Default::default()
-                });
-                send_encrypted(&mut stream, &mut cipher, &state);
-            }
+            grant_control(&mut stream, &mut cipher, server_token.clone());
             send_permission(&mut stream, &mut cipher, true);
             let sent = receive_encrypted(&mut stream, &mut cipher);
             let Some(message::message::Union::OrdInputEvent(event)) = sent.union else {
@@ -960,6 +1033,7 @@ fn control_mode_requires_real_state_and_revokes_input() {
             send_encrypted(&mut stream, &mut cipher, &close);
         },
         true,
+        true,
     );
     assert_eq!(result.sends, [2, 0, 2]);
     assert_eq!(result.legacy_sends, [1, 1]);
@@ -983,15 +1057,7 @@ fn control_heartbeat_stops_after_revoke() {
         |mut stream, key| {
             let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
             control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
-            let mut grant = Message::new();
-            grant.set_ord_input_state(message::OrdInputState {
-                version: 1,
-                supported: true,
-                enabled: true,
-                grant_token: vec![9; 16],
-                ..Default::default()
-            });
-            send_encrypted(&mut stream, &mut cipher, &grant);
+            grant_control(&mut stream, &mut cipher, vec![9; 16]);
             let heartbeat = receive_encrypted(&mut stream, &mut cipher);
             let Some(message::message::Union::OrdInputEvent(event)) = heartbeat.union else {
                 panic!("expected input heartbeat")
@@ -1025,6 +1091,7 @@ fn control_heartbeat_stops_after_revoke() {
             send_encrypted(&mut stream, &mut cipher, &close);
         },
         false,
+        true,
     );
     assert!(result
         .events
@@ -1038,15 +1105,7 @@ fn control_downlink_stall_stops_heartbeats_without_eof() {
         |mut stream, key| {
             let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
             control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
-            let mut grant = Message::new();
-            grant.set_ord_input_state(message::OrdInputState {
-                version: 1,
-                supported: true,
-                enabled: true,
-                grant_token: vec![8; 16],
-                ..Default::default()
-            });
-            send_encrypted(&mut stream, &mut cipher, &grant);
+            grant_control(&mut stream, &mut cipher, vec![8; 16]);
             let first = receive_encrypted(&mut stream, &mut cipher);
             assert!(
                 matches!(first.union, Some(message::message::Union::OrdInputEvent(event))
@@ -1068,6 +1127,7 @@ fn control_downlink_stall_stops_heartbeats_without_eof() {
             }
         },
         false,
+        true,
     );
     assert!(result
         .events
@@ -1081,15 +1141,7 @@ fn read_only_control_session_can_wait_on_a_static_desktop() {
         |mut stream, key| {
             let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
             control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
-            let mut state = Message::new();
-            state.set_ord_input_state(message::OrdInputState {
-                version: 1,
-                supported: true,
-                enabled: false,
-                grant_token: Vec::new(),
-                ..Default::default()
-            });
-            send_encrypted(&mut stream, &mut cipher, &state);
+            send_initial_control_state(&mut stream, &mut cipher);
             thread::sleep(Duration::from_millis(5500));
             let mut close = Message::new();
             let mut misc = Misc::new();
@@ -1097,6 +1149,7 @@ fn read_only_control_session_can_wait_on_a_static_desktop() {
             close.set_misc(misc);
             send_encrypted(&mut stream, &mut cipher, &close);
         },
+        false,
         false,
     );
     assert!(!result
@@ -1115,15 +1168,7 @@ fn echoed_control_heartbeats_keep_a_static_authorized_session_live() {
         |mut stream, key| {
             let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
             control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
-            let mut grant = Message::new();
-            grant.set_ord_input_state(message::OrdInputState {
-                version: 1,
-                supported: true,
-                enabled: true,
-                grant_token: vec![6; 16],
-                ..Default::default()
-            });
-            send_encrypted(&mut stream, &mut cipher, &grant);
+            grant_control(&mut stream, &mut cipher, vec![6; 16]);
             for _ in 0..6 {
                 let heartbeat = receive_encrypted(&mut stream, &mut cipher);
                 assert!(matches!(&heartbeat.union,
@@ -1139,6 +1184,7 @@ fn echoed_control_heartbeats_keep_a_static_authorized_session_live() {
             send_encrypted(&mut stream, &mut cipher, &close);
         },
         false,
+        true,
     );
     assert!(result
         .events
@@ -1151,20 +1197,12 @@ fn echoed_control_heartbeats_keep_a_static_authorized_session_live() {
 }
 
 #[test]
-fn wrong_token_heartbeat_echo_fails_closed() {
+fn mismatched_token_heartbeat_echo_is_ignored() {
     let result = execute_control(
         |mut stream, key| {
             let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
             control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
-            let mut grant = Message::new();
-            grant.set_ord_input_state(message::OrdInputState {
-                version: 1,
-                supported: true,
-                enabled: true,
-                grant_token: vec![6; 16],
-                ..Default::default()
-            });
-            send_encrypted(&mut stream, &mut cipher, &grant);
+            grant_control(&mut stream, &mut cipher, vec![6; 16]);
             let mut bad = Message::new();
             let mut event = message::OrdInputEvent::new();
             event.version = 1;
@@ -1174,6 +1212,35 @@ fn wrong_token_heartbeat_echo_fails_closed() {
             send_encrypted(&mut stream, &mut cipher, &bad);
         },
         false,
+        true,
+    );
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| event["code"] == "INVALID_INPUT_HEARTBEAT"));
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "DISCONNECTED"));
+}
+
+#[test]
+fn malformed_heartbeat_echo_fails_closed() {
+    let result = execute_control(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
+            grant_control(&mut stream, &mut cipher, vec![6; 16]);
+            let mut bad = Message::new();
+            let mut event = message::OrdInputEvent::new();
+            event.version = 2;
+            event.grant_token = vec![6; 16];
+            event.set_keep_alive(message::OrdInputKeepAlive::new());
+            bad.set_ord_input_event(event);
+            send_encrypted(&mut stream, &mut cipher, &bad);
+        },
+        false,
+        true,
     );
     assert!(result
         .events
@@ -1187,15 +1254,7 @@ fn release_failure_after_revoke_remains_visible_to_controller() {
         |mut stream, key| {
             let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
             control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
-            let mut revoked = Message::new();
-            revoked.set_ord_input_state(message::OrdInputState {
-                version: 1,
-                supported: true,
-                enabled: false,
-                grant_token: Vec::new(),
-                ..Default::default()
-            });
-            send_encrypted(&mut stream, &mut cipher, &revoked);
+            send_initial_control_state(&mut stream, &mut cipher);
             let mut close = Message::new();
             let mut misc = Misc::new();
             misc.set_close_reason("Input release failed".into());
@@ -1203,11 +1262,63 @@ fn release_failure_after_revoke_remains_visible_to_controller() {
             send_encrypted(&mut stream, &mut cipher, &close);
         },
         false,
+        false,
     );
     assert!(result
         .events
         .iter()
         .any(|event| event["code"] == "INPUT_RELEASE_FAILED" && event["authorized"] == false));
+}
+
+#[test]
+fn delayed_old_heartbeat_after_local_off_keeps_video_connected() {
+    let result = execute_control_with_off(
+        |mut stream, key| {
+            let mut cipher = negotiated(&mut stream, &key, "123456789", 1);
+            control_login(&mut stream, &mut cipher, CONTROL_ADDITIONS);
+            let on_id = grant_control(&mut stream, &mut cipher, vec![9; 16]);
+            let request = receive_encrypted(&mut stream, &mut cipher);
+            let Some(message::message::Union::OrdInputRequest(request)) = request.union else {
+                panic!("expected input-off request")
+            };
+            assert!(!request.enabled);
+            assert!(request.request_id > on_id);
+            let mut old_echo = Message::new();
+            let mut event = message::OrdInputEvent::new();
+            event.version = 1;
+            event.grant_token = vec![9; 16];
+            event.set_keep_alive(message::OrdInputKeepAlive::new());
+            old_echo.set_ord_input_event(event);
+            send_encrypted(&mut stream, &mut cipher, &old_echo);
+            let mut revoked = Message::new();
+            revoked.set_ord_input_state(message::OrdInputState {
+                version: 1,
+                supported: true,
+                enabled: false,
+                request_id: request.request_id,
+                ..Default::default()
+            });
+            send_encrypted(&mut stream, &mut cipher, &revoked);
+            let mut close = Message::new();
+            let mut misc = Misc::new();
+            misc.set_close_reason("done".into());
+            close.set_misc(misc);
+            send_encrypted(&mut stream, &mut cipher, &close);
+        },
+        false,
+        true,
+        true,
+    );
+    assert_eq!(result.request_codes, [0]);
+    assert_eq!(result.off_codes, [0]);
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event["code"] == "DISCONNECTED"));
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| event["code"] == "INVALID_INPUT_HEARTBEAT"));
 }
 
 #[test]
