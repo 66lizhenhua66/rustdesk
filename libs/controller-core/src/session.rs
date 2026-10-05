@@ -46,7 +46,11 @@ enum DemoInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Request {
-    endpoint: String,
+    endpoint: Option<String>,
+    mode: Option<String>,
+    server: Option<String>,
+    server_key: Option<String>,
+    relay_server: Option<String>,
     peer_id: String,
     peer_public_key: String,
     peer_fingerprint: Option<String>,
@@ -55,14 +59,16 @@ struct Request {
 }
 
 pub struct ControllerSession {
-    endpoint: SocketAddr,
-    peer_id: String,
-    peer_key: sign::PublicKey,
+    endpoint: Option<SocketAddr>,
+    pub(crate) rendezvous: Option<crate::rendezvous::Config>,
+    pub(crate) peer_id: String,
+    pub(crate) peer_key: sign::PublicKey,
     password: Mutex<Option<Zeroizing<String>>>,
+    access: Mutex<Option<crate::access::Access>>,
     timeout: Duration,
     started: AtomicBool,
     cancelled: AtomicBool,
-    socket: Mutex<Option<TcpStream>>,
+    pub(crate) socket: Mutex<Option<TcpStream>>,
     demo: bool,
     expected_peer: PersistentPeer,
     connected: AtomicBool,
@@ -93,6 +99,35 @@ pub extern "C" fn controller_connection_create(
     create(request_json, password, handshake_ms, true)
 }
 
+#[no_mangle]
+pub extern "C" fn controller_connection_create_access_v1(
+    request_json: *const c_char,
+    credential_json: *const c_char,
+    timeout_ms: u32,
+) -> *mut ControllerSession {
+    if credential_json.is_null() {
+        return ptr::null_mut();
+    }
+    let Ok(secret) = (unsafe { CStr::from_ptr(credential_json) }).to_str() else {
+        return ptr::null_mut();
+    };
+    if sodiumoxide::init().is_err() {
+        return ptr::null_mut();
+    }
+    let Some(access) = crate::access::Access::parse(secret) else {
+        return ptr::null_mut();
+    };
+    let task = create(request_json, c"".as_ptr(), timeout_ms, true);
+    if let Some(session) = unsafe { task.as_ref() } {
+        if session.expected_peer != PersistentPeer::SecureVideo {
+            controller_session_destroy(task);
+            return ptr::null_mut();
+        }
+        *session.access.lock().unwrap() = Some(access);
+    }
+    task
+}
+
 fn create(
     request_json: *const c_char,
     password: *const c_char,
@@ -121,11 +156,36 @@ fn create(
     if !demo && request.expected_peer.is_some() {
         return ptr::null_mut();
     }
-    let Ok(endpoint) = request.endpoint.parse::<SocketAddr>() else {
-        return ptr::null_mut();
+    let mode = request.mode.as_deref().unwrap_or("direct");
+    let endpoint = if mode == "direct" {
+        let Some(endpoint) = request
+            .endpoint
+            .as_deref()
+            .and_then(|v| v.parse::<SocketAddr>().ok())
+            .filter(|v| v.port() != 0)
+        else {
+            return ptr::null_mut();
+        };
+        Some(endpoint)
+    } else {
+        None
     };
-    if endpoint.port() == 0
-        || !(6..=20).contains(&request.peer_id.len())
+    let rendezvous = match mode {
+        "direct" => None,
+        "id" | "relay" => {
+            let Some(config) = crate::rendezvous::Config::parse(
+                mode == "relay",
+                request.server,
+                request.server_key,
+                request.relay_server,
+            ) else {
+                return ptr::null_mut();
+            };
+            Some(config)
+        }
+        _ => return ptr::null_mut(),
+    };
+    if !(6..=20).contains(&request.peer_id.len())
         || !request.peer_id.bytes().all(|b| b.is_ascii_digit())
     {
         return ptr::null_mut();
@@ -149,9 +209,11 @@ fn create(
     }
     Box::into_raw(Box::new(ControllerSession {
         endpoint,
+        rendezvous,
         peer_id: request.peer_id,
         peer_key,
         password: Mutex::new(Some(Zeroizing::new(password.to_owned()))),
+        access: Mutex::new(None),
         timeout: Duration::from_millis(timeout_ms.into()),
         started: AtomicBool::new(false),
         cancelled: AtomicBool::new(false),
@@ -310,13 +372,13 @@ fn queue_input(task: &ControllerSession, input: DemoInput) -> i32 {
     0
 }
 
-struct Failure {
+pub(crate) struct Failure {
     state: &'static str,
     code: &'static str,
     message: &'static str,
 }
 impl Failure {
-    const fn failed(code: &'static str, message: &'static str) -> Self {
+    pub(crate) const fn failed(code: &'static str, message: &'static str) -> Self {
         Self {
             state: "failed",
             code,
@@ -373,7 +435,7 @@ fn demo_event(
     }
 }
 
-fn status(task: &ControllerSession, deadline: Instant) -> Result<Duration, Failure> {
+pub(crate) fn status(task: &ControllerSession, deadline: Instant) -> Result<Duration, Failure> {
     if task.cancelled.load(Ordering::Acquire) {
         return Err(Failure {
             state: "cancelled",
@@ -388,20 +450,20 @@ fn status(task: &ControllerSession, deadline: Instant) -> Result<Duration, Failu
     Ok(remaining.min(SLICE))
 }
 
-fn io_failure(task: &ControllerSession, deadline: Instant) -> Failure {
+pub(crate) fn io_failure(task: &ControllerSession, deadline: Instant) -> Failure {
     status(task, deadline)
         .err()
         .unwrap_or(Failure::failed("TRANSPORT_FAILED", "Connection failed"))
 }
 
-struct Wire {
-    stream: TcpStream,
+pub(crate) struct Wire {
+    pub(crate) stream: TcpStream,
     codec: BytesCodec,
     buffer: BytesMut,
 }
 
 impl Wire {
-    fn new(stream: TcpStream) -> Self {
+    pub(crate) fn new(stream: TcpStream) -> Self {
         let mut codec = BytesCodec::new();
         codec.set_max_packet_length(FRAME_LIMIT);
         Self {
@@ -411,7 +473,7 @@ impl Wire {
         }
     }
 
-    fn receive(
+    pub(crate) fn receive(
         &mut self,
         task: &ControllerSession,
         deadline: Instant,
@@ -494,8 +556,17 @@ impl Wire {
         cipher
             .dec(&mut bytes)
             .map_err(|_| Failure::failed("INVALID_CIPHERTEXT", "Invalid encrypted message"))?;
-        let message = Message::parse_from_bytes(&bytes)
-            .map_err(|_| Failure::failed("PROTOCOL_FAILED", "Invalid encrypted message"))?;
+        let message = Message::parse_from_bytes(&bytes);
+        if message.as_ref().map_or(true, |message| {
+            matches!(
+                &message.union,
+                Some(message::message::Union::OrdAccessGrant(_))
+            )
+        }) {
+            bytes.as_mut().zeroize();
+        }
+        let message =
+            message.map_err(|_| Failure::failed("PROTOCOL_FAILED", "Invalid encrypted message"))?;
         if frame_length > FRAME_LIMIT
             && !matches!(&message.union, Some(message::message::Union::VideoFrame(_)))
         {
@@ -504,7 +575,7 @@ impl Wire {
         Ok(message)
     }
 
-    fn send(
+    pub(crate) fn send(
         &mut self,
         task: &ControllerSession,
         deadline: Instant,
@@ -573,8 +644,16 @@ impl Wire {
         cipher
             .dec(&mut bytes)
             .map_err(|_| Failure::failed("INVALID_CIPHERTEXT", "Invalid encrypted message"))?;
-        Message::parse_from_bytes(&bytes)
-            .map_err(|_| Failure::failed("PROTOCOL_FAILED", "Invalid login message"))
+        let message = Message::parse_from_bytes(&bytes);
+        if message.as_ref().map_or(true, |message| {
+            matches!(
+                &message.union,
+                Some(message::message::Union::OrdAccessGrant(_))
+            )
+        }) {
+            bytes.as_mut().zeroize();
+        }
+        message.map_err(|_| Failure::failed("PROTOCOL_FAILED", "Invalid login message"))
     }
 }
 
@@ -1263,18 +1342,37 @@ fn run(
             false,
             false,
         );
-        let connect_wait = deadline
-            .saturating_duration_since(Instant::now())
-            .min(Duration::from_secs(2));
-        if connect_wait.is_zero() {
-            return Err(Failure::failed("TIMEOUT", "Login verification timed out"));
-        }
-        let stream = TcpStream::connect_timeout(&task.endpoint, connect_wait)
-            .map_err(|_| io_failure(task, deadline))?;
-        let clone = stream.try_clone().map_err(|_| io_failure(task, deadline))?;
-        *task.socket.lock().unwrap() = Some(clone);
-        status(task, deadline)?;
-        let mut wire = Wire::new(stream);
+        let (mut wire, connection_path) = if let Some(config) = &task.rendezvous {
+            crate::rendezvous::connect(task, deadline, config)?
+        } else {
+            let connect_wait = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(2));
+            if connect_wait.is_zero() {
+                return Err(Failure::failed("TIMEOUT", "Login verification timed out"));
+            }
+            let endpoint = task.endpoint.ok_or(Failure::failed(
+                "INVALID_ENDPOINT",
+                "Missing direct endpoint",
+            ))?;
+            let stream = TcpStream::connect_timeout(&endpoint, connect_wait)
+                .map_err(|_| io_failure(task, deadline))?;
+            let clone = stream.try_clone().map_err(|_| io_failure(task, deadline))?;
+            *task.socket.lock().unwrap() = Some(clone);
+            status(task, deadline)?;
+            (Wire::new(stream), "direct")
+        };
+        demo_event(
+            callback,
+            user,
+            "transport_selected",
+            "TRANSPORT_SELECTED",
+            "Peer transport selected",
+            false,
+            false,
+            false,
+            json!({"connectionPath": connection_path}),
+        );
         let first = wire.receive(task, deadline)?;
         let signed = match Message::parse_from_bytes(&first)
             .ok()
@@ -1357,11 +1455,15 @@ fn run(
                 "Invalid login challenge",
             ));
         }
+        let mut access = task.access.lock().unwrap().take();
         let mut password = task.password.lock().unwrap().take().ok_or(Failure::failed(
             "PROTOCOL_FAILED",
             "Missing login credential",
         ))?;
-        let awaiting_approval = password.is_empty();
+        let awaiting_approval = password.is_empty()
+            && access
+                .as_ref()
+                .is_none_or(|access| access.mode != "unattended");
         let mut login = response(
             &mut password,
             &hash,
@@ -1373,9 +1475,20 @@ fn run(
             ),
             task.expected_peer == PersistentPeer::SecureControl,
         );
+        if let Some(access) = access.as_mut() {
+            let proof = access
+                .proof(&task.peer_id, &task.peer_key, &hash.challenge)
+                .map_err(|code| Failure::failed(code, "Trusted access proof failed"))?;
+            if let Some(message::message::Union::LoginRequest(request)) = login.union.as_mut() {
+                request.ord_access = MessageField::some(proof);
+            }
+        }
         let send_result = wire.send_message(task, deadline, &mut cipher, &login);
         if let Some(message::message::Union::LoginRequest(request)) = login.union.as_mut() {
             request.password.zeroize();
+            if let Some(access) = request.ord_access.as_mut() {
+                access.credential_secret.zeroize();
+            }
         }
         send_result?;
         if task.demo && awaiting_approval {
@@ -1416,8 +1529,37 @@ fn run(
         loop {
             let message = wire.receive_message(task, deadline, &mut cipher)?;
             match message.union {
+                Some(message::message::Union::OrdAccessGrant(mut grant)) => {
+                    let result = access
+                        .as_mut()
+                        .ok_or("ACCESS_GRANT_INVALID")
+                        .and_then(|access| access.grant(&grant));
+                    if result.is_ok() {
+                        crate::access::paired_event(callback, user, &grant);
+                    }
+                    grant.credential_secret.zeroize();
+                    result.map_err(|code| Failure::failed(code, "Invalid trusted access grant"))?;
+                }
                 Some(message::message::Union::LoginResponse(login)) => match login.union {
-                    Some(login_response::Union::PeerInfo(peer)) => {
+                    Some(login_response::Union::PeerInfo(mut peer)) => {
+                        if let Some(access) = &access {
+                            access
+                                .verify_peer_info(&peer.platform_additions)
+                                .map_err(|code| {
+                                    Failure::failed(code, "Trusted access mode was not confirmed")
+                                })?;
+                            let mut fields: serde_json::Value =
+                                serde_json::from_str(&peer.platform_additions).map_err(|_| {
+                                    Failure::failed(
+                                        "ACCESS_MODE_MISMATCH",
+                                        "Invalid trusted peer metadata",
+                                    )
+                                })?;
+                            if let Some(fields) = fields.as_object_mut() {
+                                fields.remove("access_mode");
+                            }
+                            peer.platform_additions = fields.to_string();
+                        }
                         if task.demo {
                             let video_size = match task.expected_peer {
                                 PersistentPeer::SecureVideo => video_dimensions(&peer),
@@ -1470,7 +1612,11 @@ fn run(
                                     if peer_kind == PersistentPeer::SecureControl {
                                         json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8","inputSupported":false})
                                     } else {
-                                        json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8"})
+                                        if let Some(access) = &access {
+                                            json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8","accessMode":access.mode})
+                                        } else {
+                                            json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8"})
+                                        }
                                     }
                                 } else {
                                     json!({})
@@ -1585,6 +1731,7 @@ fn run(
     }
     task.control_input.lock().unwrap().clear();
     task.password.lock().unwrap().take();
+    task.access.lock().unwrap().take();
     *task.socket.lock().unwrap() = None;
     if let Err(error) = result {
         if task.demo {
@@ -1652,6 +1799,7 @@ pub extern "C" fn controller_session_cancel(task: *mut ControllerSession) {
         }
         task.control_input.lock().unwrap().clear();
         task.password.lock().unwrap().take();
+        task.access.lock().unwrap().take();
         if let Some(socket) = task.socket.lock().unwrap().as_ref() {
             let _ = socket.shutdown(Shutdown::Both);
         }

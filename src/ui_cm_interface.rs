@@ -141,6 +141,8 @@ pub struct Client {
     pub keyboard: bool,
     pub ord_input_supported: bool,
     pub ord_input_release_failed: bool,
+    pub ord_access_pair_pending: bool,
+    pub ord_access_unattended: bool,
     pub clipboard: bool,
     pub audio: bool,
     pub file: bool,
@@ -253,6 +255,8 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             keyboard,
             ord_input_supported: false,
             ord_input_release_failed: false,
+            ord_access_pair_pending: false,
+            ord_access_unattended: false,
             clipboard,
             audio,
             file,
@@ -443,6 +447,16 @@ pub fn switch_permission(id: i32, name: String, enabled: bool) {
     };
 }
 
+#[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
+pub fn pair_secure_access(id: i32) -> bool {
+    let clients = CLIENTS.read().unwrap();
+    let Some(client) = clients.get(&id) else { return false; };
+    if client.authorized || client.disconnected || !client.ord_access_pair_pending {
+        return false;
+    }
+    client.tx.send(Data::SwitchPermission { name: "ord_pair_device".into(), enabled: true }).is_ok()
+}
+
 #[inline]
 #[cfg(target_os = "android")]
 pub fn switch_permission_all(name: String, enabled: bool) {
@@ -601,7 +615,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 }
                                 Data::SwitchPermission { name, enabled } => {
                                     #[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
-                                    if matches!(name.as_str(), "keyboard" | "ord_input_supported" | "ord_input_release_failed") {
+                                    if matches!(name.as_str(), "keyboard" | "ord_input_supported" | "ord_input_release_failed" | "ord_access_pair_pending" | "ord_access_unattended") {
                                         let args: Vec<String> = std::env::args().skip(1).collect();
                                         if crate::secure_host_ui::is_ord_secure_cm(&args, true) {
                                             let client = {
@@ -609,6 +623,8 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                                 clients.get_mut(&self.conn_id).map(|client| {
                                                     if name == "keyboard" { client.keyboard = enabled; }
                                                     else if name == "ord_input_supported" { client.ord_input_supported = enabled; }
+                                                    else if name == "ord_access_pair_pending" { client.ord_access_pair_pending = enabled; }
+                                                    else if name == "ord_access_unattended" { client.ord_access_unattended = enabled; }
                                                     else { client.ord_input_release_failed |= enabled; }
                                                     client.clone()
                                                 })

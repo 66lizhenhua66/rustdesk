@@ -1,6 +1,10 @@
-param([string]$Listen = '127.0.0.1:21120', [string]$Allow = '', [switch]$Video)
+param([string]$Listen = '127.0.0.1:21120', [string]$Allow = '', [string]$Rendezvous = '', [string]$ServerKey = '', [string]$Relay = '', [switch]$Unattended, [switch]$Video)
 
 $ErrorActionPreference = 'Stop'
+if ($Rendezvous -or $ServerKey -or $Relay) {
+  if (-not $Rendezvous -or -not $ServerKey -or -not $Relay -or -not $Allow) { throw 'ID access requires -Rendezvous host:port -ServerKey base64 -Relay host:port and explicit -Allow controller source IPs.' }
+  if ([Convert]::FromBase64String($ServerKey).Length -ne 32) { throw 'ServerKey must encode the pinned 32-byte hbbs public key.' }
+}
 $cmRepository = Split-Path $PSScriptRoot -Parent
 $cmExe = Join-Path $cmRepository 'target\debug\rustdesk.exe'
 $cmRuntime = Join-Path $cmRepository 'target\debug\sciter.dll'
@@ -14,11 +18,17 @@ if (-not [Net.IPAddress]::IsLoopback($cmEndpoint.Address) -and [string]::IsNullO
 New-Item -ItemType Directory -Force -Path $cmArtifacts | Out-Null
 $cmProfile = Join-Path $cmArtifacts 'official-current-profile.json'
 $cmEnv = @{}
-foreach ($cmKey in @('ORD_SECURE_LISTEN', 'ORD_SECURE_ALLOW', 'ORD_SECURE_PROFILE_OUT', 'ORD_SECURE_VIDEO')) { $cmEnv[$cmKey] = [Environment]::GetEnvironmentVariable($cmKey, 'Process') }
+foreach ($cmKey in @('ORD_SECURE_UNATTENDED', 'ORD_SECURE_RENDEZVOUS', 'ORD_SECURE_SERVER_KEY', 'ORD_SECURE_RELAY', 'ORD_SECURE_ID_PROFILE_OUT', 'ORD_SECURE_LISTEN', 'ORD_SECURE_ALLOW', 'ORD_SECURE_PROFILE_OUT', 'ORD_SECURE_VIDEO')) { $cmEnv[$cmKey] = [Environment]::GetEnvironmentVariable($cmKey, 'Process') }
 try {
+  $env:ORD_SECURE_UNATTENDED = if ($Unattended) { '1' } else { '0' }
+  $env:ORD_SECURE_RENDEZVOUS = $Rendezvous
+  $env:ORD_SECURE_SERVER_KEY = $ServerKey
+  $env:ORD_SECURE_RELAY = $Relay
   $env:ORD_SECURE_LISTEN = $Listen
   $env:ORD_SECURE_ALLOW = $Allow
   $env:ORD_SECURE_PROFILE_OUT = $cmProfile
+  $env:ORD_SECURE_ID_PROFILE_OUT = Join-Path (Split-Path $cmProfile -Parent) 'official-current-id-profile.json'
+  if ($Rendezvous) { Write-Output "ID public profile (after registration): $env:ORD_SECURE_ID_PROFILE_OUT" }
   $env:ORD_SECURE_VIDEO = if ($Video) { '1' } else { '0' }
   $cmServer = Start-Process -FilePath $cmExe -ArgumentList '--server' -WorkingDirectory $cmRepository -WindowStyle Hidden -PassThru
   $cmWindow = Start-Process -FilePath $cmExe -ArgumentList '--cm' -WorkingDirectory $cmRepository -WindowStyle Normal -PassThru

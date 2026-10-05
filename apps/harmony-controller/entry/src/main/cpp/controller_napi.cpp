@@ -37,6 +37,10 @@ struct Job : std::enable_shared_from_this<Job> {
 struct Event {
     std::shared_ptr<Job> job;
     std::string json;
+    ~Event() {
+        volatile char *bytes = json.empty() ? nullptr : &json[0];
+        for (size_t i = 0; i < json.size(); ++i) { bytes[i] = 0; }
+    }
 };
 
 struct State {
@@ -151,6 +155,13 @@ void OnEvent(const char *json, void *user) {
 }
 
 napi_value Version(napi_env env, napi_callback_info) { return String(env, controller_version()); }
+
+napi_value CreateIdentity(napi_env env, napi_callback_info) {
+    char *json = controller_identity_create_v1();
+    napi_value result = String(env, json);
+    controller_secret_string_free_v1(json);
+    return result;
+}
 
 void OnVideo(const uint8_t *data, uint32_t length, uint32_t width, uint32_t height,
              int64_t pts, uint8_t key_frame, void *user) {
@@ -432,6 +443,72 @@ napi_value ConnectScreen(napi_env env, napi_callback_info info) {
     return result;
 }
 
+napi_value ConnectTrustedScreen(napi_env env, napi_callback_info info) {
+    size_t argc = 5;
+    napi_value args[5] = {};
+    std::string request, credentials, surface;
+    WipeString wipe{credentials};
+    double timeout = 0;
+    napi_valuetype callback_type;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 5 ||
+        !ReadString(env, args[0], request, 16384) || !ReadString(env, args[1], credentials, 2048) ||
+        !ReadString(env, args[2], surface, 32) ||
+        napi_get_value_double(env, args[3], &timeout) != napi_ok ||
+        !(timeout >= 100 && timeout <= 60000) || timeout != static_cast<uint32_t>(timeout) ||
+        napi_typeof(env, args[4], &callback_type) != napi_ok || callback_type != napi_function) {
+        Error(env, "INVALID_ARGUMENT", "Expected trusted request, credentials, surface ID, timeout, and callback");
+        return nullptr;
+    }
+    auto *state = GetState(env);
+    if (!state) { Error(env, "NATIVE_FAILURE", "Controller unavailable"); return nullptr; }
+    if (state->workers->load() >= 4) {
+        Error(env, "BUSY", "Previous network operations are still closing"); return nullptr;
+    }
+    auto *session = controller_connection_create_access_v1(request.c_str(), credentials.c_str(),
+                                                            static_cast<uint32_t>(timeout));
+    if (!session) { Error(env, "INVALID_TRUST_CONFIG", "Invalid pinned target or credential"); return nullptr; }
+    auto renderer = std::make_unique<VideoRenderer>(surface);
+    if (!renderer->Ready()) {
+        controller_session_destroy(session);
+        Error(env, "SURFACE_UNAVAILABLE", "The native screen surface is not ready"); return nullptr;
+    }
+    Close(state);
+    auto job = std::make_shared<Job>();
+    job->persistent = true;
+    job->session = session;
+    job->video = std::move(renderer);
+    job->id = state->next_id++;
+    if (job->id == 0) { job->id = state->next_id++; }
+    napi_value name = nullptr, result = nullptr;
+    auto *holder = new (std::nothrow) std::shared_ptr<Job>(job);
+    if (holder == nullptr ||
+        napi_create_string_utf8(env, "ControllerTrustedScreenConnection", NAPI_AUTO_LENGTH, &name) != napi_ok ||
+        napi_create_uint32(env, job->id, &result) != napi_ok ||
+        napi_create_threadsafe_function(env, args[4], nullptr, name, 32, 2, holder,
+                                       Finalize, nullptr, CallJs, &job->tsfn) != napi_ok) {
+        delete holder;
+        Error(env, "NATIVE_FAILURE", "Unable to create trusted event bridge"); return nullptr;
+    }
+    auto count = state->workers;
+    count->fetch_add(1);
+    try {
+        std::thread([job, count]() {
+            controller_session_run_video(job->session, OnEvent, OnVideo, job.get());
+            job->video->Stop();
+            count->fetch_sub(1);
+            napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
+        }).detach();
+    } catch (...) {
+        count->fetch_sub(1);
+        job->closing = true;
+        napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
+        napi_release_threadsafe_function(job->tsfn, napi_tsfn_release);
+        Error(env, "NATIVE_FAILURE", "Unable to start trusted worker"); return nullptr;
+    }
+    state->active = job;
+    return result;
+}
+
 bool ReadBoundedInteger(napi_env env, napi_value value, uint32_t minimum, uint32_t maximum, uint32_t &out) {
     double number = 0;
     if (napi_get_value_double(env, value, &number) != napi_ok ||
@@ -549,11 +626,13 @@ napi_value Init(napi_env env, napi_value exports) {
     }
     napi_property_descriptor methods[] = {
         {"version", nullptr, Version, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"createIdentity", nullptr, CreateIdentity, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"validateProfile", nullptr, Validate, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"probeEndpoint", nullptr, Start, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"authenticate", nullptr, Authenticate, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"connectDemo", nullptr, ConnectDemo, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"connectScreen", nullptr, ConnectScreen, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"connectTrustedScreen", nullptr, ConnectTrustedScreen, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendPointer", nullptr, SendPointer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendText", nullptr, SendText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendInput", nullptr, SendSystemInput, nullptr, nullptr, nullptr, napi_default, nullptr},

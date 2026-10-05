@@ -17,15 +17,23 @@ export interface ControllerEvent {
   frames?: number;
   bytes?: number;
   renderedFrames?: number;
+  connectionPath?: string;
+  accessMode?: string;
+  credentialId?: string;
+  credentialSecret?: string;
+  expiresAt?: number;
 }
 
 declare const controller: {
   version(): string;
+  createIdentity(): string;
   validateProfile(json: string): string;
   probeEndpoint(endpoint: string, timeoutMs: number, callback: (event: ControllerEvent) => void): number;
   authenticate(requestJson: string, password: string, timeoutMs: number, callback: (event: ControllerEvent) => void): number;
   connectDemo(requestJson: string, password: string, timeoutMs: number, callback: (event: ControllerEvent) => void): number;
   connectScreen(requestJson: string, surfaceId: string, timeoutMs: number, callback: (event: ControllerEvent) => void): number;
+  connectTrustedScreen(requestJson: string, credentialsJson: string, surfaceId: string, timeoutMs: number,
+    callback: (event: ControllerEvent) => void): number;
   sendPointer(taskId: number, x: number, y: number): boolean;
   sendText(taskId: number, text: string): boolean;
   sendInput(taskId: number, commandJson: string): number;

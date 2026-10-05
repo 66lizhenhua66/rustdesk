@@ -1,4 +1,4 @@
-import { ScreenState } from '../model/DeskModels';
+import { ScreenState, connectionPathLabel } from '../model/DeskModels';
 import { KeyCode } from '@kit.InputKit';
 import { SystemInputCommand, normalizePointerDelta, canRequestSystemInput, canSendSystemInput, canSubmitInputText } from '../model/InputModels';
 
@@ -7,6 +7,7 @@ export struct RemoteSession {
   @Prop @Watch('inputAvailabilityChanged') screen: ScreenState = new ScreenState();
   @Prop deviceName: string = '';
   @Prop endpoint: string = '';
+  @Prop accessMode: string = '';
   @Prop surfaceActive: boolean = false;
   @Prop @Watch('inputAvailabilityChanged') sessionVisible: boolean = true;
   controller: XComponentController = new XComponentController();
@@ -115,6 +116,7 @@ export struct RemoteSession {
   }
 
   private inputStatus(): string {
+    if (this.accessMode) { return '只读查看 · 键鼠不可用'; }
     if (this.screen.code === 'INPUT_ENABLING') { return '正在启用键鼠 · 等待设备确认'; }
     if (this.screen.code === 'INPUT_DISABLING') { return '正在关闭键鼠 · 本地输入已停止'; }
     if (this.readyForInput()) { return '控制中 · 键鼠已开启'; }
@@ -440,8 +442,11 @@ export struct RemoteSession {
               .fontSize(12).fontColor('#778780').lineHeight(20)
           }.alignItems(HorizontalAlign.Start).width('100%').padding(14).borderRadius(10).backgroundColor('#EDF4E6')
           this.stat('连接地址', () => this.endpoint || '未提供')
+          this.stat('实际连接方式', () => connectionPathLabel(this.screen.connectionPath))
           this.stat('设备身份', () => this.screen.verified ? '已通过可信身份核验' : '尚未完成核验')
-          this.stat('本次授权', () => this.screen.approved ? 'Windows 本机已批准查看' : '尚未批准查看')
+          this.stat('本次授权', () => !this.screen.approved ? '尚未确认' :
+            this.screen.accessMode === 'unattended' ? '无人值守凭据已验证 · 只读' :
+              this.screen.accessMode === 'pair' ? 'Windows 已批准登记 · 只读' : 'Windows 本机已批准查看')
           this.stat('键盘与鼠标', () => this.screen.code === 'INPUT_ENABLING' ? '正在开启，等待状态回执' : this.screen.code === 'INPUT_DISABLING' ? '正在关闭，等待状态回执' : this.screen.inputGranted ? '设备已确认开启' : '设备当前未开启')
           Button('打开触控板', { type: ButtonType.Normal }).height(44).width('100%').fontColor('#FFFFFF').backgroundColor('#196B52').borderRadius(10)
             .enabled(canRequestSystemInput(this.screen, this.sessionVisible)).onClick(() => this.openInput('pointer'))
@@ -451,7 +456,8 @@ export struct RemoteSession {
           this.stat('已接收视频数据', () => `${Math.round(this.screen.bytes / 1024)} KiB`)
           this.stat('画面显示', () => '适应窗口 · 保持远端比例')
           this.stat('画质', () => 'VP8 软件视频 · 画质切换尚未实现')
-          Text('本次批准仅用于当前连接。断开或重新连接后，需要再次在 Windows 本机批准。')
+          Text(this.accessMode ? '此连接仅可查看。Windows 可随时撤销已登记设备。' :
+            '本次批准仅用于当前连接。断开或重新连接后，需要再次在 Windows 本机批准。')
             .fontSize(12).fontColor('#778780').lineHeight(20).width('100%')
         }.width('100%').padding({ left: 18, right: 18, top: 8, bottom: 20 })
       }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
@@ -551,7 +557,7 @@ export struct RemoteSession {
             Stack() {
               Image($r('app.media.desk_session_monitor')).width(28).height(28)
             }.width(60).height(60).borderRadius(20).backgroundColor('#E5F2E9')
-            Text(this.terminal() ? 'REMOTE DESK' : 'WAITING FOR CONFIRMATION')
+            Text(this.terminal() ? 'REMOTE DESK' : this.accessMode === 'unattended' ? 'VERIFYING ACCESS' : 'WAITING FOR CONFIRMATION')
               .fontSize(10).fontColor('#778780').letterSpacing(1)
           }
           Text(this.screen.title || (this.terminal() ? '本次连接已结束' : '正在连接远程设备'))
@@ -568,7 +574,10 @@ export struct RemoteSession {
                 '身份已核验，正在建立加密通道' : this.screen.verified ? '可信身份与加密通道已核验' : '验证中，尚未显示画面',
                 () => this.screen.phase === 'awaiting' || this.screen.phase === 'approved' || this.screen.phase === 'viewing',
                 () => this.screen.phase === 'verifying')
-              this.progressStep('等待本机批准查看', () => this.screen.approved ? '已批准，正在等待首帧呈现' : '请在 Windows 连接管理器中接受请求',
+              this.progressStep(this.accessMode === 'unattended' ? '验证无人值守凭据' :
+                this.accessMode === 'pair' ? '等待 Windows 批准登记' : '等待本机批准查看',
+                () => this.screen.approved ? '已验证，正在等待首帧呈现' : this.accessMode === 'unattended' ?
+                  '正在核对本机凭据' : this.accessMode === 'pair' ? '请在 Windows 明确批准并登记只读访问' : '请在 Windows 连接管理器中接受请求',
                 () => this.screen.approved, () => this.screen.phase === 'awaiting')
             }.width('100%').padding(20).borderRadius(14).backgroundColor('#FFFFFF')
               .border({ width: 1, color: '#E4EAE5' })
@@ -589,7 +598,8 @@ export struct RemoteSession {
               .onClick(() => this.disconnect())
           }
         }.width('100%')
-        Text(this.terminal() ? '当前没有有效授权 · 重连需要重新批准' : '接入批准后，由控制端开关已支持的键鼠能力')
+        Text(this.accessMode ? '此连接仅限查看' : this.terminal() ? '当前没有有效授权 · 重连需要重新批准' :
+          '接入批准后，由控制端开关已支持的键鼠能力')
           .fontSize(11).fontColor('#778780').textAlign(TextAlign.Center).lineHeight(18)
       }.width('100%').padding({ top: 14 }).border({ width: { top: 1 }, color: '#E4EAE5' })
     }.width(Math.min(this.areaWidth - 24, 500)).height(Math.min(this.areaHeight - 24, this.terminal() ? 400 : 650))

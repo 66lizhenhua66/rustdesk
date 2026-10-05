@@ -10,6 +10,8 @@ class SecureHostConnection {
   final SecureHostStatus status;
   final bool inputSupported;
   final bool inputEnabled;
+  final bool pairPending;
+  final bool unattended;
   final String? detail;
   final String? elapsedText;
 
@@ -20,9 +22,25 @@ class SecureHostConnection {
     required this.status,
     this.inputSupported = false,
     this.inputEnabled = false,
+    this.pairPending = false,
+    this.unattended = false,
     this.detail,
     this.elapsedText,
   });
+}
+
+@immutable
+class SecureTrustedDevice {
+  final String id;
+  final String name;
+  final String fingerprint;
+  final int expiresAt;
+
+  const SecureTrustedDevice(
+      {required this.id,
+      required this.name,
+      required this.fingerprint,
+      required this.expiresAt});
 }
 
 @immutable
@@ -50,6 +68,12 @@ class SecureHostWorkspace extends StatefulWidget {
   final ValueChanged<int> onDisconnect;
   final String? notice;
   final VoidCallback? onCopyLocalId;
+  final ValueChanged<int>? onPair;
+  final List<SecureTrustedDevice> trustedDevices;
+  final bool unattendedEnabled;
+  final ValueChanged<String>? onRevokeTrusted;
+  final VoidCallback? onRevokeAllTrusted;
+  final VoidCallback? onRefreshTrusted;
 
   const SecureHostWorkspace({
     super.key,
@@ -64,6 +88,12 @@ class SecureHostWorkspace extends StatefulWidget {
     required this.onDisconnect,
     this.notice,
     this.onCopyLocalId,
+    this.onPair,
+    this.trustedDevices = const [],
+    this.unattendedEnabled = false,
+    this.onRevokeTrusted,
+    this.onRevokeAllTrusted,
+    this.onRefreshTrusted,
   });
 
   @override
@@ -309,11 +339,11 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
   String _statusTitle(SecureHostConnection? connection) {
     switch (connection?.status) {
       case SecureHostStatus.pending:
-        return '有新的连接请求';
+        return connection!.pairPending ? '登记只读访问请求' : '有新的连接请求';
       case SecureHostStatus.confirming:
         return '正在确认本次批准';
       case SecureHostStatus.active:
-        return '连接已获本机批准';
+        return connection!.unattended ? '可信设备只读连接' : '连接已获本机批准';
       case SecureHostStatus.closing:
         return '正在结束本次连接';
       case SecureHostStatus.ended:
@@ -330,7 +360,7 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
       case SecureHostStatus.confirming:
         return '正在确认';
       case SecureHostStatus.active:
-        return '本次连接已批准';
+        return connection!.unattended ? '凭据已验证' : '本次连接已批准';
       case SecureHostStatus.closing:
         return '正在结束';
       case SecureHostStatus.ended:
@@ -343,11 +373,15 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
   String _statusDetail(SecureHostConnection? connection) {
     switch (connection?.status) {
       case SecureHostStatus.pending:
-        return '批准接入后，控制端可使用本机已开放的能力。';
+        return connection!.pairPending
+            ? '核对设备指纹后，可单独登记 30 天只读访问。'
+            : '批准接入后，控制端可使用本机已开放的能力。';
       case SecureHostStatus.confirming:
         return '已提交本机决定，等待被控端确认。';
       case SecureHostStatus.active:
-        return '本次连接已批准，屏幕共享还需本机启用视频并完成协商。';
+        return connection!.unattended
+            ? '只读凭据已验证，可随时结束连接或撤销设备。'
+            : '本次连接已批准，屏幕共享还需本机启用视频并完成协商。';
       case SecureHostStatus.closing:
         return '正在等待被控端确认连接结束。';
       case SecureHostStatus.ended:
@@ -487,7 +521,7 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
         const SizedBox(height: 10),
         _body('收到连接请求后，请在这里确认。屏幕共享另需本机启用视频并完成协商。', centered: true),
         _localIdentity(),
-        _note('当前支持 IP 直连与逐次现场批准。协助码与无人值守尚未实现。'),
+        _note('支持 IP、ID 与自建中继。普通连接逐次批准；可信设备需单独登记只读访问。'),
       ]));
     }
     final active = connection.status == SecureHostStatus.active;
@@ -497,12 +531,12 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
     final title = ended
         ? '连接结束，安心继续。'
         : active
-            ? '本次会话已获批准'
+            ? (connection.unattended ? '已验证可信设备' : '本次会话已获批准')
             : confirming
                 ? '正在确认你的批准'
                 : closing
                     ? '正在收回本次许可'
-                    : '有人想连接这台电脑';
+                    : (connection.pairPending ? '登记此设备的只读访问？' : '有人想连接这台电脑');
     return _HostCard(
         child:
             Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -602,14 +636,17 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
             child: Row(children: [
               Icon(Icons.lock_outline, size: 15, color: _Palette.muted),
               SizedBox(width: 7),
-              Text('IP 直连 · v1 加密通道',
+              Text('v1 加密通道',
                   style: TextStyle(fontSize: 11, color: _Palette.muted))
             ])),
       if (active && connection.elapsedText != null)
         Padding(
             padding: const EdgeInsets.only(top: 9),
             child: _body('本机批准后已连接 ${connection.elapsedText}')),
-      if (!active) _note('此次批准仅适用于当前连接，不登记长期信任。'),
+      if (!active)
+        _note(connection.pairPending
+            ? '登记后该设备可在 30 天内凭密钥查看；每次最多 15 分钟。可在安全设置随时撤销。'
+            : '此次批准仅适用于当前连接，不登记长期信任。'),
     ]));
   }
 
@@ -716,7 +753,7 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
         child:
             Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       const _CardHeading('连接方式，各有边界', Icons.lock_outline),
-      _boundary('每次连接，现场批准', '由本机决定是否允许当前连接。'),
+      _boundary('普通连接，现场批准', '可信设备只读访问必须另行登记，可随时撤销。'),
       _boundary('接入后，由控制端选择', '键鼠由控制端开关；结束连接会停止所有本次能力。'),
       _boundary('结束即收回本次许可', '断开后旧授权失效，再次连接需要重新批准。'),
     ]));
@@ -797,12 +834,50 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600)),
       const SizedBox(height: 9),
       _body('本轮使用严格身份验证、加密通道和逐次现场批准，电脑操作仍由本机掌控。'),
-      _setting('连接方式', 'IP 直连'),
+      _setting('连接方式', 'IP / ID / 自建中继'),
       _setting('通信保护', 'v1 加密通道'),
-      _setting('连接许可', '每次由本机批准'),
+      _setting('连接许可', '现场批准或已登记只读访问'),
       _setting('能力使用', '控制端选择，本机可结束接入'),
       _setting('重连策略', '重新批准'),
       _localIdentity(),
+      const SizedBox(height: 20),
+      const _CardHeading('可信控制设备', Icons.devices),
+      _body(widget.unattendedEnabled
+          ? '只读无人值守已启用。每次连接验证设备凭据，最长查看 15 分钟。'
+          : '只读无人值守未启用。可在启动被控服务时显式开启。'),
+      if (widget.trustedDevices.isEmpty) _note('尚无已登记设备。请从控制端发起登记，并在本机单独批准。'),
+      for (final device in widget.trustedDevices)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Text(device.name,
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+            Text('指纹：${device.fingerprint}',
+                softWrap: true, style: const TextStyle(fontSize: 11)),
+            Text(
+                '到期：${DateTime.fromMillisecondsSinceEpoch(device.expiresAt).toLocal()}',
+                style: const TextStyle(fontSize: 11)),
+            Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton(
+                  key: ValueKey('secure-host-revoke-${device.id}'),
+                  onPressed: widget.onRevokeTrusted == null
+                      ? null
+                      : () => widget.onRevokeTrusted!(device.id),
+                  child: const Text('撤销此设备'),
+                )),
+          ]),
+        ),
+      Wrap(spacing: 10, children: [
+        OutlinedButton(
+            onPressed: widget.onRefreshTrusted, child: const Text('刷新登记状态')),
+        OutlinedButton(
+            onPressed: widget.trustedDevices.isEmpty
+                ? null
+                : widget.onRevokeAllTrusted,
+            child: const Text('撤销全部设备')),
+      ]),
       _note('本页面展示访问边界，不改变系统服务或远程访问的启动配置。'),
     ]));
   }
@@ -822,8 +897,6 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
 
   Widget _unavailableCard() {
     const capabilities = {
-      'unattended': '无人值守',
-      'trusted-devices': '可信控制设备登记',
       'invite': '临时协助码',
       'files': '文件上传与下载',
       'clipboard': '剪贴板与音频',
@@ -906,15 +979,27 @@ class _SecureHostWorkspaceState extends State<SecureHostWorkspace> {
         ),
         const SizedBox(width: 10),
         FilledButton(
-          key: const ValueKey('secure-host-approve'),
-          onPressed: confirming ? null : () => widget.onApprove(connection.id),
+          key: ValueKey(connection.pairPending
+              ? 'secure-host-pair'
+              : 'secure-host-approve'),
+          onPressed: confirming
+              ? null
+              : connection.pairPending
+                  ? (widget.onPair == null
+                      ? null
+                      : () => widget.onPair!(connection.id))
+                  : () => widget.onApprove(connection.id),
           style: FilledButton.styleFrom(
               backgroundColor: _Palette.green,
               foregroundColor: Colors.white,
               minimumSize: const Size(0, 44),
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(9))),
-          child: Text(confirming ? '正在确认…' : '批准连接'),
+          child: Text(confirming
+              ? '正在确认…'
+              : connection.pairPending
+                  ? '批准并登记只读访问'
+                  : '批准连接'),
         ),
       ],
     ];

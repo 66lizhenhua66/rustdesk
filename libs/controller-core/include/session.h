@@ -32,6 +32,13 @@ ControllerSession *controller_session_create(const char *request_json, const cha
  * requires a matching v2 controller request and host state with a current token.
  */
 ControllerSession *controller_connection_create(const char *request_json, const char *password, uint32_t handshake_ms);
+/* Secret JSON must be kept outside profiles and destroyed with the wiping free function.
+ * Access requires expectedPeer=secure_video and controller_session_run_video.
+ */
+char *controller_identity_create_v1(void);
+void controller_secret_string_free_v1(char *value);
+ControllerSession *controller_connection_create_access_v1(const char *request_json,
+    const char *credential_json, uint32_t timeout_ms);
 /* 0 queued, 1 disconnected, 2 input not authorized, 3 invalid argument, 4 queue full. */
 int32_t controller_session_send_pointer(ControllerSession *task, uint32_t x, uint32_t y);
 int32_t controller_session_send_text(ControllerSession *task, const char *utf8);

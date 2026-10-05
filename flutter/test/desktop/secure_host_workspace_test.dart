@@ -18,6 +18,9 @@ Widget workspace({
   ValueChanged<int>? onReject,
   ValueChanged<int>? onDisconnect,
   ValueChanged<int>? onSelect,
+  ValueChanged<int>? onPair,
+  List<SecureTrustedDevice> trustedDevices = const [],
+  ValueChanged<String>? onRevoke,
 }) {
   return MaterialApp(
     home: SecureHostWorkspace(
@@ -30,6 +33,9 @@ Widget workspace({
       onApprove: onApprove ?? (_) {},
       onReject: onReject ?? (_) {},
       onDisconnect: onDisconnect ?? (_) {},
+      onPair: onPair,
+      trustedDevices: trustedDevices,
+      onRevokeTrusted: onRevoke,
     ),
   );
 }
@@ -41,6 +47,53 @@ Future<void> setWindow(WidgetTester tester, Size size) async {
 }
 
 void main() {
+  testWidgets(
+      'pairing requires its explicit action instead of ordinary approval',
+      (tester) async {
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await setWindow(tester, const Size(840, 620));
+    final pairs = <int>[];
+    final approvals = <int>[];
+    await tester.pumpWidget(workspace(connections: [
+      const SecureHostConnection(
+          id: 12,
+          name: '登记设备',
+          peerId: 'peer',
+          status: SecureHostStatus.pending,
+          pairPending: true)
+    ], selectedId: 12, onApprove: approvals.add, onPair: pairs.add));
+    expect(find.text('批准连接'), findsNothing);
+    expect(find.byKey(const ValueKey('secure-host-pair')).hitTestable(),
+        findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('secure-host-pair')));
+    expect(pairs, [12]);
+    expect(approvals, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('trusted-device revoke targets the selected stored credential',
+      (tester) async {
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await setWindow(tester, const Size(1120, 760));
+    final revoked = <String>[];
+    await tester.pumpWidget(workspace(connections: [], trustedDevices: const [
+      SecureTrustedDevice(
+          id: 'grant-1',
+          name: '我的手机',
+          fingerprint: '1234abcd',
+          expiresAt: 1792000000000)
+    ], onRevoke: revoked.add));
+    await tester.tap(find.text('安全设置'));
+    await tester.pumpAndSettle();
+    final target = find.byKey(const ValueKey('secure-host-revoke-grant-1'));
+    await tester.scrollUntilVisible(target, 250,
+        scrollable: find.byType(Scrollable).first);
+    await tester.tap(target);
+    expect(revoked, ['grant-1']);
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('host approves access once and reports controller input state',
       (tester) async {
     addTearDown(tester.view.resetPhysicalSize);
@@ -160,8 +213,6 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('secure-host-nav-settings')));
     await tester.pump();
     for (final capability in [
-      'unattended',
-      'trusted-devices',
       'invite',
       'files',
       'clipboard',

@@ -2,8 +2,11 @@ import controller, { ControllerEvent } from 'libcontroller.so';
 import { preferences } from '@kit.ArkData';
 import { RemoteSession } from '../components/RemoteSession';
 import { Profile, ScreenState, initialScreenState, projectScreenEvent, endedScreenState, markInputRequest,
-  screenIsLive, splitEndpoint, joinEndpoint, canConnectProfile } from '../model/DeskModels';
+  screenIsLive, splitEndpoint, joinEndpoint, canConnectProfile, buildScreenRequest, connectionPathLabel } from '../model/DeskModels';
 import { canRequestSystemInput, canSendSystemInput } from '../model/InputModels';
+import { AccessStatus, accessStatus, buildTrustedScreenRequest, credentialForTarget, parsePairingGrant,
+  secretRequest } from '../model/AccessModels';
+import { loadIdentity, saveIdentity, loadAccess, readAccess, saveAccess, removeAccess } from '../service/CredentialStore';
 
 interface ValidationResult {
   ok: boolean;
@@ -16,6 +19,8 @@ interface RecentConnection {
   name: string;
   target: string;
   at: number;
+  connectionPath?: string;
+  accessMode?: string;
 }
 
 class DeskSurface extends XComponentController {
@@ -49,6 +54,10 @@ struct Desk {
   @State private modal: string = '';
   @State private editingId: string = '';
   @State private name: string = '';
+  @State private connectionMode: string = 'direct';
+  @State private server: string = '';
+  @State private serverKey: string = '';
+  @State private relayServer: string = '';
   @State private address: string = '';
   @State private port: string = '21120';
   @State private peerId: string = '';
@@ -61,6 +70,8 @@ struct Desk {
   @State private sessionOpen: boolean = false;
   @State private sessionKey: number = 0;
   @State private screen: ScreenState = new ScreenState();
+  @State private accessBusy: boolean = false;
+  @State private accessStatuses: Record<string, AccessStatus> = {};
   private surfaceController: XComponentController = new XComponentController();
   private store?: preferences.Preferences;
   private task: number = 0;
@@ -68,6 +79,10 @@ struct Desk {
   private loadGeneration: number = 0;
   private visible: boolean = true;
   private surfaceId: string = '';
+  private currentAccessMode: string = '';
+  private pairGrantReceived: boolean = false;
+  private pairingSaved: boolean = false;
+  private pendingPairConnected?: ControllerEvent;
 
   aboutToAppear(): void { this.visible = true; this.loadProfiles(); }
   onPageShow(): void { this.visible = true; this.loadProfiles(); }
@@ -83,7 +98,7 @@ struct Desk {
   }
 
   onBackPress(): boolean {
-    if (this.modal.length > 0 && !this.saving) { this.modal = ''; return true; }
+    if (this.modal.length > 0 && !this.saving && !this.accessBusy) { this.modal = ''; return true; }
     if (this.sessionOpen) { this.hideSession(); return true; }
     return false;
   }
@@ -102,13 +117,15 @@ struct Desk {
   private validationMessage(code: string): string {
     switch (code) {
       case 'INVALID_PROFILE': return '请填写设备名称，并检查名称是否过长。';
-      case 'INVALID_TARGET': return '请输入有效的 IPv4 / IPv6 地址和 1–65535 端口。';
+      case 'INVALID_TARGET': return this.connectionMode === 'direct' ? '请输入有效的 IPv4 / IPv6 地址和 1–65535 端口。' : '被控设备 ID 应为 6 至 20 位数字。';
       case 'INVALID_PEER_ID': return '被控设备 ID 应为 6 至 20 位数字。';
       case 'INVALID_PEER_KEY':
       case 'INVALID_PEER_PUBLIC_KEY': return '可信公钥应为 32 字节 Ed25519 公钥的 Base64 编码。';
       case 'INVALID_FINGERPRINT': return '指纹应为 64 位十六进制字符，或留空。';
       case 'FINGERPRINT_MISMATCH': return '指纹与可信公钥不一致，请重新核对。';
       case 'INVALID_SERVER': return '服务器地址无效。';
+      case 'INVALID_RELAY_SERVER': return '中继服务器地址无效，请填写域名或 IP 和有效端口。';
+      case 'PEER_ID_MISMATCH': return '连接目标与可信设备 ID 不一致，请重新核对。';
       case 'INVALID_SERVER_KEY': return '服务器公钥无效。';
       default: return `资料校验未通过（${code}），请检查公开配置。`;
     }
@@ -143,6 +160,8 @@ struct Desk {
       if (owner !== this.loadGeneration || !this.visible) { return; }
       this.store = store;
       this.profiles = normalized;
+      this.accessStatuses = {};
+      this.refreshAccessStatuses(normalized, owner);
       this.favorites = favorites;
       this.recent = recent.slice(0, 30);
       this.storeError = '';
@@ -175,6 +194,40 @@ struct Desk {
     } finally { this.saving = false; }
   }
 
+  private async refreshAccessStatuses(profiles: Profile[], owner: number): Promise<void> {
+    for (const profile of profiles) {
+      if (owner !== this.loadGeneration || !this.visible) { return; }
+      await this.refreshAccessStatus(profile, owner);
+    }
+  }
+
+  private async refreshAccessStatus(profile: Profile, owner: number = this.loadGeneration): Promise<void> {
+    let status: AccessStatus;
+    try { status = accessStatus(profile, await readAccess(profile)); }
+    catch { status = { state: 'unavailable', expiresAt: 0 }; }
+    const current = this.profiles.find((item: Profile) => item.id === profile.id);
+    if (owner !== this.loadGeneration || !this.visible || !current ||
+      current.peerId !== profile.peerId || current.peerPublicKey !== profile.peerPublicKey) { return; }
+    const next: Record<string, AccessStatus> = {};
+    for (const item of this.profiles) {
+      const previous = this.accessStatuses[item.id];
+      if (previous) { next[item.id] = previous; }
+    }
+    next[profile.id] = status;
+    this.accessStatuses = next;
+  }
+
+  private accessStatusLabel(profile: Profile): string {
+    const status = this.accessStatuses[profile.id];
+    if (!status) { return '正在核对本机登记'; }
+    if (status.state === 'registered') {
+      return '已登记只读访问 · 到期 ' + new Date(status.expiresAt).toLocaleDateString();
+    }
+    if (status.state === 'expired') { return '登记已过期'; }
+    if (status.state === 'missing') { return '未登记只读访问'; }
+    return '安全存储不可用';
+  }
+
   private async toggleFavorite(id: string): Promise<void> {
     if (!this.store || this.saving) { return; }
     const next = this.favorites.includes(id) ? this.favorites.filter((item: string) => item !== id) : this.favorites.concat([id]);
@@ -189,7 +242,8 @@ struct Desk {
 
   private async recordConnection(profile: Profile): Promise<void> {
     if (!this.store) { return; }
-    const record: RecentConnection = { profileId: profile.id, name: profile.name, target: profile.target, at: Date.now() };
+    const record: RecentConnection = { profileId: profile.id, name: profile.name, target: profile.target,
+      at: Date.now(), connectionPath: this.screen.connectionPath, accessMode: this.screen.accessMode };
     const next = [record].concat(this.recent).slice(0, 30);
     this.recent = next;
     try {
@@ -199,21 +253,21 @@ struct Desk {
   }
 
   private openEditor(profile?: Profile): void {
-    if (this.saving || this.loading || this.storeError.length > 0) { return; }
+    if (this.saving || this.accessBusy || this.loading || this.storeError.length > 0) { return; }
     if (profile && this.sessionProfile?.id === profile.id && screenIsLive(this.screen)) {
       this.notice = '请先断开此设备的会话，再修改连接资料。';
       return;
     }
-    if (profile && profile.mode !== 'direct') {
-      this.notice = '设备 ID / 中继资料可在偏好设置的连接诊断中编辑；当前尚不能建立桌面会话。';
-      return;
-    }
     this.editingId = profile?.id ?? '';
     this.name = profile?.name ?? '';
-    const parts = splitEndpoint(profile?.target ?? '');
+    this.connectionMode = profile?.mode ?? 'direct';
+    this.server = profile?.server ?? '';
+    this.serverKey = profile?.serverKey ?? '';
+    this.relayServer = profile?.relayServer ?? '';
+    const parts = splitEndpoint(profile?.mode === 'direct' ? profile.target : '');
     this.address = parts.address;
     this.port = parts.port;
-    this.peerId = profile?.peerId ?? '';
+    this.peerId = profile?.peerId || (profile?.mode !== 'direct' ? profile?.target ?? '' : '');
     this.peerPublicKey = profile?.peerPublicKey ?? '';
     this.fingerprint = profile?.peerFingerprint ?? '';
     this.formError = '';
@@ -221,12 +275,12 @@ struct Desk {
   }
 
   private async saveForm(): Promise<void> {
-    if (this.saving) { return; }
-    const previous = this.profiles.find((p: Profile) => p.id === this.editingId);
+    if (this.saving || this.accessBusy) { return; }
     const profile: Profile = {
       id: this.editingId || `desk-${Date.now().toString(36)}`,
-      name: this.name.trim(), mode: 'direct', target: joinEndpoint(this.address, this.port),
-      server: previous?.server ?? '', serverKey: previous?.serverKey ?? '', peerFingerprint: this.fingerprint.trim(),
+      name: this.name.trim(), mode: this.connectionMode,
+      target: this.connectionMode === 'direct' ? joinEndpoint(this.address, this.port) : this.peerId.trim(),
+      server: this.server.trim(), serverKey: this.serverKey.trim(), relayServer: this.relayServer.trim(), peerFingerprint: this.fingerprint.trim(),
       peerId: this.peerId.trim(), peerPublicKey: this.peerPublicKey.trim()
     };
     const result = this.validate(profile);
@@ -234,6 +288,7 @@ struct Desk {
     const normalized = result.profile;
     const next = this.editingId ? this.profiles.map((p: Profile) => p.id === this.editingId ? normalized : p) : this.profiles.concat([normalized]);
     if (await this.persistProfiles(next)) {
+      this.refreshAccessStatus(normalized);
       this.selectedId = normalized.id;
       this.modal = '';
       this.notice = '设备已保存。连接前请核对地址和可信身份。';
@@ -255,26 +310,37 @@ struct Desk {
   }
 
   private async saveImport(): Promise<void> {
-    if (!this.importPreview) { return; }
+    if (!this.importPreview || this.accessBusy) { return; }
     const profile = this.importPreview;
     if (this.profiles.some((p: Profile) => p.id === profile.id)) {
       this.formError = '已有相同本地 ID 的设备，请编辑原设备；导入不会覆盖已有信任资料。';
       return;
     }
     if (await this.persistProfiles(this.profiles.concat([profile]))) {
+      this.refreshAccessStatus(profile);
       this.selectedId = profile.id; this.modal = ''; this.importJson = ''; this.importPreview = undefined;
       this.notice = '公开配置已保存，未自动连接。请核对设备身份后主动连接。';
     }
   }
 
   private async deleteDevice(): Promise<void> {
-    if (this.sessionProfile?.id === this.editingId && screenIsLive(this.screen)) {
+    if (this.accessBusy) { this.formError = '正在保存登记凭据，请稍后再移除设备。'; return; }
+    const deletingId = this.editingId;
+    if (this.sessionProfile?.id === deletingId && screenIsLive(this.screen)) {
       this.formError = '请先断开此设备的会话。'; return;
     }
-    if (await this.persistProfiles(this.profiles.filter((p: Profile) => p.id !== this.editingId))) {
-      if (this.selectedId === this.editingId) { this.selectedId = ''; }
-      this.modal = ''; this.notice = '设备已从本机移除。';
-    }
+    this.accessBusy = true;
+    try {
+      const profile = this.profiles.find((p: Profile) => p.id === deletingId);
+      if (profile) { await removeAccess(profile); }
+      if (await this.persistProfiles(this.profiles.filter((p: Profile) => p.id !== deletingId))) {
+        this.accessStatuses = {};
+        this.refreshAccessStatuses(this.profiles, this.loadGeneration);
+        if (this.selectedId === deletingId) { this.selectedId = ''; }
+        this.modal = ''; this.notice = '设备已从本机移除。';
+      }
+    } catch { this.formError = '本机凭据删除失败，设备资料仍保留。请重试。'; }
+    finally { this.accessBusy = false; }
   }
 
   private selectedProfile(): Profile | undefined { return this.profiles.find((p: Profile) => p.id === this.selectedId); }
@@ -290,54 +356,161 @@ struct Desk {
     else { this.openEditor(); }
   }
 
-  private connect(profile: Profile): void {
+  private sameTarget(profile: Profile, owner: number): boolean {
+    const current = this.profiles.find((item: Profile) => item.id === profile.id);
+    return this.visible && owner === this.generation && current !== undefined &&
+      current.peerId === profile.peerId && current.peerPublicKey === profile.peerPublicKey &&
+      current.target === profile.target && current.mode === profile.mode;
+  }
+
+  private async connectTrusted(profile: Profile, mode: string): Promise<void> {
+    if (this.accessBusy) { return; }
+    if (screenIsLive(this.screen)) {
+      this.notice = '请先断开当前桌面会话。';
+      return;
+    }
+    if (!canConnectProfile(profile)) { this.notice = '请先补全可信设备资料。'; return; }
+    const owner = this.generation;
+    this.accessBusy = true;
+    try {
+      let identity = await loadIdentity();
+      if (!this.sameTarget(profile, owner)) { return; }
+      if (!identity && mode === 'pair') {
+        identity = await saveIdentity(controller.createIdentity());
+      }
+      if (!identity) { throw new Error('未找到本机控制设备身份，请先登记只读访问。'); }
+      if (mode === 'unattended' && !(await loadAccess(profile))) {
+        throw new Error('尚无此目标的本机凭据，请先在 Windows 登记只读访问。');
+      }
+      if (!this.sameTarget(profile, owner)) { return; }
+      this.accessBusy = false;
+      this.connect(profile, mode);
+    } catch (error) {
+      if (this.sameTarget(profile, owner)) { this.notice = (error as Error).message || '无法读取安全存储，请解锁设备后重试。'; }
+    } finally { this.accessBusy = false; }
+  }
+
+  private async deleteLocalAccess(profile: Profile): Promise<void> {
+    if (this.accessBusy) { return; }
+    if (screenIsLive(this.screen)) { this.notice = '请先断开当前桌面会话。'; return; }
+    const owner = this.generation;
+    this.accessBusy = true;
+    try {
+      await removeAccess(profile);
+      if (this.sameTarget(profile, owner)) {
+        await this.refreshAccessStatus(profile);
+        this.notice = '本机凭据已删除。若需立即失效，请在 Windows 管理页撤销登记。';
+      }
+    } catch {
+      if (this.sameTarget(profile, owner)) { this.notice = '删除本机凭据失败，请检查安全存储后重试。'; }
+    } finally { this.accessBusy = false; }
+  }
+
+  private connect(profile: Profile, accessMode: string = ''): void {
+    if (this.accessBusy) { this.notice = '正在保存登记凭据，请稍后再连接。'; return; }
     if (screenIsLive(this.screen)) {
       if (this.sessionProfile?.id === profile.id) { this.sessionOpen = true; }
       else { this.notice = '已有设备正在连接或共享画面，请先返回会话并断开。'; }
       return;
     }
-    if (!canConnectProfile(profile)) { this.notice = '此设备尚不能连接，请完善 IP 直连的可信设备 ID 和公钥。'; return; }
+    if (!canConnectProfile(profile)) { this.notice = '请完善设备 ID 和可信公钥；ID / 中继还需填写自建服务地址、公钥和中继地址。'; return; }
     this.disconnect('');
+    this.currentAccessMode = accessMode;
+    this.pairGrantReceived = false;
+    this.pairingSaved = false;
+    this.pendingPairConnected = undefined;
     const owner = this.generation;
     this.selectedId = profile.id;
     this.sessionProfile = profile;
     this.surfaceController = new DeskSurface((id: string) => {
       if (!this.visible || this.generation !== owner || !screenIsLive(this.screen) || this.task !== 0) { return; }
       this.surfaceId = id;
-      this.startScreen(profile, id, owner);
+      this.startScreen(profile, id, owner, accessMode);
     }, (id: string) => {
       if (this.generation === owner && this.surfaceId === id) {
         this.disconnect('显示区域已关闭，连接已结束。请重新连接。');
       }
     });
-    this.screen = initialScreenState();
+    this.screen = initialScreenState(accessMode);
     this.sessionKey++;
     this.sessionOpen = true;
     this.notice = '';
   }
 
-  private startScreen(profile: Profile, surfaceId: string, owner: number): void {
+  private async startScreen(profile: Profile, surfaceId: string, owner: number, accessMode: string): Promise<void> {
     try {
-      const request = JSON.stringify({ endpoint: profile.target, peerId: profile.peerId,
-        peerPublicKey: profile.peerPublicKey, peerFingerprint: profile.peerFingerprint || null,
-        minimumKxVersion: 1, expectedPeer: 'secure_control' });
-      const task = controller.connectScreen(request, surfaceId, 60000, (event: ControllerEvent) => {
+      let credentials = '';
+      if (accessMode) {
+        const identity = await loadIdentity();
+        const stored = accessMode === 'unattended' ? await loadAccess(profile) : undefined;
+        if (!identity) { throw new Error('本机控制设备身份不存在'); }
+        credentials = secretRequest(accessMode, identity.seed, stored, profile);
+      }
+      if (!this.sameTarget(profile, owner) || this.surfaceId !== surfaceId) { return; }
+      const request = accessMode ? buildTrustedScreenRequest(profile) : buildScreenRequest(profile);
+      const callback = (event: ControllerEvent): void => {
         if (!this.visible || owner !== this.generation || event.taskId !== this.task) { return; }
-        const wasApproved = this.screen.approved;
-        this.screen = projectScreenEvent(this.screen, event);
-        if (!wasApproved && this.screen.approved) { this.recordConnection(profile); }
-        if (!screenIsLive(this.screen)) {
-          this.generation++;
-          this.task = 0;
-          this.surfaceId = '';
-          controller.cancel(event.taskId);
+        if (accessMode === 'pair' && event.state === 'access_paired') {
+          this.storePairing(profile, owner, event);
+          return;
         }
-      });
+        if (accessMode === 'pair' && event.state === 'connected' && !this.pairingSaved) {
+          this.pendingPairConnected = event;
+          return;
+        }
+        this.projectEvent(profile, owner, event);
+      };
+      const task = accessMode
+        ? controller.connectTrustedScreen(request, credentials, surfaceId, 60000, callback)
+        : controller.connectScreen(request, surfaceId, 60000, callback);
+      credentials = '';
       if (task <= 0) { throw new Error('无法创建会话'); }
       this.task = task;
     } catch {
-      this.disconnect('无法启动画面连接，请检查设备资料后重试。', 'START_FAILED');
+      if (owner === this.generation) {
+        this.disconnect(accessMode ? '无法启动只读连接。请检查本机安全凭据和设备身份。'
+          : '无法启动画面连接，请检查设备资料后重试。', 'START_FAILED');
+      }
     }
+  }
+
+  private projectEvent(profile: Profile, owner: number, event: ControllerEvent): void {
+    if (!this.sameTarget(profile, owner) || event.taskId !== this.task) { return; }
+    const wasApproved = this.screen.approved;
+    this.screen = projectScreenEvent(this.screen, event);
+    if (!wasApproved && this.screen.approved) { this.recordConnection(profile); }
+    if (!screenIsLive(this.screen)) {
+      this.generation++;
+      this.task = 0;
+      this.surfaceId = '';
+      controller.cancel(event.taskId);
+    }
+  }
+
+  private async storePairing(profile: Profile, owner: number, event: ControllerEvent): Promise<void> {
+    if (this.pairGrantReceived) {
+      this.disconnect('重复收到登记凭据，连接已停止。', 'INVALID_GRANT');
+      return;
+    }
+    this.pairGrantReceived = true;
+    this.accessBusy = true;
+    try {
+      const grant = parsePairingGrant(event);
+      await saveAccess(profile, credentialForTarget(profile, grant));
+      if (!this.sameTarget(profile, owner) || event.taskId !== this.task) { return; }
+      this.pairingSaved = true;
+      await this.refreshAccessStatus(profile);
+      if (this.pendingPairConnected) {
+        const connected = this.pendingPairConnected;
+        this.pendingPairConnected = undefined;
+        this.projectEvent(profile, owner, connected);
+      }
+      this.notice = '只读访问已登记到本机安全存储。';
+    } catch {
+      if (owner === this.generation) {
+        this.disconnect('本机保存登记凭据失败。请在 Windows 管理页撤销可能留下的登记记录。', 'CREDENTIAL_SAVE_FAILED');
+      }
+    } finally { this.accessBusy = false; }
   }
 
   private disconnect(detail: string = '已停止共享画面。本次批准已失效，重新连接需要 Windows 本机再次批准。', code: string = 'CANCELLED'): void {
@@ -361,6 +534,7 @@ struct Desk {
 
   private setInputEnabled(enabled: boolean): number {
     if (this.task <= 0) { return 1; }
+    if (enabled && this.currentAccessMode) { return 2; }
     if (enabled && (!this.visible || !canRequestSystemInput(this.screen, this.sessionOpen))) { return 2; }
     if (!enabled && (this.screen.code === 'INPUT_DISABLING' ||
       (!this.screen.inputGranted && this.screen.code !== 'INPUT_ENABLING'))) { return 0; }
@@ -449,9 +623,9 @@ struct Desk {
     Column({ space: 14 }) {
       Text('↗  连接远程设备').fontSize(17).fontWeight(FontWeight.Medium).fontColor('#20352F')
       Row({ space: 18 }) {
-        Text('设备 ID · 未实现').fontSize(11).fontColor('#9CA79F')
+        Text('设备 ID').fontSize(11).fontColor('#53695C')
         Text('IP 直连').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#196B52')
-        Text('中继 · 未实现').fontSize(11).fontColor('#9CA79F')
+        Text('安全中继').fontSize(11).fontColor('#53695C')
       }.width('100%').height(34).border({ width: { bottom: 1 }, color: '#E4EAE5' })
       if (this.profiles.length > 0) {
         Select(this.profiles.map((p: Profile): SelectOption => { return { value: p.name }; }))
@@ -461,7 +635,7 @@ struct Desk {
         Text(this.selectedProfile()?.target ?? '请先选择设备').fontSize(13).fontColor('#778780').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
       } else {
         Text('先添加一台你的电脑').fontSize(17).fontColor('#20352F').margin({ top: 6 })
-        Text('保存 IP 地址和可信设备身份，随时从这里连接。').fontSize(13).fontColor('#778780').lineHeight(22)
+        Text('保存 IP 或自建服务配置与可信设备身份，随时从这里连接。').fontSize(13).fontColor('#778780').lineHeight(22)
       }
       Row({ space: 8 }) {
         Text('●  现场批准').fontSize(12).fontColor('#196B52')
@@ -493,15 +667,25 @@ struct Desk {
       }.width('100%')
       Text(profile.name).fontSize(17).fontWeight(FontWeight.Medium).fontColor('#20352F').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
       Text(profile.target).fontSize(13).fontColor('#778780').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text(profile.mode === 'direct' ? (canConnectProfile(profile) ? 'IP 直连 · 现场批准后仅查看' : '请补充可信设备 ID 和公钥') : '设备 ID / 中继连接尚未实现')
+      Text(canConnectProfile(profile) ? (profile.mode === 'direct' ? 'IP 直连' : profile.mode === 'id' ? 'ID 自动连接' : '强制中继') + ' · 现场批准后仅查看' : '请完善连接配置与可信身份')
         .fontSize(11).fontColor('#778780')
+      Text(this.accessStatusLabel(profile)).fontSize(11).fontColor('#196B52')
       Flex({ wrap: FlexWrap.Wrap }) {
         Button('连接', { type: ButtonType.Normal }).height(44).borderRadius(10).backgroundColor('#E5F2E9').fontColor('#196B52').fontSize(13)
-          .margin({ right: 8, bottom: 4 }).enabled(canConnectProfile(profile) && !this.saving).onClick(() => this.connect(profile))
+          .margin({ right: 8, bottom: 4 }).enabled(canConnectProfile(profile) && !this.saving && !this.accessBusy).onClick(() => this.connect(profile))
+        Button('登记只读访问', { type: ButtonType.Normal }).height(44).borderRadius(10).backgroundColor('#E5F2E9').fontColor('#196B52').fontSize(13)
+          .margin({ right: 8, bottom: 4 }).enabled(canConnectProfile(profile) && !this.saving && !this.accessBusy)
+          .onClick(() => { this.connectTrusted(profile, 'pair'); })
+        Button('无人值守查看', { type: ButtonType.Normal }).height(44).borderRadius(10).backgroundColor('#E5F2E9').fontColor('#196B52').fontSize(13)
+          .margin({ right: 8, bottom: 4 }).enabled(canConnectProfile(profile) && !this.saving && !this.accessBusy)
+          .onClick(() => { this.connectTrusted(profile, 'unattended'); })
+        Button('删除本机凭据', { type: ButtonType.Normal }).height(44).backgroundColor(Color.Transparent).fontColor('#A8443C').fontSize(13)
+          .margin({ right: 8, bottom: 4 }).enabled(!this.accessBusy && !this.saving)
+          .onClick(() => { this.deleteLocalAccess(profile); })
         Button('编辑', { type: ButtonType.Normal }).height(44).backgroundColor(Color.Transparent).fontColor('#53695C').fontSize(13)
           .enabled(!this.saving).onClick(() => this.openEditor(profile))
         Button('移除', { type: ButtonType.Normal }).height(44).backgroundColor(Color.Transparent).fontColor('#A8443C').fontSize(13)
-          .enabled(!this.saving).onClick(() => { this.editingId = profile.id; this.name = profile.name; this.formError = ''; this.modal = 'delete'; })
+          .enabled(!this.saving && !this.accessBusy).onClick(() => { this.editingId = profile.id; this.name = profile.name; this.formError = ''; this.modal = 'delete'; })
       }.width('100%')
     }.padding(20).width('100%').alignItems(HorizontalAlign.Start).backgroundColor('#FFFFFF')
       .borderRadius(16).border({ width: 1, color: '#E4EAE5' })
@@ -556,7 +740,8 @@ struct Desk {
     ForEach(this.recent, (item: RecentConnection) => {
       Column({ space: 9 }) {
         Text(item.name).fontSize(17).fontWeight(FontWeight.Medium).fontColor('#20352F')
-        Text('本机已批准查看 · IP 直连').fontSize(13).fontColor('#196B52')
+        Text((item.accessMode === 'unattended' ? '无人值守只读' : item.accessMode === 'pair' ? '登记只读访问' : '本机已批准查看') +
+          (item.connectionPath ? ' · ' + connectionPathLabel(item.connectionPath) : '')).fontSize(13).fontColor('#196B52')
         Text(`${item.target} · ${new Date(item.at).toLocaleString()}`).fontSize(12).fontColor('#778780')
         this.action('重新连接', () => {
           const profile = this.profiles.find((p: Profile) => p.id === item.profileId);
@@ -580,7 +765,7 @@ struct Desk {
   private settingsPage() {
     Column({ space: 4 }) {
       Text('连接服务').fontSize(19).fontWeight(FontWeight.Medium).fontColor('#20352F')
-      this.setting('连接方式', 'IP 直连；设备 ID 与中继尚未实现')
+      this.setting('连接方式', 'IP 直连、设备 ID 自动连接、强制中继；服务在设备资料中配置')
       this.setting('访问方式', 'Windows 本机逐次批准；无人值守尚未实现')
       this.setting('身份与加密', '预存可信设备身份；签名验证与 v1 加密，失败即停止')
     }.width('100%').padding(24).alignItems(HorizontalAlign.Start).backgroundColor('#FFFFFF').borderRadius(18)
@@ -674,29 +859,45 @@ struct Desk {
     Column({ space: 16 }) {
       if (this.modal === 'edit') {
         this.field('设备名称', this.name, '例如：工作室电脑', (v: string) => { this.name = v; })
-        Text('IP 直连 · 现场批准后仅查看').fontSize(12).fontColor('#196B52')
-        this.field('IP 地址', this.address, '192.168.1.10 或 ::1', (v: string) => { this.address = v; })
-        this.field('端口', this.port, '21120', (v: string) => { this.port = v; })
+        Text('连接方式').fontSize(13).fontColor('#53695C')
+        Select([{ value: 'IP 直连' }, { value: '设备 ID · 自动' }, { value: '强制中继' }])
+          .selected(this.connectionMode === 'direct' ? 0 : this.connectionMode === 'id' ? 1 : 2)
+          .value(this.connectionMode === 'direct' ? 'IP 直连' : this.connectionMode === 'id' ? '设备 ID · 自动' : '强制中继')
+          .width('100%').height(46).onSelect((index: number) => {
+            this.connectionMode = index === 0 ? 'direct' : index === 1 ? 'id' : 'relay'; this.formError = '';
+          })
+        if (this.connectionMode === 'direct') {
+          this.field('IP 地址', this.address, '192.168.1.10 或 ::1', (v: string) => { this.address = v; })
+          this.field('端口', this.port, '21120', (v: string) => { this.port = v; })
+        } else {
+          this.field('ID 服务地址', this.server, '服务器域名或 IP:21116', (v: string) => { this.server = v; })
+          this.field('服务验证公钥', this.serverKey, '从自建服务管理者处核对并复制', (v: string) => { this.serverKey = v; })
+          this.field('中继服务地址', this.relayServer, '服务器域名或 IP:21117', (v: string) => { this.relayServer = v; })
+        }
         this.field('被控设备 ID', this.peerId, '6 至 20 位数字', (v: string) => { this.peerId = v; })
         this.field('可信 Ed25519 公钥', this.peerPublicKey, '从被控端现场核对并复制', (v: string) => { this.peerPublicKey = v; })
         this.field('SHA-256 指纹（可选）', this.fingerprint, '64 位十六进制字符', (v: string) => { this.fingerprint = v; })
         Text('请从可信来源取得并核对 ID / 公钥。保存资料不会自动连接或授予访问权限。').fontSize(12).fontColor('#778780').lineHeight(20)
-        this.action('保存设备', () => this.saveForm(), true, () => !this.saving)
+        this.action('保存设备', () => this.saveForm(), true, () => !this.saving && !this.accessBusy)
       } else if (this.modal === 'import') {
         Text('粘贴被控端导出的公开配置，预览并核对后保存。不要粘贴密码或私钥。').fontSize(13).fontColor('#778780').lineHeight(22)
         TextArea({ text: this.importJson, placeholder: '公开 profile JSON' }).height(170).width('100%').fontSize(13).backgroundColor('#F6F8F5')
           .onChange((value: string) => { this.importJson = value; this.importPreview = undefined; this.formError = ''; })
-        this.action('验证并预览', () => this.previewImport(), false, () => !this.saving && this.importJson.length > 0)
+        this.action('验证并预览', () => this.previewImport(), false, () => !this.saving && !this.accessBusy && this.importJson.length > 0)
         if (this.importPreview) {
           Text(this.importPreview.name).fontSize(17).fontColor('#20352F')
           Text(`地址：${this.importPreview.target}\n设备 ID：${this.importPreview.peerId ?? ''}`).fontSize(13).fontColor('#53695C').lineHeight(24)
+          if (this.importPreview.mode !== 'direct') {
+            Text(`ID 服务：${this.importPreview.server}\n中继：${this.importPreview.relayServer ?? ''}\n服务公钥：${this.importPreview.serverKey}`)
+              .fontSize(12).fontColor('#778780').lineHeight(22)
+          }
           Text(`可信公钥：${this.importPreview.peerPublicKey ?? ''}\n指纹：${this.importPreview.peerFingerprint}`).fontSize(12).fontColor('#778780').lineHeight(22)
-          this.action('确认保存', () => this.saveImport(), true, () => !this.saving)
+          this.action('确认保存', () => this.saveImport(), true, () => !this.saving && !this.accessBusy)
         }
       } else {
         Text(`从本机移除「${this.name}」？`).fontSize(18).fontColor('#20352F')
         Text('这不会修改 Windows 被控端。之后需要重新添加可信设备资料才能连接。').fontSize(13).fontColor('#778780').lineHeight(22)
-        this.action('确认移除', () => this.deleteDevice(), false, () => !this.saving)
+        this.action('确认移除', () => this.deleteDevice(), false, () => !this.saving && !this.accessBusy)
       }
       if (this.formError.length > 0) { Text(this.formError).fontSize(13).fontColor('#A8443C').width('100%') }
     }.width('100%').alignItems(HorizontalAlign.Start)
@@ -707,11 +908,15 @@ struct Desk {
       if (this.sessionProfile) {
         ForEach([this.sessionKey], (_key: number) => {
           RemoteSession({ screen: this.screen, deviceName: this.sessionProfile?.name ?? '', endpoint: this.sessionProfile?.target ?? '',
+            accessMode: this.currentAccessMode,
             surfaceActive: screenIsLive(this.screen), sessionVisible: this.sessionOpen, controller: this.surfaceController,
             onBack: () => this.hideSession(), onDisconnect: () => this.disconnect(),
             onInput: (command: string) => this.sendSystemInput(command), onReleaseInput: () => this.releaseInput(),
             onSetInputEnabled: (enabled: boolean) => this.setInputEnabled(enabled),
-            onRetry: () => { if (this.sessionProfile) { this.connect(this.sessionProfile); } } })
+            onRetry: () => { if (this.sessionProfile) {
+              if (this.currentAccessMode) { this.connectTrusted(this.sessionProfile, this.currentAccessMode); }
+              else { this.connect(this.sessionProfile); }
+            } } })
         }, (key: number) => String(key))
       }
       if (!this.sessionOpen) { this.workspace() }
@@ -723,7 +928,7 @@ struct Desk {
               .fontSize(21).fontWeight(FontWeight.Medium).fontColor('#20352F')
             Blank()
             Button('关闭', { type: ButtonType.Normal }).height(44).fontSize(13).fontColor('#778780').backgroundColor(Color.Transparent)
-              .enabled(!this.saving).onClick(() => { this.modal = ''; this.importJson = ''; this.importPreview = undefined; })
+              .enabled(!this.saving && !this.accessBusy).onClick(() => { this.modal = ''; this.importJson = ''; this.importPreview = undefined; })
           }.width('100%')
           Scroll() { this.editor() }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
         }.width('92%').constraintSize({ maxWidth: 600 }).height('90%').padding(24).backgroundColor('#FFFFFF').borderRadius(20)

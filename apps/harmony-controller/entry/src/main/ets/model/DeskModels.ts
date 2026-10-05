@@ -5,6 +5,7 @@ export interface Profile {
   target: string;
   server: string;
   serverKey: string;
+  relayServer?: string;
   peerFingerprint: string;
   peerId?: string;
   peerPublicKey?: string;
@@ -29,6 +30,11 @@ export interface ScreenEvent {
   frames?: number;
   bytes?: number;
   renderedFrames?: number;
+  connectionPath?: string;
+  accessMode?: string;
+  credentialId?: string;
+  credentialSecret?: string;
+  expiresAt?: number;
 }
 
 export class ScreenState {
@@ -45,10 +51,14 @@ export class ScreenState {
   rendered: number = 0;
   bytes: number = 0;
   code: string = '';
+  connectionPath: string = '';
+  requestedAccessMode: string = '';
+  accessMode: string = '';
 }
 
-export function initialScreenState(): ScreenState {
+export function initialScreenState(requestedAccessMode: string = ''): ScreenState {
   const state = new ScreenState();
+  state.requestedAccessMode = requestedAccessMode;
   state.phase = 'connecting';
   state.title = '正在连接设备';
   state.detail = '正在准备安全连接…';
@@ -73,6 +83,9 @@ export function markInputRequest(previous: ScreenState, enabled: boolean): Scree
   if (!previous.approved || !screenIsLive(previous)) { return previous; }
   const state = new ScreenState();
   state.phase = previous.phase;
+  state.connectionPath = previous.connectionPath;
+  state.requestedAccessMode = previous.requestedAccessMode;
+  state.accessMode = previous.accessMode;
   state.title = previous.title;
   state.detail = previous.detail;
   state.verified = previous.verified;
@@ -117,6 +130,30 @@ function failureDetail(code: string): string {
       return '被控端未接受连接。请在被控端确认请求后重试。';
     case 'TRANSPORT_FAILED':
       return '无法连接被控端。请检查目标地址和网络后重试。';
+    case 'SERVER_TRUST_FAILED':
+    case 'SERVER_KEY_MISMATCH':
+    case 'INVALID_SERVER_SIGNATURE':
+    case 'SERVER_IDENTITY_INVALID':
+      return '协调服务身份校验失败。请核对自建服务地址和验证公钥。';
+    case 'PEER_OFFLINE':
+    case 'ID_NOT_EXIST':
+    case 'PEER_UNAVAILABLE':
+      return '目标设备未在线或设备 ID 不存在。请检查 Windows 服务注册状态。';
+    case 'RELAY_FAILED':
+    case 'RELAY_REFUSED':
+    case 'RELAY_REJECTED':
+      return '无法通过配置的中继连接。请检查中继地址和服务状态。';
+    case 'PEER_IDENTITY_INVALID':
+    case 'PEER_IDENTITY_MISMATCH':
+      return '服务登记的设备身份与保存资料不一致。请现场核对设备 ID 和公钥。';
+    case 'RELAY_MISMATCH':
+    case 'RELAY_SERVER_MISMATCH':
+      return '服务返回的中继与配置不一致。请核对自建服务的中继设置。';
+    case 'RENDEZVOUS_PROTOCOL_FAILED':
+      return '协调服务返回了无法处理的连接信息。请核对服务版本和配置。';
+    case 'RESOLVE_FAILED':
+    case 'RESOLVER_BUSY':
+      return '服务域名解析失败或仍在处理中。请检查地址和网络后重试。';
     default:
       return '无法建立远程画面（' + code + '）。请检查被控端状态后重试。';
   }
@@ -142,12 +179,21 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
     return state;
   }
   if (event.state === 'connecting') {
-    const state = initialScreenState();
+    const state = initialScreenState(previous.requestedAccessMode);
+    state.code = event.code;
+    return state;
+  }
+  if (event.state === 'transport_selected' && !previous.approved) {
+    const state = initialScreenState(previous.requestedAccessMode);
+    const path = event.connectionPath ?? '';
+    state.connectionPath = path === 'direct' || path === 'id_direct' || path === 'relay' ? path : '';
     state.code = event.code;
     return state;
   }
   if (event.state === 'verified' || event.state === 'authenticating') {
     const state = new ScreenState();
+    state.requestedAccessMode = previous.requestedAccessMode;
+    state.connectionPath = previous.connectionPath;
     state.phase = 'verifying';
     state.title = '正在验证设备';
     state.detail = '正在核对设备身份并建立加密会话…';
@@ -157,25 +203,38 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
   }
   if (event.state === 'awaiting_approval' || event.code === 'AWAITING_APPROVAL') {
     const state = new ScreenState();
+    state.requestedAccessMode = previous.requestedAccessMode;
+    state.connectionPath = previous.connectionPath;
     state.phase = 'awaiting';
     state.title = '等待本机批准';
-    state.detail = '请在被控端确认屏幕查看请求。批准前不会显示画面。';
+    state.detail = previous.requestedAccessMode === 'pair'
+      ? '请在 Windows 本机明确批准并登记只读访问。普通连接批准不会登记设备。'
+      : '请在被控端确认屏幕查看请求。批准前不会显示画面。';
     state.verified = event.verified;
     state.code = event.code;
     return state;
   }
   if (event.state === 'connected') {
     const state = new ScreenState();
+    state.requestedAccessMode = previous.requestedAccessMode;
+    state.connectionPath = previous.connectionPath;
     state.code = event.code;
-    if (!event.verified || !event.authenticated) {
+    if (!event.verified || !event.authenticated ||
+      (previous.requestedAccessMode && event.accessMode !== previous.requestedAccessMode)) {
       state.phase = 'failed';
       state.title = '连接状态异常';
       state.detail = '设备身份或登录未确认。请核对可信资料后重试。';
       return state;
     }
     state.phase = 'approved';
-    state.title = '已获准查看';
-    state.detail = '本机已批准，正在等待第一帧画面；当前仅可查看。';
+    state.accessMode = previous.requestedAccessMode;
+    state.title = previous.requestedAccessMode === 'unattended' ? '无人值守只读连接已验证'
+      : previous.requestedAccessMode === 'pair' ? '登记已获批准' : '已获准查看';
+    state.detail = previous.requestedAccessMode === 'unattended'
+      ? '无人值守凭据已验证，正在等待第一帧画面；当前仅可查看。'
+      : previous.requestedAccessMode === 'pair'
+        ? 'Windows 已批准登记，正在等待第一帧画面；当前仅可查看。'
+        : '本机已批准，正在等待第一帧画面；当前仅可查看。';
     state.verified = true;
     state.approved = true;
     if (event.videoWidth !== undefined && event.videoWidth > 0) {
@@ -188,7 +247,10 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
   }
 
   const state = new ScreenState();
+  state.requestedAccessMode = previous.requestedAccessMode;
+  state.accessMode = previous.accessMode;
   state.phase = previous.phase;
+  state.connectionPath = previous.connectionPath;
   state.title = previous.title;
   state.detail = previous.detail;
   state.verified = previous.verified;
@@ -206,7 +268,7 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
     return state;
   }
   if (event.state === 'input_state') {
-    state.inputSupported = event.verified && event.authenticated && event.inputSupported === true;
+    state.inputSupported = !state.accessMode && event.verified && event.authenticated && event.inputSupported === true;
     state.inputGranted = state.inputSupported && event.authorized === true;
     if (previous.code === 'INPUT_DISABLING' && state.inputGranted) { state.code = 'INPUT_DISABLING'; }
   } else if (event.state === 'video_status') {
@@ -221,7 +283,8 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
     state.rendered = event.renderedFrames;
     state.phase = 'viewing';
     state.title = '正在查看远程桌面';
-    state.detail = '正在查看 Windows 主显示器；可在控制端开关已支持的键鼠能力。';
+    state.detail = state.accessMode ? '正在只读查看 Windows 主显示器。'
+      : '正在查看 Windows 主显示器；可在控制端开关已支持的键鼠能力。';
   }
   return state;
 }
@@ -264,5 +327,53 @@ export function joinEndpoint(address: string, port: string): string {
 }
 
 export function canConnectProfile(profile: Profile): boolean {
-  return profile.mode === 'direct' && !!profile.peerId && !!profile.peerPublicKey;
+  if (!profile.peerId || !profile.peerPublicKey || !profile.target) { return false; }
+  if (profile.mode === 'direct') { return true; }
+  return (profile.mode === 'id' || profile.mode === 'relay') && profile.target === profile.peerId &&
+    !!profile.server && !!profile.serverKey && !!profile.relayServer;
+}
+
+interface DirectScreenRequest {
+  endpoint: string;
+  peerId: string;
+  peerPublicKey: string;
+  peerFingerprint: string | null;
+  minimumKxVersion: number;
+  expectedPeer: string;
+}
+
+interface RoutedScreenRequest {
+  mode: string;
+  peerId: string;
+  peerPublicKey: string;
+  peerFingerprint: string | null;
+  minimumKxVersion: number;
+  expectedPeer: string;
+  server: string;
+  serverKey: string;
+  relayServer: string;
+}
+
+export function buildScreenRequest(profile: Profile): string {
+  if (!canConnectProfile(profile)) { throw new Error('连接资料或可信身份不完整'); }
+  if (profile.mode === 'direct') {
+    const request: DirectScreenRequest = {
+      endpoint: profile.target, peerId: profile.peerId ?? '', peerPublicKey: profile.peerPublicKey ?? '',
+      peerFingerprint: profile.peerFingerprint || null, minimumKxVersion: 1, expectedPeer: 'secure_control'
+    };
+    return JSON.stringify(request);
+  }
+  const request: RoutedScreenRequest = {
+    mode: profile.mode, peerId: profile.peerId ?? '', peerPublicKey: profile.peerPublicKey ?? '',
+    peerFingerprint: profile.peerFingerprint || null, minimumKxVersion: 1, expectedPeer: 'secure_control',
+    server: profile.server, serverKey: profile.serverKey, relayServer: profile.relayServer ?? ''
+  };
+  return JSON.stringify(request);
+}
+
+export function connectionPathLabel(path: string): string {
+  if (path === 'direct') { return 'IP 直连'; }
+  if (path === 'id_direct') { return 'ID 协调直连'; }
+  if (path === 'relay') { return '中继'; }
+  return '等待连接';
 }

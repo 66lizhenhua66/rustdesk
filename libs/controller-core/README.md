@@ -26,8 +26,36 @@ v1, and accepts only encrypted challenges/results. A successful login reports
 Mode and capability mismatches fail; there is no automatic downgrade. New Harmony
 Desk uses `secure_control`; the diagnostic Index retains its old read-only and
 DEMO paths. Video bytes go directly to the native video callback, never through
-ArkTS/JSON. Media decoding, OS injection, file transfer, ID discovery and relay
-transport are not implemented by this crate.
+ArkTS/JSON. Media decoding, OS injection and file transfer are outside this crate.
+
+## ID, relay and trusted read-only access
+
+Requests accept `mode` (default `direct`), `server`, `serverKey` and `relayServer`.
+ID/relay require explicit endpoints plus pinned server and peer signing keys.
+TCP coordination can fall back to the configured relay only on TCP failure;
+identity failures never downgrade. A `transport_selected` event reports actual
+`connectionPath=direct|id_direct|relay` without implying authentication or approval.
+Only TCP coordination is implemented. Hostnames resolve with bounded workers;
+UDP/WebRTC and public-server defaults are not provided.
+
+`controller_connection_create_access_v1` takes the public request and a separate
+secret JSON, selects `secure_video` only, and implements `pair`/`unattended` with
+a fresh challenge proof. Ordinary APIs retain onsite approval. The dedicated
+identity creation and secret-string-free APIs are declared in `include/session.h`.
+`access_paired` contains one grant for platform secure storage; it must never be
+logged or copied into a profile. `connected.accessMode` confirms the requested
+mode. The host requires explicit local enrollment, validates credentials on every
+connection, and checks revocation/expiry/policy each second. No 2FA exemption is
+implemented. [Protocol and storage contract](../../docs/project/specs/003-trusted-controller-access.md).
+
+The historical profile ABI `readyForSession=false` field remains for legacy
+diagnostics; use `authenticationAvailable`, complete configuration and actual
+session events for the implemented strict connection modes. This does not claim
+full upstream Client/Session compatibility.
+
+2026-10-05: 107 core/policy/loopback tests pass. Actual self-hosted hbbs/hbbr,
+public networks, Asset Store device behavior and unattended UI acceptance remain
+separate checks; see the [validation record](../../docs/project/research/2026-10-05-id-relay-unattended-validation.md).
 
 ## System input capability v2
 

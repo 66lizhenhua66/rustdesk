@@ -1,5 +1,5 @@
 use super::super::secure_host_policy::{self, Request};
-use super::super::{secure_input, secure_video};
+use super::super::{secure_access, secure_access_policy, secure_input, secure_video};
 use super::*;
 
 fn approve_pending(pending: &mut bool, authorized: &mut bool, requires_2fa: bool) -> bool {
@@ -81,6 +81,7 @@ impl Connection {
         self.recording = false;
         self.block_input = false;
         self.privacy_mode = false;
+        self.hash.challenge = secure_access::challenge();
         let mut hash = Message::new();
         hash.set_hash(self.hash.clone());
         if self.stream.send(&hash).await.is_err() {
@@ -99,6 +100,9 @@ impl Connection {
         let mut stop_tick = time::interval(Duration::from_secs(1));
         let mut video_worker: Option<secure_video::Worker> = None;
         let mut input = secure_input::Control::new(self.inner.id());
+        let mut access_pending: Option<base::message_proto::OrdAccessRequest> = None;
+        let mut access_active: Option<String> = None;
+        let mut access_deadline = started + Duration::from_secs(15 * 60);
         loop {
             if super::super::secure_host::is_stopped() {
                 break;
@@ -108,6 +112,13 @@ impl Connection {
                 _ = stop_tick.tick() => {
                     if super::super::secure_host::is_stopped() {
                         break;
+                    }
+                    if let Some(id) = access_active.clone() {
+                        if Instant::now() >= access_deadline { break; }
+                        if !matches!(tokio::task::spawn_blocking(move || secure_access::active(&id)).await, Ok(Ok(()))) {
+                            self.send_login_error("Trusted access expired, revoked, or policy changed").await;
+                            break;
+                        }
                     }
                     match input.tick() {
                         Ok(true) => {
@@ -124,6 +135,32 @@ impl Connection {
                 data = rx_from_cm.recv() => {
                     let Some(data) = data else { break; };
                     match data {
+                        ipc::Data::Authorize if access_pending.is_some() => {
+                            self.send_login_error("Pairing requires explicit local registration approval").await;
+                            break;
+                        }
+                        ipc::Data::SwitchPermission { name, enabled: true } if name == "ord_pair_device" => {
+                            if !secure_access_policy::pair_approval_allowed(self.secure_login_pending, self.authorized, access_pending.is_some(), local_approval_allowed()) || self.require_2fa.is_some() { break; }
+                            let Some(request) = access_pending.take() else { break; };
+                            let challenge = self.hash.challenge.clone();
+                            let name = self.lr.my_name.clone();
+                            let result = tokio::task::spawn_blocking(move || secure_access::approve_pair(&request, &challenge, &name)).await;
+                            let Ok(Ok((grant, record))) = result else {
+                                self.send_login_error("Trusted device registration failed").await;
+                                break;
+                            };
+                            let mut response = Message::new(); response.set_ord_access_grant(grant);
+                            let sent = self.stream.send(&response).await.is_ok();
+                            if let Some(message::Union::OrdAccessGrant(grant)) = response.union.take() {
+                                if let Ok(mut secret) = grant.credential_secret.try_into_mut() { hbb_common::sodiumoxide::utils::memzero(&mut secret); }
+                            }
+                            if !sent { break; }
+                            let Some(worker) = self.start_secure_access_video("pair").await else { break; };
+                            video_worker = Some(worker);
+                            access_active = Some(record.id);
+                            access_deadline = Instant::now() + Duration::from_secs(15 * 60);
+                            self.send_to_cm(ipc::Data::SwitchPermission { name: "ord_access_pair_pending".into(), enabled: false });
+                        }
                         ipc::Data::Authorize if local_approval_allowed() && approve_pending(
                             &mut self.secure_login_pending,
                             &mut self.authorized,
@@ -247,6 +284,42 @@ impl Connection {
                         }
                         continue;
                     }
+                    if let Some(message::Union::LoginRequest(lr)) = &message.union {
+                        if let Some(request) = lr.ord_access.as_ref() {
+                            if secure_host_policy::classify_message(&message) != Request::Login || self.authorized || self.secure_login_pending || !secure_host_policy::valid_login(lr, &Config::get_id())
+                                || !secure_host_policy::requests_video(lr) || secure_host_policy::requests_input(lr) || !secure_video::allowed() || self.require_2fa.is_some() {
+                                self.send_login_error("Trusted access requires enabled read-only video and no 2FA").await;
+                                break;
+                            }
+                            let request = request.clone();
+                            let verification = request.clone();
+                            let challenge = self.hash.challenge.clone();
+                            let result = tokio::task::spawn_blocking(move || secure_access::prepare(&verification, &challenge)).await;
+                            let Ok(Ok(record)) = result else {
+                                self.send_login_error("Trusted controller proof or credential rejected").await;
+                                break;
+                            };
+                            self.lr = lr.clone();
+                            // The verified secret is not needed for later revocation checks.
+                            self.lr.ord_access = None.into();
+                            if !self.check_id_whitelist().await { break; }
+                            self.secure_login_pending = true;
+                            self.try_start_cm_ipc();
+                            let label = format!("{} [SHA256 {}]", self.lr.my_name, secure_access::fingerprint(&request));
+                            self.try_start_cm(self.lr.my_id.clone(), label, false);
+                            if let Some(record) = record {
+                                let Some(worker) = self.start_secure_access_video("unattended").await else { break; };
+                                video_worker = Some(worker);
+                                access_active = Some(record.id);
+                                access_deadline = Instant::now() + Duration::from_secs(15 * 60);
+                                self.send_to_cm(ipc::Data::SwitchPermission { name: "ord_access_unattended".into(), enabled: true });
+                            } else {
+                                access_pending = Some(request);
+                                self.send_to_cm(ipc::Data::SwitchPermission { name: "ord_access_pair_pending".into(), enabled: true });
+                            }
+                            continue;
+                        }
+                    }
                     if !self.on_secure_host_message(message).await {
                         break;
                     }
@@ -269,6 +342,27 @@ impl Connection {
         self.on_close("Secure host session ended", false).await;
     }
 
+    async fn start_secure_access_video(&mut self, mode: &str) -> Option<secure_video::Worker> {
+        if !secure_video::allowed() || super::super::secure_host::is_stopped() { return None; }
+        let Ok(Ok(dimensions)) = tokio::task::spawn_blocking(secure_video::dimensions).await else {
+            self.send_secure_video_error().await; return None;
+        };
+        let mut info = secure_host_policy::approved_video_peer_info(VERSION, dimensions.width as _, dimensions.height as _);
+        if let Some(message::Union::LoginResponse(login)) = info.union.as_mut() {
+            if let Some(base::message_proto::login_response::Union::PeerInfo(peer)) = login.union.as_mut() {
+                let Ok(mut additions) = serde_json::from_str::<serde_json::Value>(&peer.platform_additions) else { return None; };
+                additions["access_mode"] = mode.into();
+                peer.platform_additions = additions.to_string();
+            }
+        }
+        if self.stream.send(&info).await.is_err() || !self.send_secure_permissions().await { return None; }
+        let Ok(worker) = secure_video::start(dimensions) else { self.send_secure_video_error().await; return None; };
+        self.authorized = true;
+        self.secure_login_pending = false;
+        self.unauthorized_id = None;
+        self.try_start_cm(self.lr.my_id.clone(), self.lr.my_name.clone(), true);
+        Some(worker)
+    }
     async fn on_secure_host_message(&mut self, message: Message) -> bool {
         match secure_host_policy::classify_message(&message) {
             Request::Login if !self.secure_login_pending && !self.authorized => {

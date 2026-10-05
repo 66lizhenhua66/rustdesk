@@ -22,6 +22,7 @@ interface Profile {
   target: string;
   server: string;
   serverKey: string;
+  relayServer?: string;
   peerFingerprint: string;
   peerId?: string;
   peerPublicKey?: string;
@@ -338,6 +339,7 @@ struct Index {
         target: imported.target,
         server: imported.server,
         serverKey: imported.serverKey,
+        relayServer: imported.relayServer,
         peerFingerprint: imported.peerFingerprint,
         peerId: imported.peerId,
         peerPublicKey: imported.peerPublicKey
@@ -387,6 +389,7 @@ struct Index {
       target: this.target.trim(),
       server: this.server.trim(),
       serverKey: this.serverKey.trim(),
+      relayServer: this.profiles.find((item: Profile) => item.id === this.editingId)?.relayServer,
       peerFingerprint: this.peerFingerprint.trim(),
       peerId: this.peerId.trim(),
       peerPublicKey: this.peerPublicKey.trim()

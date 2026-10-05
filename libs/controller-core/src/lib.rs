@@ -1,5 +1,10 @@
+pub mod access;
+#[path = "../../base/src/access_proof.rs"]
+pub mod access_proof;
+pub use protos::message as message_proto;
 mod input;
 pub mod meta;
+mod rendezvous;
 pub mod session;
 pub mod upstream_crypto;
 
@@ -35,6 +40,8 @@ struct Profile {
     target: String,
     server: String,
     server_key: String,
+    #[serde(default)]
+    relay_server: String,
     peer_fingerprint: String,
     #[serde(default)]
     peer_id: String,
@@ -56,6 +63,7 @@ fn normalized_profile(mut p: Profile) -> Result<Profile, ProfileError> {
     p.target = p.target.trim().to_owned();
     p.server = p.server.trim().to_owned();
     p.server_key = p.server_key.trim().to_owned();
+    p.relay_server = p.relay_server.trim().to_owned();
     p.peer_fingerprint = p.peer_fingerprint.trim().to_ascii_lowercase();
     p.peer_id = p.peer_id.trim().to_owned();
     p.peer_public_key = p.peer_public_key.trim().to_owned();
@@ -82,11 +90,21 @@ fn normalized_profile(mut p: Profile) -> Result<Profile, ProfileError> {
             {
                 return Err(ProfileError("INVALID_TARGET", "Invalid device ID"));
             }
+            if !p.peer_id.is_empty() && p.peer_id != p.target {
+                return Err(ProfileError(
+                    "PEER_ID_MISMATCH",
+                    "Target differs from pinned peer ID",
+                ));
+            }
         }
         _ => return Err(ProfileError("INVALID_MODE", "Invalid connection mode")),
     }
     if !p.server.is_empty() {
         p.server = server_address(&p.server)?;
+    }
+    if !p.relay_server.is_empty() {
+        p.relay_server = server_address_with_default(&p.relay_server, 21117)
+            .map_err(|_| ProfileError("INVALID_RELAY_SERVER", "Invalid relay server address"))?;
     }
     if !p.server_key.is_empty()
         && STANDARD
@@ -124,6 +142,10 @@ fn direct_address(s: &str) -> Result<SocketAddr, ProfileError> {
 }
 
 fn server_address(s: &str) -> Result<String, ProfileError> {
+    server_address_with_default(s, 21116)
+}
+
+fn server_address_with_default(s: &str, default_port: u16) -> Result<String, ProfileError> {
     let (host, port) = if let Some(tail) = s.strip_prefix('[') {
         let (host, remainder) = tail
             .split_once(']')
@@ -131,7 +153,7 @@ fn server_address(s: &str) -> Result<String, ProfileError> {
         host.parse::<std::net::Ipv6Addr>()
             .map_err(|_| ProfileError("INVALID_SERVER", "Invalid server address"))?;
         let port = if remainder.is_empty() {
-            21116
+            default_port
         } else {
             remainder
                 .strip_prefix(':')
@@ -147,7 +169,7 @@ fn server_address(s: &str) -> Result<String, ProfileError> {
                 port.parse::<u16>()
                     .map_err(|_| ProfileError("INVALID_SERVER", "Invalid server port"))?,
             ),
-            None => (s, 21116),
+            None => (s, default_port),
         };
         if host.parse::<std::net::Ipv4Addr>().is_err() && !valid_hostname(host) {
             return Err(ProfileError("INVALID_SERVER", "Invalid server address"));
@@ -197,9 +219,12 @@ pub extern "C" fn controller_validate_profile(profile_json: *const c_char) -> *m
     };
     match result {
         Ok(profile) => {
-            let authentication_available = profile.mode == "direct"
-                && !profile.peer_id.is_empty()
-                && !profile.peer_public_key.is_empty();
+            let authentication_available = !profile.peer_id.is_empty()
+                && !profile.peer_public_key.is_empty()
+                && (profile.mode == "direct"
+                    || (!profile.server.is_empty()
+                        && !profile.server_key.is_empty()
+                        && !profile.relay_server.is_empty()));
             json_string(json!({"ok":true,"profile":profile,"readyForSession":false,
                 "authenticationAvailable":authentication_available,"reason":"REMOTE_SESSION_NOT_IMPLEMENTED"}))
         }

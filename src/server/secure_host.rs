@@ -22,6 +22,26 @@ fn new_server() -> ServerPtr {
 }
 
 pub async fn start() -> ResultType<()> {
+    let config = super::secure_rendezvous::RendezvousConfig::parse(
+        &std::env::var("ORD_SECURE_RENDEZVOUS").unwrap_or_default(),
+        &std::env::var("ORD_SECURE_SERVER_KEY").unwrap_or_default(),
+        &std::env::var("ORD_SECURE_RELAY").unwrap_or_default(),
+        &std::env::var("ORD_SECURE_ALLOW").unwrap_or_default(),
+    )?;
+    if let Some(config) = config {
+        let (sk, pk) = Config::get_key_pair();
+        IdentityHandshake::new(&Config::get_id(), &sk, &pk)?;
+        let server = new_server();
+        tokio::select! {
+            result = super::secure_rendezvous::start(config, server.clone()) => result,
+            result = start_listener(Some(server.clone())) => result,
+        }
+    } else {
+        start_listener(None).await
+    }
+}
+
+async fn start_listener(server: Option<ServerPtr>) -> ResultType<()> {
     if is_stopped() {
         log::info!("Secure host stopped by local service setting");
         return std::future::pending().await;
@@ -43,7 +63,7 @@ pub async fn start() -> ResultType<()> {
         }
     }
     log::info!("Secure host listening on {}", config.address);
-    let server = new_server();
+    let server = server.unwrap_or_else(new_server);
     loop {
         if is_stopped() {
             log::info!("Secure host listener stopped by local service setting");

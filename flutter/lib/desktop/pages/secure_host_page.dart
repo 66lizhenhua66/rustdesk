@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -26,6 +28,10 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
   String _localId = '';
   String? _notice;
   bool _closingWindow = false;
+  bool _accessLoading = false;
+  bool _accessChanging = false;
+  bool _unattendedEnabled = false;
+  List<SecureTrustedDevice> _trustedDevices = [];
 
   @override
   void initState() {
@@ -37,6 +43,7 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
     windowManager.addListener(this);
     _onModelChanged();
     _loadIdentity();
+    _loadTrusted();
   }
 
   @override
@@ -95,6 +102,13 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
         inputSupported: client.ordInputSupported,
         inputEnabled:
             client.authorized && client.keyboard && !client.disconnected,
+        pairPending: client.ordAccessPairPending,
+        unattended: client.ordAccessUnattended,
+        detail: client.ordAccessUnattended
+            ? '已验证登记设备的只读凭据。可结束当前查看，或在安全设置撤销此设备。'
+            : client.ordAccessPairPending
+                ? '请核对请求中的设备指纹；登记后允许该设备在有效期内无人值守查看。'
+                : null,
       );
       next.add(item);
       final old = previous[client.id];
@@ -109,11 +123,15 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
       }
       if (old == null) {
         _selectedId = client.id;
-        _record(status == SecureHostStatus.active ? '被控端已确认本次连接批准' : '收到新的连接请求',
+        _record(
+            status == SecureHostStatus.active
+                ? (item.unattended ? '可信设备凭据已验证' : '被控端已确认本次连接批准')
+                : (item.pairPending ? '收到只读访问登记请求' : '收到新的连接请求'),
             item.name);
       } else if (old.status != status) {
         if (status == SecureHostStatus.active) {
-          _record('被控端已确认本次连接批准', item.name);
+          _record(item.unattended ? '可信设备凭据已验证' : '被控端已确认本次连接批准', item.name);
+          _loadTrusted();
         } else if (status == SecureHostStatus.ended) {
           _record('本次连接已结束，本次许可已失效', item.name);
         }
@@ -149,6 +167,7 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
     final client = _liveClient(id);
     if (client == null ||
         client.authorized ||
+        client.ordAccessPairPending ||
         _approving.contains(id) ||
         _closing.contains(id)) return;
     _withLocalDecision(id, () async {
@@ -171,6 +190,82 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
         _onModelChanged();
       }
     });
+  }
+
+  Future<void> _loadTrusted() async {
+    if (_accessLoading || !mounted) return;
+    _accessLoading = true;
+    try {
+      final raw = await bind.cmSecureAccess(command: 'list', value: '');
+      final result = jsonDecode(raw) as Map<String, dynamic>;
+      if (result['ok'] != true) { throw StateError('可信设备状态不可用'); }
+      final devices = (result['devices'] as List<dynamic>).map((raw) {
+        final device = raw as Map<String, dynamic>;
+        return SecureTrustedDevice(
+            id: device['id'] as String,
+            name: device['name'] as String,
+            fingerprint: device['fingerprint'] as String,
+            expiresAt: (device['expiresAt'] as num).toInt());
+      }).toList();
+      if (mounted) {
+        setState(() {
+          _trustedDevices = devices;
+          _unattendedEnabled = result['enabled'] == true;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _notice = '可信设备列表无法读取，请刷新或检查本机授权存储。');
+    } finally {
+      _accessLoading = false;
+    }
+  }
+
+  void _pair(int id) {
+    final client = _liveClient(id);
+    if (client == null ||
+        client.authorized ||
+        !client.ordAccessPairPending ||
+        _approving.contains(id) ||
+        _closing.contains(id)) return;
+    _withLocalDecision(id, () async {
+      final current = _liveClient(id);
+      if (!mounted ||
+          current == null ||
+          current.authorized ||
+          !current.ordAccessPairPending) return;
+      _approving.add(id);
+      _record('已提交只读访问登记，等待确认', current.name);
+      _onModelChanged();
+      try {
+        if (!await bind.cmPairSecureAccess(connId: id)) {
+          throw StateError('登记请求未提交');
+        }
+      } catch (_) {
+        if (!mounted) return;
+        _approving.remove(id);
+        _notice = '设备登记未能提交，请核对当前请求后重试。';
+        _onModelChanged();
+      }
+    });
+  }
+
+  Future<void> _revokeTrusted(String? id) async {
+    if (_accessChanging || _accessLoading) return;
+    setState(() => _accessChanging = true);
+    try {
+      final raw = await bind.cmSecureAccess(
+          command: id == null ? 'revoke_all' : 'revoke', value: id ?? '');
+      final result = jsonDecode(raw) as Map<String, dynamic>;
+      if (result['ok'] != true) throw StateError('撤销未写入');
+      if (!mounted) return;
+      setState(() =>
+          _notice = id == null ? '已撤销全部设备，相关会话即将结束。' : '已撤销此设备，相关会话即将结束。');
+      await _loadTrusted();
+    } catch (_) {
+      if (mounted) setState(() => _notice = '撤销未能保存，请重试；必要时先结束相关连接。');
+    } finally {
+      if (mounted) setState(() => _accessChanging = false);
+    }
   }
 
   void _end(int id) async {
@@ -289,5 +384,11 @@ class _SecureHostPageState extends State<SecureHostPage> with WindowListener {
         onReject: _end,
         onDisconnect: _end,
         onCopyLocalId: _localId.isEmpty ? null : _copyIdentity,
+        onPair: _pair,
+        trustedDevices: _trustedDevices,
+        unattendedEnabled: _unattendedEnabled,
+        onRefreshTrusted: _accessLoading || _accessChanging ? null : _loadTrusted,
+        onRevokeTrusted: _accessChanging || _accessLoading ? null : _revokeTrusted,
+        onRevokeAllTrusted: _accessChanging || _accessLoading ? null : () => _revokeTrusted(null),
       );
 }

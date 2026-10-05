@@ -1,3 +1,4 @@
+pub mod access_proof;
 pub mod config;
 pub mod fs;
 pub mod keyboard;

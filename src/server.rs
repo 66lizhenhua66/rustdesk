@@ -72,6 +72,14 @@ mod connection;
 #[cfg(all(windows, feature = "ord-secure-host"))]
 pub(crate) mod secure_host;
 #[cfg(all(windows, feature = "ord-secure-host"))]
+pub(crate) mod secure_access;
+#[cfg(all(windows, feature = "ord-secure-host"))]
+mod secure_access_policy;
+#[cfg(all(windows, feature = "ord-secure-host"))]
+pub(crate) mod secure_rendezvous;
+#[cfg(all(windows, feature = "ord-secure-host"))]
+mod secure_rendezvous_policy;
+#[cfg(all(windows, feature = "ord-secure-host"))]
 pub(crate) mod secure_host_policy;
 #[cfg(all(windows, feature = "ord-secure-host"))]
 pub(crate) mod secure_video;

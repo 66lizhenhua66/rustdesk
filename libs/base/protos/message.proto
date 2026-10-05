@@ -85,6 +85,26 @@ message LoginRequest {
   bytes hwid = 14;
   string avatar = 17;
   uint32 ord_input_version = 18;
+  OrdAccessRequest ord_access = 19;
+}
+
+message OrdAccessRequest {
+  uint32 version = 1;
+  string mode = 2;
+  bytes controller_public_key = 3;
+  bytes credential_id = 4;
+  bytes credential_secret = 5;
+  bytes proof = 6;
+  string scope = 7;
+}
+
+message OrdAccessGrant {
+  uint32 version = 1;
+  bytes credential_id = 2;
+  bytes credential_secret = 3;
+  bytes controller_public_key = 4;
+  int64 expires_at_ms = 5;
+  string scope = 6;
 }
 
 message Terminal {
@@ -1098,5 +1118,6 @@ message Message {
     OrdInputState ord_input_state = 34;
     OrdInputEvent ord_input_event = 35;
     OrdInputRequest ord_input_request = 36;
+    OrdAccessGrant ord_access_grant = 37;
   }
 }

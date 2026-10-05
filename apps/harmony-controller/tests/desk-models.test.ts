@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   canConnectProfile,
+  buildScreenRequest,
+  connectionPathLabel,
   endedScreenState,
   initialScreenState,
   markInputRequest,
@@ -218,4 +220,95 @@ test('endpoint fields round trip IPv4 and IPv6; readiness requires direct truste
   profile.peerPublicKey = 'trusted-key';
   profile.mode = 'relay';
   assert.equal(canConnectProfile(profile), false);
+});
+
+test('ID and relay connections require a configured service and the same pinned target identity', () => {
+  const profile: Profile = {
+    id: 'routed', name: 'Desk', mode: 'id', target: '123456', peerId: '123456',
+    peerPublicKey: 'peer-key', peerFingerprint: '', server: 'self-host.example:21116',
+    serverKey: 'server-key', relayServer: 'self-host.example:21117'
+  };
+  for (const mode of ['id', 'relay']) {
+    profile.mode = mode;
+    assert.equal(canConnectProfile(profile), true);
+    const request = JSON.parse(buildScreenRequest(profile));
+    assert.equal(request.mode, mode);
+    assert.equal(request.peerId, '123456');
+    assert.equal(request.endpoint, undefined);
+    assert.equal(request.server, profile.server);
+    assert.equal(request.serverKey, profile.serverKey);
+    assert.equal(request.relayServer, profile.relayServer);
+    assert.equal(request.minimumKxVersion, 1);
+    assert.equal(request.expectedPeer, 'secure_control');
+  }
+  for (const field of ['server', 'serverKey', 'relayServer', 'peerPublicKey'] as const) {
+    assert.equal(canConnectProfile({ ...profile, [field]: '' }), false);
+  }
+  assert.equal(canConnectProfile({ ...profile, peerId: '654321' }), false);
+  assert.equal(canConnectProfile({ ...profile, mode: 'unknown' }), false);
+  assert.throws(() => buildScreenRequest({ ...profile, peerId: '654321' }));
+});
+
+test('actual connection path survives approval and video updates without granting access', () => {
+  const event = screenEvent('transport_selected', 'TRANSPORT_SELECTED');
+  event.connectionPath = 'relay';
+  const routed = projectScreenEvent(initialScreenState(), event);
+  assert.equal(routed.connectionPath, 'relay');
+  assert.equal(routed.verified, false);
+  assert.equal(routed.approved, false);
+  const verified = projectScreenEvent(routed, screenEvent('verified', 'VERIFIED', true));
+  const waiting = projectScreenEvent(verified, screenEvent('awaiting_approval', 'AWAITING_APPROVAL', true));
+  const approved = projectScreenEvent(waiting, screenEvent('connected', 'CONNECTED', true, true));
+  const stats = projectScreenEvent(approved, screenEvent('video_status', 'VIDEO_STATUS', true, true));
+  assert.equal(markInputRequest(stats, true).connectionPath, 'relay');
+  assert.equal(connectionPathLabel(stats.connectionPath), '中继');
+  assert.equal(connectionPathLabel('id_direct'), 'ID 协调直连');
+  assert.equal(connectionPathLabel('direct'), 'IP 直连');
+  assert.equal(connectionPathLabel(''), '等待连接');
+  assert.equal(projectScreenEvent(stats, screenEvent('closed', 'DISCONNECTED')).connectionPath, '');
+});
+
+test('coordination failures explain the actual core error without claiming approval', () => {
+  for (const [code, explanation] of [
+    ['SERVER_IDENTITY_INVALID', /协调服务身份/],
+    ['PEER_IDENTITY_MISMATCH', /设备身份/],
+    ['PEER_UNAVAILABLE', /未在线/],
+    ['RELAY_REJECTED', /中继/],
+    ['RELAY_SERVER_MISMATCH', /中继与配置不一致/],
+    ['RESOLVE_FAILED', /域名解析/]
+  ] as const) {
+    const failed = projectScreenEvent(initialScreenState(), screenEvent('failed', code));
+    assert.match(failed.detail, explanation);
+    assert.equal(failed.approved, false);
+    assert.equal(failed.phase, 'failed');
+  }
+});
+
+test('trusted pairing requires its own verified connected receipt and remains read only', () => {
+  const start = initialScreenState('pair');
+  const pending = screenEvent('awaiting_approval', 'AWAITING_APPROVAL', true);
+  assert.match(projectScreenEvent(start, pending).detail, /登记/);
+  const ordinary = screenEvent('connected', 'CONNECTED', true, true);
+  assert.equal(projectScreenEvent(start, ordinary).approved, false);
+  ordinary.accessMode = 'pair';
+  const paired = projectScreenEvent(start, ordinary);
+  assert.equal(paired.approved, true);
+  assert.equal(paired.accessMode, 'pair');
+  assert.match(paired.detail, /登记/);
+  const input = screenEvent('input_state', 'INPUT_STATE', true, true);
+  input.inputSupported = true;
+  input.authorized = true;
+  assert.equal(projectScreenEvent(paired, input).inputGranted, false);
+});
+
+test('unattended connection cannot be mislabeled by an onsite receipt', () => {
+  const start = initialScreenState('unattended');
+  const ordinary = screenEvent('connected', 'CONNECTED', true, true);
+  assert.equal(projectScreenEvent(start, ordinary).approved, false);
+  ordinary.accessMode = 'pair';
+  assert.equal(projectScreenEvent(start, ordinary).approved, false);
+  ordinary.accessMode = 'unattended';
+  const approved = projectScreenEvent(start, ordinary);
+  assert.equal(approved.approved, true);
+  assert.match(approved.detail, /无人值守/);
 });

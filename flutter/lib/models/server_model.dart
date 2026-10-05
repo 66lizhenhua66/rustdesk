@@ -536,6 +536,8 @@ class ServerModel with ChangeNotifier {
             _clients[index].keyboard = client.keyboard;
             _clients[index].ordInputSupported = client.ordInputSupported;
             _clients[index].ordInputReleaseFailed = client.ordInputReleaseFailed;
+            _clients[index].ordAccessPairPending = client.ordAccessPairPending;
+            _clients[index].ordAccessUnattended = client.ordAccessUnattended;
           }
           if (_clients[index].authorized) {
             _clients[index].privacyMode = client.privacyMode;
@@ -548,6 +550,10 @@ class ServerModel with ChangeNotifier {
       } else {
         final index = _clients.indexWhere((c) => c.id == client.id);
         if (index >= 0) {
+          if (isSecureHostWindow) {
+            _clients[index].ordAccessPairPending = client.ordAccessPairPending;
+            _clients[index].ordAccessUnattended = client.ordAccessUnattended;
+          }
           _clients[index].privacyMode = client.privacyMode;
           notifyListeners();
           return;
@@ -815,6 +821,8 @@ class Client {
   bool keyboard = false;
   bool ordInputSupported = false;
   bool ordInputReleaseFailed = false;
+  bool ordAccessPairPending = false;
+  bool ordAccessUnattended = false;
   bool clipboard = false;
   bool audio = false;
   bool file = false;
@@ -846,6 +854,8 @@ class Client {
     keyboard = json['keyboard'];
     ordInputSupported = json['ord_input_supported'] == true;
     ordInputReleaseFailed = json['ord_input_release_failed'] == true;
+    ordAccessPairPending = json['ord_access_pair_pending'] == true;
+    ordAccessUnattended = json['ord_access_unattended'] == true;
     clipboard = json['clipboard'];
     audio = json['audio'];
     file = json['file'];
@@ -873,6 +883,8 @@ class Client {
     data['keyboard'] = keyboard;
     data['ord_input_supported'] = ordInputSupported;
     data['ord_input_release_failed'] = ordInputReleaseFailed;
+    data['ord_access_pair_pending'] = ordAccessPairPending;
+    data['ord_access_unattended'] = ordAccessUnattended;
     data['clipboard'] = clipboard;
     data['audio'] = audio;
     data['file'] = file;

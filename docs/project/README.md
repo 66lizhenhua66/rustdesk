@@ -11,6 +11,9 @@
 
 | 文档 | 职责 |
 | --- | --- |
+| [specs/003-trusted-controller-access.md](specs/003-trusted-controller-access.md) | 可信控制设备只读访问协议、配对、凭据存储、撤销与验收范围 |
+| [plans/2026-10-05-id-relay-unattended.md](plans/2026-10-05-id-relay-unattended.md) | 本轮 ID/中继、无人值守实现与验证步骤 |
+| [research/2026-10-05-id-relay-unattended-validation.md](research/2026-10-05-id-relay-unattended-validation.md) | 本轮测试、构建、回归面和未验收边界 |
 | [SPEC.md](SPEC.md) | 产品需求与架构主文档：被控改造、认证权限、公网部署、鸿蒙优先的多端架构和验收 |
 | [ROADMAP.md](ROADMAP.md) | 阶段顺序、依赖、退出条件与代码入口 |
 | [PROGRESS.md](PROGRESS.md) | 唯一的当前进度入口，记录结果、证据、阻塞和下一步 |

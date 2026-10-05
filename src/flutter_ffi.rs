@@ -2270,6 +2270,30 @@ pub fn cm_switch_permission(conn_id: i32, name: String, enabled: bool) {
     crate::ui_cm_interface::switch_permission(conn_id, name, enabled)
 }
 
+pub fn cm_secure_access(command: String, value: String) -> String {
+    #[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if crate::secure_host_ui::is_ord_secure_cm(&args, true) {
+            return crate::server::secure_access::manage(&command, &value);
+        }
+    }
+    let _ = (command, value);
+    serde_json::json!({"ok":false,"error":"Trusted access management is unavailable"}).to_string()
+}
+
+pub fn cm_pair_secure_access(conn_id: i32) -> bool {
+    #[cfg(all(windows, feature = "ord-secure-host", feature = "flutter"))]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if crate::secure_host_ui::is_ord_secure_cm(&args, true) {
+            return crate::ui_cm_interface::pair_secure_access(conn_id);
+        }
+    }
+    let _ = conn_id;
+    false
+}
+
 pub fn cm_can_elevate() -> SyncReturn<bool> {
     SyncReturn(crate::ui_cm_interface::can_elevate())
 }
