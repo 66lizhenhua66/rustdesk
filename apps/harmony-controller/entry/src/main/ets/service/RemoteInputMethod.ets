@@ -107,7 +107,23 @@ export class RemoteInputMethod {
   };
   private deleteLeft = (length: number): void => { this.deleteText('Backspace', length); };
   private deleteRight = (length: number): void => { this.deleteText('Delete', length); };
-  private functionKey = (_key: inputMethod.FunctionKey): void => { this.tapKey('Enter'); };
+  private functionKey = (key: inputMethod.FunctionKey): void => {
+    switch (key.enterKeyType) {
+      case inputMethod.EnterKeyType.NONE:
+        return;
+      case inputMethod.EnterKeyType.NEXT:
+        this.tapKey('Tab');
+        return;
+      case inputMethod.EnterKeyType.PREVIOUS:
+        if (this.dispatch({ kind: 'key', code: 'Shift', down: true })) {
+          this.tapKey('Tab');
+          this.dispatch({ kind: 'key', code: 'Shift', down: false });
+        }
+        return;
+      default:
+        this.tapKey('Enter');
+    }
+  };
   private moveCursor = (direction: inputMethod.Direction): void => {
     switch (direction) {
       case inputMethod.Direction.CURSOR_UP: this.tapKey('ArrowUp'); break;

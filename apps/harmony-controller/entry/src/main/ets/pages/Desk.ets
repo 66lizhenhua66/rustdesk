@@ -564,6 +564,12 @@ struct Desk {
     catch { this.disconnect('输入状态无法清理，连接已结束。请重新连接。'); }
   }
 
+  private canvasState(): string {
+    if (this.task <= 0) { return '{}'; }
+    try { return controller.canvasState(this.task); }
+    catch { return '{}'; }
+  }
+
   private releaseInput(): void {
     if (this.task <= 0) { return; }
     try {
@@ -941,6 +947,7 @@ struct Desk {
             onBack: () => this.hideSession(), onDisconnect: () => this.disconnect(),
             onInput: (command: string) => this.sendSystemInput(command), onReleaseInput: () => this.releaseInput(),
             onInputEvent: (event: string) => this.sendSystemInputEvent(event), onResetInput: () => this.resetInput(),
+            onCanvasState: () => this.canvasState(),
             onSetInputEnabled: (enabled: boolean) => this.setInputEnabled(enabled),
             onRetry: () => { if (this.sessionProfile) {
               if (this.currentAccessMode) { this.connectTrusted(this.sessionProfile, this.currentAccessMode); }

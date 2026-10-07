@@ -2,6 +2,7 @@ pub mod access;
 #[path = "../../base/src/access_proof.rs"]
 pub mod access_proof;
 pub use protos::message as message_proto;
+pub mod canvas;
 mod input;
 pub mod interaction;
 pub mod meta;

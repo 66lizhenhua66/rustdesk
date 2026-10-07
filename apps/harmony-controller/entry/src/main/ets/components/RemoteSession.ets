@@ -20,6 +20,7 @@ export struct RemoteSession {
   onInput: (command: string) => number = () => 1;
   onInputEvent: (event: string) => number = () => 1;
   onResetInput: () => void = () => {};
+  onCanvasState: () => string = () => '{}';
   onReleaseInput: () => void = () => {};
   onSetInputEnabled: (enabled: boolean) => number = () => 1;
   @State private areaWidth: number = 390;
@@ -43,6 +44,7 @@ export struct RemoteSession {
       focus: () => { this.getUIContext().getFocusController().requestFocus('remote-desktop-input'); },
       openKeyboard: () => this.keyboard.open(),
       closeKeyboard: () => this.keyboard.close(),
+      canvasState: () => this.onCanvasState(),
       changed: (state: InputSessionState) => { this.inputState = state; }
     }, this.initialControl, this.accessMode);
     this.inputAdapter = new HarmonyInputAdapter(this.inputController);
@@ -54,8 +56,8 @@ export struct RemoteSession {
   private readyForInput(): boolean { return this.inputState.ready; }
 
   private inputAvailabilityChanged(): void {
-    this.inputController?.update(this.screen, this.sessionVisible);
     this.inputController?.setViewport(this.surfaceWidth(), this.surfaceHeight());
+    this.inputController?.update(this.screen, this.sessionVisible);
   }
 
   private inputStatus(): string {
@@ -90,6 +92,11 @@ export struct RemoteSession {
   private surfaceHeight(): number { return this.surfaceWidth() / this.ratio(); }
   private panelTop(): number { return this.compact() ? 134 : 80; }
 
+  private canvasWidth(): number { return this.inputState.imageWidth > 0 ? this.inputState.imageWidth : this.surfaceWidth(); }
+  private canvasHeight(): number { return this.inputState.imageHeight > 0 ? this.inputState.imageHeight : this.surfaceHeight(); }
+  private canvasX(): number { return this.inputState.imageWidth > 0 ? this.inputState.imageX : (this.areaWidth - this.surfaceWidth()) / 2; }
+  private canvasY(): number { return this.inputState.imageHeight > 0 ? this.inputState.imageY : (this.areaHeight - this.surfaceHeight()) / 2; }
+
   private leave(): void {
     this.inputController?.stop();
     this.toolsOpen = false;
@@ -108,6 +115,17 @@ export struct RemoteSession {
     this.toolsOpen = false;
     this.toolbarCollapsed = false;
     this.onRetry();
+  }
+
+  @Builder
+  private resetCanvasButton() {
+    if (this.inputState.resetVisible) {
+      Button('还原画面', { type: ButtonType.Normal }).height(38).fontSize(11).fontColor('#196B52')
+        .backgroundColor('#F9FCF7').borderRadius(9).border({ width: 1, color: '#DCE6DC' })
+        .position({ x: Math.max(12, this.areaWidth - 100), y: Math.max(12, this.inputState.safeY + 8) })
+        .accessibilityText('还原画面到适应窗口并居中')
+        .onClick(() => this.inputController?.resetView())
+    }
   }
 
   @Builder
@@ -360,7 +378,8 @@ export struct RemoteSession {
     Stack({ alignContent: Alignment.Center }) {
       if (this.surfaceActive) {
         XComponent({ type: XComponentType.SURFACE, controller: this.controller })
-          .width(this.surfaceWidth()).height(this.surfaceHeight()).backgroundColor('#10181B')
+          .width(this.canvasWidth()).height(this.canvasHeight()).backgroundColor('#10181B')
+          .position({ x: this.canvasX(), y: this.canvasY() })
           .id('remote-desktop-input').focusable(true).focusOnTouch(true)
           .onTouch((event: TouchEvent) => this.inputAdapter?.touch(event))
           .onMouse((event: MouseEvent) => this.inputAdapter?.mouse(event))
@@ -374,6 +393,7 @@ export struct RemoteSession {
           this.stateCard()
         }.width('100%').height('100%').backgroundColor('#344B45')
       } else {
+        this.resetCanvasButton()
         Text(this.inputState.notice.length > 0 && this.screen.code !== 'INPUT_DISABLING' ? this.inputState.notice : this.inputStatus()).fontSize(11).fontColor('#426A4D')
           .padding({ left: 12, right: 12, top: 9, bottom: 9 }).borderRadius(8).backgroundColor('#EDF4E6')
           .height(32).constraintSize({ maxWidth: this.areaWidth - 24 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })

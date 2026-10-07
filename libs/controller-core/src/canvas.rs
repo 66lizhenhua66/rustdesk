@@ -1,0 +1,876 @@
+use std::{
+    ffi::{c_char, c_void, CStr, CString},
+    ptr,
+};
+
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::interaction::{
+    controller_input_event_v1, controller_input_free_v1, controller_input_new_v1, ControllerInput,
+    ControllerInputSink,
+};
+
+const MAX_EVENT_BYTES: usize = 8192;
+const PAN_THRESHOLD: f64 = 6.0;
+const SAFE_PADDING: f64 = 24.0;
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Insets {
+    #[serde(default)]
+    left: f64,
+    #[serde(default)]
+    top: f64,
+    #[serde(default)]
+    right: f64,
+    #[serde(default)]
+    bottom: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Configure {
+    #[serde(default)]
+    #[serde(rename = "kind")]
+    _kind: String,
+    viewport_width: f64,
+    viewport_height: f64,
+    remote_width: f64,
+    remote_height: f64,
+    #[serde(default)]
+    insets: Insets,
+    #[serde(default = "default_padding")]
+    padding: f64,
+    enabled: bool,
+}
+
+fn default_padding() -> f64 {
+    SAFE_PADDING
+}
+
+#[derive(Clone, Copy, Default)]
+struct Pt {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Default)]
+struct Single {
+    start: Pt,
+    last: Pt,
+    time: u64,
+    moved: bool,
+    ready: bool,
+    dragging: bool,
+}
+
+#[derive(Default)]
+struct Multi {
+    start_centroid: Pt,
+    last_centroid: Pt,
+    start_distance: f64,
+    last_distance: f64,
+    started: u64,
+    pinch: bool,
+    scroll: bool,
+    third: bool,
+}
+
+#[derive(Default)]
+struct Gesture {
+    single: Option<Single>,
+    multi: Option<Multi>,
+    suppress: bool,
+    next_tick: u64,
+}
+
+pub struct ControllerCanvas {
+    input: *mut ControllerInput,
+    viewport_w: f64,
+    viewport_h: f64,
+    remote_w: f64,
+    remote_h: f64,
+    inset: Insets,
+    padding: f64,
+    safe_x: f64,
+    safe_y: f64,
+    safe_w: f64,
+    safe_h: f64,
+    fit: f64,
+    zoom: f64,
+    image_x: f64,
+    image_y: f64,
+    valid: bool,
+    enabled: bool,
+    touch_mode: bool,
+    cursor_x: f64,
+    cursor_y: f64,
+    remote_held: bool,
+    gesture: Gesture,
+}
+
+impl ControllerCanvas {
+    fn fields_only(v: &Value, allowed: &[&str]) -> bool {
+        v.as_object()
+            .map_or(false, |o| o.keys().all(|k| allowed.iter().any(|a| a == k)))
+    }
+    fn new() -> Self {
+        Self {
+            input: controller_input_new_v1(),
+            viewport_w: 0.0,
+            viewport_h: 0.0,
+            remote_w: 0.0,
+            remote_h: 0.0,
+            inset: Insets::default(),
+            padding: SAFE_PADDING,
+            safe_x: 0.0,
+            safe_y: 0.0,
+            safe_w: 0.0,
+            safe_h: 0.0,
+            fit: 0.0,
+            zoom: 1.0,
+            image_x: 0.0,
+            image_y: 0.0,
+            valid: false,
+            enabled: false,
+            touch_mode: false,
+            cursor_x: 0.0,
+            cursor_y: 0.0,
+            gesture: Gesture::default(),
+            remote_held: false,
+        }
+    }
+
+    fn scale(&self) -> f64 {
+        self.fit * self.zoom
+    }
+    fn image_w(&self) -> f64 {
+        self.remote_w * self.scale()
+    }
+    fn image_h(&self) -> f64 {
+        self.remote_h * self.scale()
+    }
+    fn geometry_changed(&self, c: &Configure) -> bool {
+        self.viewport_w != c.viewport_width
+            || self.viewport_h != c.viewport_height
+            || self.remote_w != c.remote_width
+            || self.remote_h != c.remote_height
+            || self.inset.left != c.insets.left
+            || self.inset.top != c.insets.top
+            || self.inset.right != c.insets.right
+            || self.inset.bottom != c.insets.bottom
+            || self.padding != c.padding
+    }
+    fn clamp_image(&mut self) {
+        let iw = self.image_w();
+        let ih = self.image_h();
+        if !self.valid || iw <= 0.0 || ih <= 0.0 {
+            self.image_x = self.safe_x;
+            self.image_y = self.safe_y;
+            return;
+        }
+        let min_x = self.safe_x + self.safe_w - iw;
+        let max_x = self.safe_x;
+        let min_y = self.safe_y + self.safe_h - ih;
+        let max_y = self.safe_y;
+        self.image_x = if iw <= self.safe_w {
+            self.safe_x + (self.safe_w - iw) / 2.0
+        } else {
+            self.image_x.clamp(min_x, max_x)
+        };
+        self.image_y = if ih <= self.safe_h {
+            self.safe_y + (self.safe_h - ih) / 2.0
+        } else {
+            self.image_y.clamp(min_y, max_y)
+        };
+    }
+    fn configure(
+        &mut self,
+        c: Configure,
+        sink: Option<ControllerInputSink>,
+        ctx: *mut c_void,
+    ) -> i32 {
+        if ![
+            c.viewport_width,
+            c.viewport_height,
+            c.remote_width,
+            c.remote_height,
+            c.padding,
+            c.insets.left,
+            c.insets.top,
+            c.insets.right,
+            c.insets.bottom,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+            || c.viewport_width < 0.0
+            || c.viewport_height < 0.0
+            || c.remote_width <= 0.0
+            || c.remote_height <= 0.0
+            || c.padding < 0.0
+            || c.insets.left < 0.0
+            || c.insets.top < 0.0
+            || c.insets.right < 0.0
+            || c.insets.bottom < 0.0
+        {
+            self.valid = false;
+            self.cancel(sink, ctx);
+            self.viewport_w = c.viewport_width.max(0.0);
+            self.viewport_h = c.viewport_height.max(0.0);
+            self.remote_w = 0.0;
+            self.remote_h = 0.0;
+            self.safe_x = 0.0;
+            self.safe_y = 0.0;
+            self.safe_w = 0.0;
+            self.safe_h = 0.0;
+            self.fit = 0.0;
+            self.zoom = 1.0;
+            self.image_x = 0.0;
+            self.image_y = 0.0;
+            self.enabled = c.enabled;
+            return 0;
+        }
+        let changed = self.geometry_changed(&c);
+        if !changed {
+            if self.enabled && !c.enabled {
+                self.release(sink, ctx);
+            }
+            self.enabled = c.enabled;
+            return 0;
+        }
+        let old_center = if changed && self.valid && self.scale() > 0.0 {
+            let cx = self.safe_x + self.safe_w / 2.0;
+            let cy = self.safe_y + self.safe_h / 2.0;
+            Some((
+                (cx - self.image_x) / self.scale(),
+                (cy - self.image_y) / self.scale(),
+            ))
+        } else {
+            None
+        };
+        if changed {
+            self.cancel(sink, ctx);
+        }
+        self.viewport_w = c.viewport_width;
+        self.viewport_h = c.viewport_height;
+        self.remote_w = c.remote_width;
+        self.remote_h = c.remote_height;
+        self.inset = c.insets;
+        self.padding = c.padding;
+        self.safe_x = c.insets.left + c.padding;
+        self.safe_y = c.insets.top + c.padding;
+        self.safe_w =
+            (c.viewport_width - c.insets.left - c.insets.right - 2.0 * c.padding).max(0.0);
+        self.safe_h =
+            (c.viewport_height - c.insets.top - c.insets.bottom - 2.0 * c.padding).max(0.0);
+        self.fit = (self.safe_w / c.remote_width).min(self.safe_h / c.remote_height);
+        self.valid = self.fit.is_finite() && self.fit > 0.0;
+        if self.valid {
+            if let Some((rx, ry)) = old_center {
+                self.image_x = self.safe_x + self.safe_w / 2.0 - rx * self.scale();
+                self.image_y = self.safe_y + self.safe_h / 2.0 - ry * self.scale();
+            } else {
+                self.image_x = self.safe_x + (self.safe_w - self.image_w()) / 2.0;
+                self.image_y = self.safe_y + (self.safe_h - self.image_h()) / 2.0;
+            }
+            self.clamp_image();
+            self.cursor_x = c.remote_width / 2.0;
+            self.cursor_y = c.remote_height / 2.0;
+        }
+        if self.enabled && !c.enabled {
+            self.release(sink, ctx);
+        }
+        self.enabled = c.enabled;
+        0
+    }
+    fn cancel(&mut self, sink: Option<ControllerInputSink>, ctx: *mut c_void) {
+        self.gesture = Gesture::default();
+        self.remote_held = false;
+        if let Some(cb) = sink {
+            self.release_with(cb, ctx);
+        }
+    }
+    fn release(&mut self, sink: Option<ControllerInputSink>, ctx: *mut c_void) {
+        self.cancel(sink, ctx);
+    }
+    fn release_with(&mut self, cb: ControllerInputSink, ctx: *mut c_void) {
+        let Ok(e) = CString::new(r#"{\"kind\":\"release\"}"#) else {
+            return;
+        };
+        controller_input_event_v1(self.input, e.as_ptr(), Some(cb), ctx);
+    }
+    fn local_to_remote(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let s = self.scale();
+        if !self.valid || s <= 0.0 {
+            return None;
+        }
+        let rx = (x - self.image_x) / s;
+        let ry = (y - self.image_y) / s;
+        if rx < 0.0 || ry < 0.0 || rx > self.remote_w || ry > self.remote_h {
+            None
+        } else {
+            Some((rx, ry))
+        }
+    }
+    fn input_event(&mut self, value: Value, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
+        if !self.enabled || !self.valid {
+            return 0;
+        }
+        let Ok(raw) = CString::new(value.to_string()) else {
+            return 1;
+        };
+        let status = controller_input_event_v1(self.input, raw.as_ptr(), Some(sink), ctx);
+        if status != 0 {
+            self.gesture = Gesture::default();
+        }
+        status
+    }
+    fn mouse(
+        &mut self,
+        action: &str,
+        button: &str,
+        x: f64,
+        y: f64,
+        sink: ControllerInputSink,
+        ctx: *mut c_void,
+    ) -> i32 {
+        if action == "cancel" {
+            self.release_with(sink, ctx);
+            return 0;
+        }
+        let Some((rx, ry)) = self.local_to_remote(x, y) else {
+            if action == "release" && self.remote_held {
+                let status=self.input_event(json!({"kind":"mouse","action":"release","button":button,"x":0.0,"y":0.0,"width":self.remote_w,"height":self.remote_h}), sink, ctx);
+                if status == 0 {
+                    self.remote_held = false;
+                }
+                return status;
+            }
+            return 0;
+        };
+        let status=self.input_event(json!({"kind":"mouse","action":action,"button":button,"x":rx,"y":ry,"width":self.remote_w,"height":self.remote_h}), sink, ctx);
+        if status == 0 && action == "press" && !button.is_empty() {
+            self.remote_held = true;
+        }
+        if status == 0 && action == "release" {
+            self.remote_held = false;
+        }
+        status
+    }
+    fn wheel(
+        &mut self,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+        discrete: bool,
+        sink: ControllerInputSink,
+        ctx: *mut c_void,
+    ) -> i32 {
+        let Some((rx, ry)) = self.local_to_remote(x, y) else {
+            return 0;
+        };
+        self.input_event(json!({"kind":"wheel","action":"update","x":rx,"y":ry,"dx":dx,"dy":dy,"discrete":discrete,"width":self.remote_w,"height":self.remote_h}), sink, ctx)
+    }
+    fn points(v: &Value, key: &str) -> Option<Vec<Pt>> {
+        v.get(key)?
+            .as_array()?
+            .iter()
+            .map(|p| {
+                let object = p.as_object()?;
+                if !object
+                    .keys()
+                    .all(|k| matches!(k.as_str(), "id" | "x" | "y"))
+                {
+                    return None;
+                }
+                let _ = p.get("id")?.as_i64()?;
+                let x = p.get("x")?.as_f64()?;
+                let y = p.get("y")?.as_f64()?;
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || x.abs() > 1_000_000.0
+                    || y.abs() > 1_000_000.0
+                {
+                    return None;
+                }
+                Some(Pt { x, y })
+            })
+            .collect()
+    }
+    fn centroid(points: &[Pt]) -> Pt {
+        let n = points.len() as f64;
+        Pt {
+            x: points.iter().map(|p| p.x).sum::<f64>() / n,
+            y: points.iter().map(|p| p.y).sum::<f64>() / n,
+        }
+    }
+    fn distance(points: &[Pt]) -> f64 {
+        if points.len() < 2 {
+            0.0
+        } else {
+            ((points[0].x - points[1].x).powi(2) + (points[0].y - points[1].y).powi(2)).sqrt()
+        }
+    }
+    fn touch(&mut self, value: &Value, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
+        let action = value.get("action").and_then(Value::as_str).unwrap_or("");
+        let Some(points) = Self::points(value, "points") else {
+            return 1;
+        };
+        let Some(changed) = Self::points(value, "changedPoints") else {
+            return 1;
+        };
+        let Some(time) = value.get("time").and_then(Value::as_u64) else {
+            return 1;
+        };
+        if !matches!(action, "down" | "up" | "move" | "cancel")
+            || points.len() > 16
+            || changed.len() > 16
+        {
+            return 1;
+        }
+        if action == "cancel" {
+            self.cancel(Some(sink), ctx);
+            return 0;
+        }
+        if !self.valid {
+            return 0;
+        }
+        if self.touch_mode {
+            return self.pointer_touch(action, &points, &changed, time, sink, ctx);
+        }
+        if points.len() >= 3 {
+            self.gesture.suppress = true;
+            self.gesture.single = None;
+            self.cancel_input(sink, ctx);
+            self.gesture
+                .multi
+                .get_or_insert_with(Default::default)
+                .third = true;
+            return if action == "up" && points.is_empty() {
+                0
+            } else {
+                0
+            };
+        }
+        if points.len() >= 2 {
+            if self.gesture.multi.is_none() {
+                self.gesture.single = None;
+                self.gesture.suppress = true;
+                let c = Self::centroid(&points);
+                let d = Self::distance(&points);
+                self.gesture.multi = Some(Multi {
+                    start_centroid: c,
+                    last_centroid: c,
+                    start_distance: d,
+                    last_distance: d,
+                    started: time,
+                    ..Default::default()
+                });
+                self.cancel_input(sink, ctx);
+                return 0;
+            }
+            let Some(mut m) = self.gesture.multi.take() else {
+                return 0;
+            };
+            let c = Self::centroid(&points);
+            let d = Self::distance(&points);
+            let delta_c =
+                ((c.x - m.start_centroid.x).powi(2) + (c.y - m.start_centroid.y).powi(2)).sqrt();
+            let dist_change = (d - m.start_distance).abs();
+            if !m.pinch
+                && (dist_change >= 8.0
+                    || (m.start_distance > 0.0 && dist_change >= m.start_distance * 0.05))
+            {
+                m.pinch = true;
+            }
+            if m.pinch {
+                let factor = if m.last_distance > 0.0 {
+                    d / m.last_distance
+                } else {
+                    1.0
+                };
+                let focal = c;
+                let focal_remote = self.local_to_remote(focal.x, focal.y);
+                self.zoom = (self.zoom * factor).clamp(1.0, 10.0);
+                if let Some((rx, ry)) = focal_remote {
+                    self.image_x = focal.x - rx * self.scale();
+                    self.image_y = focal.y - ry * self.scale();
+                    self.clamp_image();
+                }
+                m.last_distance = d;
+                m.last_centroid = c;
+                self.gesture.multi = Some(m);
+                return 0;
+            }
+            if delta_c >= 8.0 {
+                m.scroll = true;
+                let dx = ((m.last_centroid.x - c.x) / 24.0).trunc() as i32;
+                let dy = ((c.y - m.last_centroid.y) / 24.0).trunc() as i32;
+                if dx != 0 || dy != 0 {
+                    let status = self.wheel(c.x, c.y, dx as f64, dy as f64, true, sink, ctx);
+                    if status != 0 {
+                        return status;
+                    }
+                    m.last_centroid = c;
+                }
+            }
+            self.gesture.multi = Some(m);
+            return 0;
+        }
+        if let Some(mut m) = self.gesture.multi.take() {
+            if m.pinch && points.len() == 1 {
+                let p = points[0];
+                let dx = p.x - m.last_centroid.x;
+                let dy = p.y - m.last_centroid.y;
+                self.image_x += dx;
+                self.image_y += dy;
+                self.clamp_image();
+                m.last_centroid = p;
+                self.gesture.multi = Some(m);
+                return 0;
+            }
+            if action == "up" && points.is_empty() {
+                let tap = !m.pinch
+                    && !m.scroll
+                    && !m.third
+                    && time.saturating_sub(m.started) <= 300
+                    && ((m.last_centroid.x - m.start_centroid.x).powi(2)
+                        + (m.last_centroid.y - m.start_centroid.y).powi(2))
+                    .sqrt()
+                        < 8.0
+                    && (m.last_distance - m.start_distance).abs() < 8.0;
+                let c = m.start_centroid;
+                self.gesture.multi = None;
+                self.gesture.suppress = false;
+                if tap {
+                    let _ = self.mouse("press", "right", c.x, c.y, sink, ctx);
+                    let _ = self.mouse("release", "right", c.x, c.y, sink, ctx);
+                }
+                return 0;
+            }
+            self.gesture.multi = Some(m);
+            return 0;
+        }
+        if action == "down" && points.len() == 1 {
+            let p = points[0];
+            self.gesture.single = Some(Single {
+                start: p,
+                last: p,
+                time,
+                ..Default::default()
+            });
+            self.gesture.next_tick = time.saturating_add(1000);
+            return 0;
+        }
+        if let Some(mut s) = self.gesture.single.take() {
+            let p = changed
+                .first()
+                .copied()
+                .or_else(|| points.first().copied())
+                .unwrap_or(s.last);
+            let dx = p.x - s.last.x;
+            let dy = p.y - s.last.y;
+            let total = ((p.x - s.start.x).powi(2) + (p.y - s.start.y).powi(2)).sqrt();
+            if action == "move" {
+                s.last = p;
+                if !s.ready && total > PAN_THRESHOLD {
+                    s.moved = true;
+                    self.gesture.next_tick = 0;
+                    if self.zoom > 1.0 {
+                        self.image_x += dx;
+                        self.image_y += dy;
+                        self.clamp_image();
+                    }
+                } else if s.ready && !s.dragging {
+                    let _ = self.mouse("move", "", s.start.x, s.start.y, sink, ctx);
+                    let _ = self.mouse("press", "left", s.start.x, s.start.y, sink, ctx);
+                    s.dragging = true;
+                } else if s.dragging {
+                    let _ = self.mouse("move", "", p.x, p.y, sink, ctx);
+                }
+            }
+            if action == "up" {
+                if s.dragging {
+                    let _ = self.mouse("release", "left", p.x, p.y, sink, ctx);
+                } else if !s.moved && !s.ready && time.saturating_sub(s.time) < 1000 {
+                    let _ = self.mouse("press", "left", p.x, p.y, sink, ctx);
+                    let _ = self.mouse("release", "left", p.x, p.y, sink, ctx);
+                }
+                self.gesture.next_tick = 0;
+            }
+            if action != "up" {
+                self.gesture.single = Some(s);
+            }
+        }
+        0
+    }
+    fn cancel_input(&mut self, sink: ControllerInputSink, ctx: *mut c_void) {
+        self.release_with(sink, ctx);
+        self.remote_held = false;
+    }
+    fn pointer_touch(
+        &mut self,
+        action: &str,
+        points: &[Pt],
+        changed: &[Pt],
+        time: u64,
+        sink: ControllerInputSink,
+        ctx: *mut c_void,
+    ) -> i32 {
+        if points.len() >= 2 {
+            if self.gesture.multi.is_none() {
+                let c = Self::centroid(points);
+                self.gesture.multi = Some(Multi {
+                    start_centroid: c,
+                    last_centroid: c,
+                    started: time,
+                    ..Default::default()
+                });
+                self.gesture.suppress = true;
+            }
+            return 0;
+        }
+        if action == "up" && points.is_empty() {
+            if let Some(m) = self.gesture.multi.take() {
+                self.gesture.suppress = false;
+                if time.saturating_sub(m.started) <= 300 {
+                    let status =
+                        self.mouse("press", "right", self.cursor_x, self.cursor_y, sink, ctx);
+                    if status != 0 {
+                        return status;
+                    }
+                    let status =
+                        self.mouse("release", "right", self.cursor_x, self.cursor_y, sink, ctx);
+                    if status != 0 {
+                        return status;
+                    }
+                }
+                return 0;
+            }
+        }
+        if action == "down" && points.len() == 1 {
+            let p = points[0];
+            self.gesture.single = Some(Single {
+                start: p,
+                last: p,
+                time,
+                ..Default::default()
+            });
+            self.gesture.next_tick = time + 1000;
+            return 0;
+        }
+        if let Some(mut s) = self.gesture.single.take() {
+            let p = changed
+                .first()
+                .copied()
+                .or_else(|| points.first().copied())
+                .unwrap_or(s.last);
+            if action == "move" {
+                let dx = (p.x - s.last.x) / self.image_w().max(1.0) * self.remote_w;
+                let dy = (p.y - s.last.y) / self.image_h().max(1.0) * self.remote_h;
+                if dx != 0.0 || dy != 0.0 && self.enabled {
+                    let v = json!({"kind":"move_relative","dx":dx.round() as i32,"dy":dy.round() as i32});
+                    let _ = self.emit_raw(v, sink, ctx);
+                }
+                s.last = p;
+            }
+            if action == "up" && !s.moved {
+                let _ = self.mouse("press", "left", self.cursor_x, self.cursor_y, sink, ctx);
+                let _ = self.mouse("release", "left", self.cursor_x, self.cursor_y, sink, ctx);
+            }
+            if action != "up" {
+                self.gesture.single = Some(s);
+            }
+        }
+        0
+    }
+    fn emit_raw(&mut self, v: Value, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
+        if !self.enabled || !self.valid {
+            return 0;
+        }
+        let Ok(raw) = CString::new(v.to_string()) else {
+            return 1;
+        };
+        unsafe { (sink)(ctx, raw.as_ptr()) }
+    }
+    fn tick(&mut self, time: u64, _sink: ControllerInputSink, _ctx: *mut c_void) -> i32 {
+        if let Some(mut s) = self.gesture.single.take() {
+            if !s.ready && time >= s.time + 1000 && !s.moved {
+                s.ready = true;
+                self.gesture.next_tick = 0;
+            }
+            self.gesture.single = Some(s);
+        }
+        0
+    }
+    fn event(&mut self, v: Value, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
+        let Some(kind) = v.get("kind").and_then(Value::as_str) else {
+            return 1;
+        };
+        let allowed = match kind {
+            "configure" => &[
+                "kind",
+                "viewportWidth",
+                "viewportHeight",
+                "remoteWidth",
+                "remoteHeight",
+                "insets",
+                "padding",
+                "enabled",
+            ][..],
+            "touch" => &["kind", "action", "points", "changedPoints", "time"][..],
+            "tick" => &["kind", "time"][..],
+            "touch_mode" => &["kind", "mode"][..],
+            "reset_view" | "release" => &["kind"][..],
+            "mouse" => &["kind", "action", "button", "x", "y"][..],
+            "wheel" => &["kind", "action", "x", "y", "dx", "dy", "discrete"][..],
+            "key" => &["kind", "action", "physicalCode", "code"][..],
+            "text" => &["kind", "text"][..],
+            _ => return 1,
+        };
+        if !Self::fields_only(&v, allowed) {
+            return 1;
+        }
+        match kind {
+            "configure" => {
+                serde_json::from_value(v).map_or(1, |c| self.configure(c, Some(sink), ctx))
+            }
+            "touch" => self.touch(&v, sink, ctx),
+            "tick" => {
+                let Some(time) = v.get("time").and_then(Value::as_u64) else {
+                    return 1;
+                };
+                self.tick(time, sink, ctx)
+            }
+            "reset_view" => {
+                self.cancel(Some(sink), ctx);
+                self.zoom = 1.0;
+                self.image_x = self.safe_x + (self.safe_w - self.image_w()) / 2.0;
+                self.image_y = self.safe_y + (self.safe_h - self.image_h()) / 2.0;
+                self.clamp_image();
+                0
+            }
+            "touch_mode" => match v.get("mode").and_then(Value::as_str) {
+                Some("pointer") => {
+                    self.touch_mode = true;
+                    0
+                }
+                Some("direct") => {
+                    self.touch_mode = false;
+                    0
+                }
+                _ => 1,
+            },
+            "mouse" => {
+                if !self.enabled {
+                    return 0;
+                };
+                let x = v.get("x").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                let y = v.get("y").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                let action = v.get("action").and_then(Value::as_str).unwrap_or("");
+                let button = v.get("button").and_then(Value::as_str).unwrap_or("");
+                if !matches!(action, "press" | "release" | "move" | "cancel")
+                    || !matches!(button, "left" | "right" | "middle" | "")
+                    || !x.is_finite()
+                    || !y.is_finite()
+                {
+                    1
+                } else {
+                    self.mouse(action, button, x, y, sink, ctx)
+                }
+            }
+            "wheel" => {
+                if !self.enabled {
+                    return 0;
+                };
+                let action = v.get("action").and_then(Value::as_str).unwrap_or("");
+                let x = v.get("x").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                let y = v.get("y").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                let dx = v.get("dx").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                let dy = v.get("dy").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                let discrete = v.get("discrete").and_then(Value::as_bool).unwrap_or(false);
+                if !matches!(action, "begin" | "update" | "")
+                    || ![x, y, dx, dy].iter().any(|n| !n.is_finite())
+                {
+                    1
+                } else {
+                    self.wheel(x, y, dx, dy, discrete, sink, ctx)
+                }
+            }
+            "key" | "text" => {
+                if !self.enabled {
+                    return 0;
+                };
+                self.input_event(v, sink, ctx)
+            }
+            "release" => {
+                self.cancel(Some(sink), ctx);
+                0
+            }
+            _ => 1,
+        }
+    }
+    fn state(&self) -> Value {
+        let gesture = if self.gesture.single.as_ref().map_or(false, |s| s.dragging) {
+            "dragging"
+        } else if self.gesture.single.as_ref().map_or(false, |s| s.ready) {
+            "dragReady"
+        } else if self.gesture.multi.as_ref().map_or(false, |m| m.pinch) {
+            "pinch"
+        } else if self.gesture.multi.as_ref().map_or(false, |m| m.scroll) {
+            "scroll"
+        } else if self.gesture.multi.is_some() {
+            "multi"
+        } else {
+            "idle"
+        };
+        json!({"zoom":self.zoom,"imageX":self.image_x,"imageY":self.image_y,"imageWidth":self.image_w(),"imageHeight":self.image_h(),"safeX":self.safe_x,"safeY":self.safe_y,"safeWidth":self.safe_w,"safeHeight":self.safe_h,"dragReady":self.gesture.single.as_ref().map_or(false,|s|s.ready),"resetVisible":self.zoom>1.0,"touchMode":if self.touch_mode{"pointer"}else{"direct"},"inputEnabled":self.enabled && self.valid,"gesture":gesture,"nextTickMs":self.gesture.next_tick})
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn controller_canvas_new_v1() -> *mut ControllerCanvas {
+    Box::into_raw(Box::new(ControllerCanvas::new()))
+}
+
+#[no_mangle]
+pub extern "C" fn controller_canvas_event_v1(
+    canvas: *mut ControllerCanvas,
+    event_json: *const c_char,
+    sink: Option<ControllerInputSink>,
+    ctx: *mut c_void,
+) -> i32 {
+    if canvas.is_null() || event_json.is_null() {
+        return 1;
+    }
+    let Some(sink) = sink else { return 1 };
+    let raw = unsafe { CStr::from_ptr(event_json) }.to_bytes();
+    if raw.len() > MAX_EVENT_BYTES {
+        return 1;
+    }
+    let Ok(v) = serde_json::from_slice::<Value>(raw) else {
+        return 1;
+    };
+    unsafe { (*canvas).event(v, sink, ctx) }
+}
+
+#[no_mangle]
+pub extern "C" fn controller_canvas_state_v1(canvas: *mut ControllerCanvas) -> *mut c_char {
+    if canvas.is_null() {
+        return ptr::null_mut();
+    }
+    CString::new(unsafe { (*canvas).state().to_string() })
+        .map_or(ptr::null_mut(), CString::into_raw)
+}
+
+#[no_mangle]
+pub extern "C" fn controller_canvas_free_v1(canvas: *mut ControllerCanvas) {
+    if !canvas.is_null() {
+        unsafe {
+            let c = Box::from_raw(canvas);
+            controller_input_free_v1(c.input);
+        }
+    }
+}

@@ -24,6 +24,7 @@ function setup(initialControl = true, accessMode = '') {
     focus: () => {},
     openKeyboard: () => input.keyboardChanged(true, ''),
     closeKeyboard: () => input.keyboardChanged(false, ''),
+    canvasState: () => '{}',
     changed: () => {}
   }, initialControl, accessMode);
   const screen = new ScreenState();
@@ -88,4 +89,27 @@ test('native failure, view-only, revocation and hidden sessions stop every input
     assert.equal(trusted.input.state.ready, false);
     assert.deepEqual(trusted.enabled, []);
   }
+});
+
+test('canvas viewport configuration is emitted with remote dimensions and reset view is explicit', () => {
+  const h = setup();
+  h.grant();
+  h.input.setViewport(400, 300, 1920, 1080);
+  const configure = h.events.at(-1);
+  assert.deepEqual(configure, {
+    kind: 'configure', viewportWidth: 400, viewportHeight: 300,
+    remoteWidth: 1920, remoteHeight: 1080,
+    insets: { left: 0, top: 0, right: 0, bottom: 0 }, padding: 24, enabled: true
+  });
+  h.input.resetView();
+  assert.deepEqual(h.events.at(-1), { kind: 'reset_view' });
+});
+
+test('canvas state can expose zoom and drag readiness without changing key/text routing', () => {
+  const h = setup();
+  h.grant();
+  h.input.canvasState({ zoom: 2, resetVisible: true, dragReady: true });
+  assert.deepEqual(h.input.state.canvas, { zoom: 2, resetVisible: true, dragReady: true });
+  h.input.send({ kind: 'text', text: '仍走文字通道' });
+  assert.deepEqual(h.events.at(-1), { kind: 'text', text: '仍走文字通道' });
 });

@@ -1,5 +1,7 @@
 # 项目进度
 
+最新更新（2026-10-08，触屏展示与输入法修正）：共享 Rust 画布引擎已接入 `SafeRect`、1.0x—10.0x 本地缩放、黑边命中过滤、旋转后保留缩放比例与画布中心、单指画布平移、1 秒长按拖动准备、双指右键/滚轮/捏合和浮动还原按钮；鸿蒙 NAPI/HAP 已接线。当前鸿蒙传入固定交互 padding，系统状态栏/手势区 insets 仍为 0，待真机 API 接线。系统输入法功能键已区分 `NONE`、`NEXT`、`PREVIOUS` 和 Enter 类动作，不再把所有功能键发送成 Enter。Rust 核心 26 项库测试、画布 3 项测试、鸿蒙 22 项模型/接线测试、HAP 构建和模拟器安装启动通过。Flutter 画布接线和 HarmonyOS 6.1 真机触屏验收仍待完成。
+
 键盘核查补充（2026-10-07）：用户报告星闪键盘 Alt+Tab 被鸿蒙系统处理。官方文档确认它属于普通组件禁止绑定的组合键；已为普通原始按键增加 pre-IME 接线，IME 模式只发送确认文字。完整系统键捕获需 API12 interceptor 及 INTERCEPT_INPUT_EVENT 受限审批/签名权限，目前尚未接入，不能宣称 Alt+Tab 已修复。已新增 [输入流向图](INPUT-FLOW.md) 与 [官方文档核查](research/2026-10-07-harmony-keyboard-routing.md)。
 
 最新更新（2026-10-07，跨平台共享输入）：用户要求输入架构覆盖其他移动端与 Windows。已将触屏/鼠标/键盘交互算法、坐标、滚轮余量、按键保持和 Unicode 分块从鸿蒙 TypeScript 迁入共享 Rust 引擎，通过版本化 C ABI 提供。鸿蒙正式 NAPI 路径已接线；新增 Flutter/Dart FFI 和事件适配，在 Windows 加载真实 DLL 验证通过。原鸿蒙手势算法文件已移除，UI 层只保留呈现和平台接线。核心 111 项、鸿蒙 20 项、Flutter 真库 3 项通过；双 OHOS ABI/HAP 构建及模拟器覆盖安装/启动通过。Android/iOS 原生构建、打包、IME/生命周期接线和真机验证，以及完整 Windows 控制端 UI 仍待后续；Windows 被控端执行角色独立。见 [SPEC-004](specs/004-cross-platform-input.md)。

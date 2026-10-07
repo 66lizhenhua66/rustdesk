@@ -9,6 +9,19 @@ export class InputSessionState {
   canControl: boolean = false;
   keyboardOpen: boolean = false;
   notice: string = '';
+  zoom: number = 1;
+  imageX: number = 0;
+  imageY: number = 0;
+  imageWidth: number = 0;
+  imageHeight: number = 0;
+  safeX: number = 0;
+  safeY: number = 0;
+  safeWidth: number = 0;
+  safeHeight: number = 0;
+  dragReady: boolean = false;
+  resetVisible: boolean = false;
+  gesture: string = 'idle';
+  canvas: { zoom: number, resetVisible: boolean, dragReady: boolean } = { zoom: 1, resetVisible: false, dragReady: false };
 }
 
 export interface InputSessionHost {
@@ -20,6 +33,7 @@ export interface InputSessionHost {
   focus(): void;
   openKeyboard(): void;
   closeKeyboard(): void;
+  canvasState(): string;
   changed(state: InputSessionState): void;
 }
 
@@ -32,9 +46,12 @@ export class SessionInputController {
   private visible: boolean = false;
   private width: number = 0;
   private height: number = 0;
+  private remoteWidth: number = 0;
+  private remoteHeight: number = 0;
   private keyboardOpen: boolean = false;
   private notice: string = '';
   private wasReady: boolean = false;
+  private holdTimer: number = -1;
 
   constructor(host: InputSessionHost, initialControl: boolean = true, accessMode: string = '') {
     this.host = host;
@@ -46,6 +63,7 @@ export class SessionInputController {
   update(screen: ScreenState, visible: boolean): void {
     this.screen = screen;
     this.visible = visible;
+    this.configureCanvas();
     if (!visible || screen.phase === 'ended' || screen.phase === 'failed' || screen.phase === 'idle') {
       this.stop();
       return;
@@ -62,12 +80,60 @@ export class SessionInputController {
     const ready = this.ready();
     if (ready && !this.wasReady && !this.keyboardOpen) { this.focus(); }
     this.wasReady = ready;
+    this.configureCanvas();
     this.publish();
   }
 
-  setViewport(width: number, height: number): void {
+  setViewport(width: number, height: number, remoteWidth: number = this.remoteWidth,
+    remoteHeight: number = this.remoteHeight): void {
     this.width = width;
     this.height = height;
+    this.remoteWidth = remoteWidth;
+    this.remoteHeight = remoteHeight;
+    this.configureCanvas();
+  }
+
+  private configureCanvas(): void {
+    const remoteWidth = this.remoteWidth > 0 ? this.remoteWidth : this.screen.width;
+    const remoteHeight = this.remoteHeight > 0 ? this.remoteHeight : this.screen.height;
+    if (this.width <= 0 || this.height <= 0 || remoteWidth <= 0 || remoteHeight <= 0) { return; }
+    this.host.sendEvent(JSON.stringify({ kind: 'configure', viewportWidth: this.width,
+      viewportHeight: this.height, remoteWidth: remoteWidth, remoteHeight: remoteHeight,
+      insets: { left: 0, top: 0, right: 0, bottom: 0 }, padding: 24, enabled: this.ready() }));
+    this.refreshCanvasState();
+  }
+
+  private refreshCanvasState(): void {
+    try {
+      const value = JSON.parse(this.host.canvasState());
+      if (typeof value.zoom === 'number') {
+        this.state.zoom = value.zoom; this.state.imageX = value.imageX ?? 0; this.state.imageY = value.imageY ?? 0;
+        this.state.imageWidth = value.imageWidth ?? 0; this.state.imageHeight = value.imageHeight ?? 0;
+        this.state.safeX = value.safeX ?? 0; this.state.safeY = value.safeY ?? 0;
+        this.state.safeWidth = value.safeWidth ?? 0; this.state.safeHeight = value.safeHeight ?? 0;
+        this.state.dragReady = value.dragReady === true; this.state.resetVisible = value.resetVisible === true;
+        this.state.gesture = value.gesture ?? 'idle';
+      }
+    } catch { /* State remains usable while the native canvas is unavailable. */ }
+  }
+
+  resetView(): void {
+    if (!this.ready()) { return; }
+    this.dispatch({ kind: 'reset_view' });
+    this.refreshCanvasState();
+    this.publish();
+  }
+
+  canvasState(value?: Record<string, Object>): void {
+    if (value) {
+      this.state.zoom = Number(value.zoom ?? 1);
+      this.state.resetVisible = value.resetVisible === true;
+      this.state.dragReady = value.dragReady === true;
+      this.publish();
+      return;
+    }
+    this.refreshCanvasState();
+    this.publish();
   }
 
   selectControl(enabled: boolean): void {
@@ -117,9 +183,21 @@ export class SessionInputController {
   touch(event: TouchInputEvent): boolean {
     if (!this.ready()) { return false; }
     if (event.action === 'down' && event.points.length <= 1 && event.changedPoints.length > 0) { this.focus(); }
+    if (event.action === 'down') {
+      this.clearHoldTimer();
+      this.holdTimer = setTimeout(() => {
+        this.dispatch({ kind: 'tick', time: Date.now() });
+        this.refreshCanvasState(); this.publish();
+      }, 1000);
+    } else if (event.action === 'up' || event.action === 'cancel') { this.clearHoldTimer(); }
     this.dispatch({ kind: 'touch', action: event.action, points: event.points, changedPoints: event.changedPoints,
       time: event.time, width: this.width, height: this.height });
+    this.refreshCanvasState(); this.publish();
     return true;
+  }
+
+  private clearHoldTimer(): void {
+    if (this.holdTimer >= 0) { clearTimeout(this.holdTimer); this.holdTimer = -1; }
   }
 
   mouse(event: MouseInputEvent): boolean {
@@ -181,6 +259,11 @@ export class SessionInputController {
     state.canControl = !this.accessMode && canRequestSystemInput(this.screen, this.visible);
     state.keyboardOpen = this.keyboardOpen;
     state.notice = this.notice;
+    state.zoom = this.state.zoom; state.imageX = this.state.imageX; state.imageY = this.state.imageY;
+    state.imageWidth = this.state.imageWidth; state.imageHeight = this.state.imageHeight;
+    state.safeX = this.state.safeX; state.safeY = this.state.safeY; state.safeWidth = this.state.safeWidth; state.safeHeight = this.state.safeHeight;
+    state.dragReady = this.state.dragReady; state.resetVisible = this.state.resetVisible; state.gesture = this.state.gesture;
+    state.canvas = { zoom: state.zoom, resetVisible: state.resetVisible, dragReady: state.dragReady };
     this.state = state;
     this.host.changed(state);
   }

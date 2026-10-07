@@ -39,6 +39,7 @@ declare const controller: {
   sendInput(taskId: number, commandJson: string): number;
   sendInputEvent(taskId: number, eventJson: string): number;
   resetInput(taskId: number): void;
+  canvasState(taskId: number): string;
   setInputEnabled(taskId: number, enabled: boolean): number;
   cancel(taskId: number): boolean;
   dispose(): void;
