@@ -3,6 +3,7 @@ pub mod access;
 pub mod access_proof;
 pub use protos::message as message_proto;
 mod input;
+pub mod interaction;
 pub mod meta;
 mod rendezvous;
 pub mod session;

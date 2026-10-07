@@ -4,6 +4,8 @@
 
 上位规格：[产品需求与架构](../SPEC.md)。源码复用依据：[控制端可移植性调查](../research/2026-09-30-controller-portability-audit.md)。本次只确定选型，不表示已构建出鸿蒙客户端。
 
+2026-10-07 输入职责细化：共享范围新增手势识别、坐标归一化、滚轮余量、按键保持和确认文本分块，由同一 Rust 实现经 C ABI 提供。鸿蒙 NAPI 已接线，Flutter 适配覆盖后续 Android/iOS 与 Windows 控制端；当前跨语言验证在 Windows 完成，各平台实际交付边界见 [SPEC-004](004-cross-platform-input.md)。
+
 ## 1. 已确定的选择
 
 **鸿蒙端采用 ArkTS + ArkUI，使用 C++ NAPI 连接版本化 C ABI，复用 RustDesk 的 Rust 会话/协议逻辑。视频显示、音频、输入法、安全存储和生命周期由各平台适配。**

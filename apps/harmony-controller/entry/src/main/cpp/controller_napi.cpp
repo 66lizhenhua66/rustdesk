@@ -10,6 +10,7 @@
 
 #include "controller.h"
 #include "session.h"
+#include "input.h"
 #include "video_renderer.h"
 
 namespace {
@@ -17,6 +18,7 @@ struct Job : std::enable_shared_from_this<Job> {
     uint32_t id = 0;
     ControllerProbe *probe = nullptr;
     ControllerSession *session = nullptr;
+    ControllerInput *input = nullptr;
     bool persistent = false;
     std::unique_ptr<VideoRenderer> video;
     uint64_t notifiedVideoFrames = 0;
@@ -24,6 +26,7 @@ struct Job : std::enable_shared_from_this<Job> {
     std::atomic<bool> closing{false};
     std::mutex delivery;
     ~Job() {
+        controller_input_free_v1(input);
         controller_probe_destroy(probe);
         controller_session_destroy(session);
     }
@@ -583,8 +586,56 @@ napi_value SetInputEnabled(napi_env env, napi_callback_info info) {
         Error(env, "INVALID_ARGUMENT", "Expected task ID and input enable boolean"); return nullptr;
     }
     auto job = ActiveSession(env, id);
+    if (job && !enabled) { controller_input_reset_v1(job->input); }
     const int32_t status = job ? controller_session_set_input_enabled_v1(job->session, static_cast<uint8_t>(enabled)) : 1;
     napi_create_int32(env, status, &result);
+    return result;
+}
+
+int32_t QueueSystemInput(void *context, const char *command) {
+    return controller_session_send_input_v1(static_cast<ControllerSession *>(context), command);
+}
+
+napi_value SendSystemInputEvent(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {}, result = nullptr;
+    uint32_t id = 0;
+    std::string event;
+    WipeString wipe{event};
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 2 ||
+        !ReadBoundedInteger(env, args[0], 1, UINT32_MAX, id) ||
+        !ReadString(env, args[1], event, 8192) || event.empty()) {
+        Error(env, "INVALID_ARGUMENT", "Expected task ID and bounded standard input event JSON"); return nullptr;
+    }
+    auto job = ActiveSession(env, id);
+    int32_t status = 1;
+    if (job) {
+        if (!job->input) { job->input = controller_input_new_v1(); }
+        if (job->input) {
+            status = controller_input_event_v1(job->input, event.c_str(), QueueSystemInput, job->session);
+        }
+        if (status != 0) {
+            controller_input_reset_v1(job->input);
+            if (controller_session_set_input_enabled_v1(job->session, 0) != 0) {
+                controller_session_cancel(job->session);
+            }
+        }
+    }
+    napi_create_int32(env, status, &result);
+    return result;
+}
+
+napi_value ResetSystemInput(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value arg = nullptr, result = nullptr;
+    uint32_t id = 0;
+    if (napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr) != napi_ok || argc != 1 ||
+        !ReadBoundedInteger(env, arg, 1, UINT32_MAX, id)) {
+        Error(env, "INVALID_ARGUMENT", "Expected a task ID"); return nullptr;
+    }
+    auto job = ActiveSession(env, id);
+    if (job) { controller_input_reset_v1(job->input); }
+    napi_get_undefined(env, &result);
     return result;
 }
 
@@ -636,6 +687,8 @@ napi_value Init(napi_env env, napi_value exports) {
         {"sendPointer", nullptr, SendPointer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendText", nullptr, SendText, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendInput", nullptr, SendSystemInput, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"sendInputEvent", nullptr, SendSystemInputEvent, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"resetInput", nullptr, ResetSystemInput, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setInputEnabled", nullptr, SetInputEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"dispose", nullptr, Dispose, nullptr, nullptr, nullptr, napi_default, nullptr},

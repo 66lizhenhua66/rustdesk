@@ -288,6 +288,12 @@ fn semantic_key(code: &str) -> Option<Held> {
     if code.len() == 6 && code.starts_with("Digit") && code.as_bytes()[5].is_ascii_digit() {
         return Some(Held::Key(u16::from(code.as_bytes()[5]), false));
     }
+    if code.len() == 7 && code.starts_with("Numpad") && code.as_bytes()[6].is_ascii_digit() {
+        return Some(Held::Key(
+            0x60 + u16::from(code.as_bytes()[6] - b'0'),
+            false,
+        ));
+    }
     let (key, extended) = match code {
         "Backspace" => (0x08, false),
         "Tab" => (0x09, false),
@@ -306,6 +312,41 @@ fn semantic_key(code: &str) -> Option<Held> {
         "Shift" => (0xA0, false),
         "Control" => (0xA2, false),
         "Alt" => (0xA4, false),
+        "F1" => (0x70, false),
+        "F2" => (0x71, false),
+        "F3" => (0x72, false),
+        "F4" => (0x73, false),
+        "F5" => (0x74, false),
+        "F6" => (0x75, false),
+        "F7" => (0x76, false),
+        "F8" => (0x77, false),
+        "F9" => (0x78, false),
+        "F10" => (0x79, false),
+        "F11" => (0x7A, false),
+        "F12" => (0x7B, false),
+        "Minus" => (0xBD, false),
+        "Equal" => (0xBB, false),
+        "BracketLeft" => (0xDB, false),
+        "BracketRight" => (0xDD, false),
+        "Backslash" => (0xDC, false),
+        "Semicolon" => (0xBA, false),
+        "Quote" => (0xDE, false),
+        "Backquote" => (0xC0, false),
+        "Comma" => (0xBC, false),
+        "Period" => (0xBE, false),
+        "Slash" => (0xBF, false),
+        "CapsLock" => (0x14, false),
+        "Insert" => (0x2D, true),
+        "NumLock" => (0x90, true),
+        "ScrollLock" => (0x91, false),
+        "MetaLeft" => (0x5B, true),
+        "MetaRight" => (0x5C, true),
+        "NumpadAdd" => (0x6B, false),
+        "NumpadSubtract" => (0x6D, false),
+        "NumpadMultiply" => (0x6A, false),
+        "NumpadDivide" => (0x6F, true),
+        "NumpadDecimal" => (0x6E, false),
+        "NumpadEnter" => (0x0D, true),
         _ => return None,
     };
     Some(Held::Key(key, extended))
@@ -825,5 +866,91 @@ mod tests {
         let count = events.borrow().len();
         session.apply(&[1; 16], Command::KeepAlive).unwrap();
         assert_eq!(events.borrow().len(), count);
+    }
+
+    #[test]
+    fn physical_keys_inject_matching_windows_down_and_up_events() {
+        let owner = AtomicI32::new(0);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut session = Session::new(1, true, &owner, injector(&events));
+        session.grant([1; 16]).unwrap();
+        for (code, key, extended) in [
+            ("F1", 0x70, false),
+            ("F2", 0x71, false),
+            ("F3", 0x72, false),
+            ("F4", 0x73, false),
+            ("F5", 0x74, false),
+            ("F6", 0x75, false),
+            ("F7", 0x76, false),
+            ("F8", 0x77, false),
+            ("F9", 0x78, false),
+            ("F10", 0x79, false),
+            ("F11", 0x7A, false),
+            ("F12", 0x7B, false),
+            ("Minus", 0xBD, false),
+            ("Equal", 0xBB, false),
+            ("BracketLeft", 0xDB, false),
+            ("BracketRight", 0xDD, false),
+            ("Backslash", 0xDC, false),
+            ("Semicolon", 0xBA, false),
+            ("Quote", 0xDE, false),
+            ("Backquote", 0xC0, false),
+            ("Comma", 0xBC, false),
+            ("Period", 0xBE, false),
+            ("Slash", 0xBF, false),
+            ("CapsLock", 0x14, false),
+            ("Insert", 0x2D, true),
+            ("NumLock", 0x90, true),
+            ("ScrollLock", 0x91, false),
+            ("MetaLeft", 0x5B, true),
+            ("MetaRight", 0x5C, true),
+            ("Numpad0", 0x60, false),
+            ("Numpad1", 0x61, false),
+            ("Numpad2", 0x62, false),
+            ("Numpad3", 0x63, false),
+            ("Numpad4", 0x64, false),
+            ("Numpad5", 0x65, false),
+            ("Numpad6", 0x66, false),
+            ("Numpad7", 0x67, false),
+            ("Numpad8", 0x68, false),
+            ("Numpad9", 0x69, false),
+            ("NumpadAdd", 0x6B, false),
+            ("NumpadSubtract", 0x6D, false),
+            ("NumpadMultiply", 0x6A, false),
+            ("NumpadDivide", 0x6F, true),
+            ("NumpadDecimal", 0x6E, false),
+            ("NumpadEnter", 0x0D, true),
+        ] {
+            events.borrow_mut().clear();
+            for down in [true, false] {
+                assert!(session
+                    .apply(&[1; 16], Command::Key(code.into(), down))
+                    .unwrap());
+            }
+            assert_eq!(
+                *events.borrow(),
+                [
+                    Action::Press(Held::Key(key, extended), true),
+                    Action::Press(Held::Key(key, extended), false),
+                ],
+                "{code}"
+            );
+        }
+        for code in [
+            "F0",
+            "F13",
+            "F01",
+            "Numpad10",
+            "NumpadX",
+            "CtrlAltDel",
+            "Unknown",
+        ] {
+            assert!(
+                session
+                    .apply(&[1; 16], Command::Key(code.into(), true))
+                    .is_err(),
+                "{code}"
+            );
+        }
     }
 }

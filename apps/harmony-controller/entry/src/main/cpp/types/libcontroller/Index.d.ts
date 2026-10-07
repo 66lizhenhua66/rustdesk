@@ -37,6 +37,8 @@ declare const controller: {
   sendPointer(taskId: number, x: number, y: number): boolean;
   sendText(taskId: number, text: string): boolean;
   sendInput(taskId: number, commandJson: string): number;
+  sendInputEvent(taskId: number, eventJson: string): number;
+  resetInput(taskId: number): void;
   setInputEnabled(taskId: number, enabled: boolean): number;
   cancel(taskId: number): boolean;
   dispose(): void;

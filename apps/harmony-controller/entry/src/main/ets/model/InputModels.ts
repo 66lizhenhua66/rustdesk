@@ -12,45 +12,42 @@ export interface SystemInputCommand {
   text?: string;
 }
 
-export class PointerDelta {
-  dx: number = 0;
-  dy: number = 0;
+export class SessionInputMode {
+  controlMode: boolean = true;
+  requested: boolean = false;
+  private accessMode: string = '';
+
+  constructor(controlMode: boolean = true, accessMode: string = '') {
+    this.accessMode = accessMode;
+    this.controlMode = controlMode && accessMode.length === 0;
+  }
+
+  requestIfReady(screen: ScreenState, visible: boolean): boolean {
+    if (!this.controlMode || this.accessMode.length > 0 || this.requested ||
+      !canRequestSystemInput(screen, visible)) { return false; }
+    this.requested = true;
+    return true;
+  }
+
+  select(controlMode: boolean): void {
+    this.controlMode = controlMode && this.accessMode.length === 0;
+    this.requested = false;
+  }
+
+  settle(screen: ScreenState): void {
+    if (this.requested && screen.code === 'INPUT_STATE' && !screen.inputGranted) {
+      this.select(false);
+    }
+  }
 }
 
 export function canRequestSystemInput(screen: ScreenState, visible: boolean): boolean {
   return visible && screen.approved && screen.inputSupported &&
+    !screen.accessMode && !screen.requestedAccessMode &&
     screen.phase === 'viewing' && screen.rendered > 0;
 }
 
 export function canSendSystemInput(screen: ScreenState, visible: boolean, controlMode: boolean): boolean {
   return canRequestSystemInput(screen, visible) && controlMode && screen.inputGranted &&
     screen.code !== 'INPUT_ENABLING' && screen.code !== 'INPUT_DISABLING';
-}
-
-export function normalizePointerDelta(dx: number, dy: number, viewWidth: number, viewHeight: number): PointerDelta {
-  const delta = new PointerDelta();
-  if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(viewWidth) ||
-    !Number.isFinite(viewHeight) || viewWidth <= 0 || viewHeight <= 0) { return delta; }
-  delta.dx = Math.sign(dx) * Math.min(65535, Math.round(Math.abs(dx) * 65535 / viewWidth));
-  delta.dy = Math.sign(dy) * Math.min(65535, Math.round(Math.abs(dy) * 65535 / viewHeight));
-  return delta;
-}
-
-export function canSubmitInputText(value: string, previewActive: boolean): boolean {
-  if (previewActive || value.length === 0) { return false; }
-  let bytes = 0;
-  for (let index = 0; index < value.length; index++) {
-    const unit = value.charCodeAt(index);
-    if (unit === 0) { return false; }
-    if (unit < 0x80) { bytes++; }
-    else if (unit < 0x800) { bytes += 2; }
-    else if (unit >= 0xD800 && unit <= 0xDBFF && index + 1 < value.length &&
-      value.charCodeAt(index + 1) >= 0xDC00 && value.charCodeAt(index + 1) <= 0xDFFF) {
-      bytes += 4;
-      index++;
-    } else if (unit >= 0xD800 && unit <= 0xDFFF) { return false; }
-    else { bytes += 3; }
-    if (bytes > 512) { return false; }
-  }
-  return true;
 }

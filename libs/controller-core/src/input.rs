@@ -68,6 +68,7 @@ fn valid_key_code(code: &str) -> bool {
     let bytes = code.as_bytes();
     (bytes.len() == 4 && bytes.starts_with(b"Key") && bytes[3].is_ascii_uppercase())
         || (bytes.len() == 6 && bytes.starts_with(b"Digit") && bytes[5].is_ascii_digit())
+        || (bytes.len() == 7 && bytes.starts_with(b"Numpad") && bytes[6].is_ascii_digit())
         || matches!(
             code,
             "Enter"
@@ -87,6 +88,41 @@ fn valid_key_code(code: &str) -> bool {
                 | "Shift"
                 | "Control"
                 | "Alt"
+                | "F1"
+                | "F2"
+                | "F3"
+                | "F4"
+                | "F5"
+                | "F6"
+                | "F7"
+                | "F8"
+                | "F9"
+                | "F10"
+                | "F11"
+                | "F12"
+                | "Minus"
+                | "Equal"
+                | "BracketLeft"
+                | "BracketRight"
+                | "Backslash"
+                | "Semicolon"
+                | "Quote"
+                | "Backquote"
+                | "Comma"
+                | "Period"
+                | "Slash"
+                | "CapsLock"
+                | "Insert"
+                | "NumLock"
+                | "ScrollLock"
+                | "MetaLeft"
+                | "MetaRight"
+                | "NumpadAdd"
+                | "NumpadSubtract"
+                | "NumpadMultiply"
+                | "NumpadDivide"
+                | "NumpadDecimal"
+                | "NumpadEnter"
         )
 }
 
@@ -372,6 +408,43 @@ mod tests {
             r#"{"kind":"release_all","token":"forged"}"#,
         ] {
             assert!(parse_command(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn physical_keyboard_commands_preserve_codes_and_release_edges() {
+        for code in "F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12
+            Minus Equal BracketLeft BracketRight Backslash Semicolon Quote Backquote Comma Period Slash
+            CapsLock Insert NumLock ScrollLock MetaLeft MetaRight
+            Numpad0 Numpad1 Numpad2 Numpad3 Numpad4 Numpad5 Numpad6 Numpad7 Numpad8 Numpad9
+            NumpadAdd NumpadSubtract NumpadMultiply NumpadDivide NumpadDecimal NumpadEnter"
+            .split_whitespace()
+        {
+            for down in [true, false] {
+                let raw = serde_json::json!({"kind": "key", "code": code, "down": down}).to_string();
+                let command = parse_command(&raw).unwrap_or_else(|_| panic!("Rejected {code}"));
+                let message = command.into_message([7; 16]);
+                let Some(message::message::Union::OrdInputEvent(event)) = message.union else {
+                    panic!("Missing input event for {code}")
+                };
+                assert_eq!(event.grant_token, [7; 16]);
+                let Some(message::ord_input_event::Command::Key(key)) = event.command else {
+                    panic!("Missing key event for {code}")
+                };
+                assert_eq!((key.code.as_str(), key.down), (code, down));
+            }
+        }
+        for code in [
+            "F0",
+            "F13",
+            "F01",
+            "Numpad10",
+            "NumpadX",
+            "CtrlAltDel",
+            "Unknown",
+        ] {
+            let raw = serde_json::json!({"kind": "key", "code": code, "down": true}).to_string();
+            assert!(parse_command(&raw).is_err(), "Accepted {code}");
         }
     }
 

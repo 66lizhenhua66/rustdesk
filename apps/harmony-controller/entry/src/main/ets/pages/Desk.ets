@@ -69,6 +69,8 @@ struct Desk {
   @State private sessionProfile: Profile | undefined = undefined;
   @State private sessionOpen: boolean = false;
   @State private sessionKey: number = 0;
+  @State private enterControl: boolean = true;
+  @State private sessionControl: boolean = true;
   @State private screen: ScreenState = new ScreenState();
   @State private accessBusy: boolean = false;
   @State private accessStatuses: Record<string, AccessStatus> = {};
@@ -406,7 +408,7 @@ struct Desk {
     } finally { this.accessBusy = false; }
   }
 
-  private connect(profile: Profile, accessMode: string = ''): void {
+  private connect(profile: Profile, accessMode: string = '', controlMode: boolean = this.enterControl): void {
     if (this.accessBusy) { this.notice = '正在保存登记凭据，请稍后再连接。'; return; }
     if (screenIsLive(this.screen)) {
       if (this.sessionProfile?.id === profile.id) { this.sessionOpen = true; }
@@ -416,6 +418,7 @@ struct Desk {
     if (!canConnectProfile(profile)) { this.notice = '请完善设备 ID 和可信公钥；ID / 中继还需填写自建服务地址、公钥和中继地址。'; return; }
     this.disconnect('');
     this.currentAccessMode = accessMode;
+    this.sessionControl = !accessMode && controlMode;
     this.pairGrantReceived = false;
     this.pairingSaved = false;
     this.pendingPairConnected = undefined;
@@ -549,10 +552,22 @@ struct Desk {
     }
   }
 
+  private sendSystemInputEvent(event: string): number {
+    if (!this.visible || this.task <= 0 || !canSendSystemInput(this.screen, this.sessionOpen, true)) { return 2; }
+    try { return controller.sendInputEvent(this.task, event); }
+    catch { return 1; }
+  }
+
+  private resetInput(): void {
+    if (this.task <= 0) { return; }
+    try { controller.resetInput(this.task); }
+    catch { this.disconnect('输入状态无法清理，连接已结束。请重新连接。'); }
+  }
+
   private releaseInput(): void {
     if (this.task <= 0) { return; }
     try {
-      const result = controller.sendInput(this.task, '{"kind":"release_all"}');
+      const result = controller.sendInputEvent(this.task, '{"kind":"release"}');
       if (result === 3 || result === 4) {
         this.disconnect('输入释放请求无法提交，连接已结束。请重新连接并等待本机批准。');
       }
@@ -641,13 +656,19 @@ struct Desk {
         Text('●  现场批准').fontSize(12).fontColor('#196B52')
         Text('无人值守 · 未实现').fontSize(11).fontColor('#9CA79F')
       }.width('100%')
-      Text('进入桌面后：仅查看').fontSize(13).fontColor('#53695C')
-      Button(this.profiles.length === 0 ? '添加设备  ＋' : '连接桌面  →', { type: ButtonType.Normal })
+      Row({ space: 10 }) {
+        Text('进入模式').fontSize(13).fontColor('#53695C')
+        Select([{ value: '控制' }, { value: '仅查看' }])
+          .selected(this.enterControl ? 0 : 1).value(this.enterControl ? '控制' : '仅查看')
+          .enabled(!screenIsLive(this.screen))
+          .onSelect((index: number) => { this.enterControl = index === 0; })
+      }.width('100%')
+      Button(this.profiles.length === 0 ? '添加设备  ＋' : screenIsLive(this.screen) && this.sessionProfile?.id === this.selectedId ? '返回会话  →' : '连接桌面  →', { type: ButtonType.Normal })
         .width('100%').height(46).borderRadius(10).backgroundColor('#196B52').fontColor('#FFFFFF').fontSize(14)
         .enabled(!this.loading && !this.saving && this.storeError.length === 0 &&
           (this.profiles.length === 0 || (this.selectedProfile() !== undefined && canConnectProfile(this.selectedProfile()!))))
         .onClick(() => this.connectSelected())
-      Text('每次连接，都由 Windows 本机批准查看。').fontSize(11).fontColor('#778780')
+      Text('Windows 批准连接后，即可按所选模式进入桌面。').fontSize(11).fontColor('#778780')
     }.width('100%').padding(24).alignItems(HorizontalAlign.Start).backgroundColor('#FFFFFF')
       .border({ width: 1, color: '#E4EAE5' }).borderRadius(18).constraintSize({ minHeight: this.windowWidth >= 600 ? 354 : 0 })
   }
@@ -667,12 +688,19 @@ struct Desk {
       }.width('100%')
       Text(profile.name).fontSize(17).fontWeight(FontWeight.Medium).fontColor('#20352F').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
       Text(profile.target).fontSize(13).fontColor('#778780').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text(canConnectProfile(profile) ? (profile.mode === 'direct' ? 'IP 直连' : profile.mode === 'id' ? 'ID 自动连接' : '强制中继') + ' · 现场批准后仅查看' : '请完善连接配置与可信身份')
+      Text(canConnectProfile(profile) ? (profile.mode === 'direct' ? 'IP 直连' : profile.mode === 'id' ? 'ID 自动连接' : '强制中继') + ' · 现场批准后进入桌面' : '请完善连接配置与可信身份')
         .fontSize(11).fontColor('#778780')
       Text(this.accessStatusLabel(profile)).fontSize(11).fontColor('#196B52')
       Flex({ wrap: FlexWrap.Wrap }) {
-        Button('连接', { type: ButtonType.Normal }).height(44).borderRadius(10).backgroundColor('#E5F2E9').fontColor('#196B52').fontSize(13)
-          .margin({ right: 8, bottom: 4 }).enabled(canConnectProfile(profile) && !this.saving && !this.accessBusy).onClick(() => this.connect(profile))
+        if (screenIsLive(this.screen) && this.sessionProfile?.id === profile.id) {
+          Button('返回会话', { type: ButtonType.Normal }).height(44).borderRadius(10).backgroundColor('#E5F2E9').fontColor('#196B52').fontSize(13)
+            .margin({ right: 8, bottom: 4 }).onClick(() => this.connect(profile))
+        } else {
+          Button('控制', { type: ButtonType.Normal }).height(44).borderRadius(10).backgroundColor('#E5F2E9').fontColor('#196B52').fontSize(13)
+            .margin({ right: 8, bottom: 4 }).enabled(canConnectProfile(profile) && !this.saving && !this.accessBusy).onClick(() => this.connect(profile, '', true))
+          Button('仅查看', { type: ButtonType.Normal }).height(44).borderRadius(10).backgroundColor('#F6F8F5').fontColor('#53695C').fontSize(13)
+            .margin({ right: 8, bottom: 4 }).enabled(canConnectProfile(profile) && !this.saving && !this.accessBusy).onClick(() => this.connect(profile, '', false))
+        }
         Button('登记只读访问', { type: ButtonType.Normal }).height(44).borderRadius(10).backgroundColor('#E5F2E9').fontColor('#196B52').fontSize(13)
           .margin({ right: 8, bottom: 4 }).enabled(canConnectProfile(profile) && !this.saving && !this.accessBusy)
           .onClick(() => { this.connectTrusted(profile, 'pair'); })
@@ -771,8 +799,8 @@ struct Desk {
     }.width('100%').padding(24).alignItems(HorizontalAlign.Start).backgroundColor('#FFFFFF').borderRadius(18)
     Column({ space: 4 }) {
       Text('远程桌面').fontSize(19).fontWeight(FontWeight.Medium).fontColor('#20352F')
-      this.setting('进入模式', '默认仅查看；接入批准后在控制端开关键鼠')
-      this.setting('文字输入', '在键盘面板选词并确认发送；不发送输入法预编辑文本')
+      this.setting('进入模式', '默认控制，可选仅查看；批准后直接在远程画面操作')
+      this.setting('文字输入', '外接键盘直接输入；键盘按钮调起系统输入法，确认文字后自动发送')
       this.setting('画面显示', '保持比例，适应窗口；单主屏')
       this.setting('画面质量', 'VP8 软件视频 · 最大 1280 × 720 · 约 8 fps 上限；画质切换尚未实现')
       this.setting('文件、剪贴板与声音', '尚未实现，不随连接自动开放')
@@ -908,14 +936,15 @@ struct Desk {
       if (this.sessionProfile) {
         ForEach([this.sessionKey], (_key: number) => {
           RemoteSession({ screen: this.screen, deviceName: this.sessionProfile?.name ?? '', endpoint: this.sessionProfile?.target ?? '',
-            accessMode: this.currentAccessMode,
+            accessMode: this.currentAccessMode, initialControl: this.sessionControl,
             surfaceActive: screenIsLive(this.screen), sessionVisible: this.sessionOpen, controller: this.surfaceController,
             onBack: () => this.hideSession(), onDisconnect: () => this.disconnect(),
             onInput: (command: string) => this.sendSystemInput(command), onReleaseInput: () => this.releaseInput(),
+            onInputEvent: (event: string) => this.sendSystemInputEvent(event), onResetInput: () => this.resetInput(),
             onSetInputEnabled: (enabled: boolean) => this.setInputEnabled(enabled),
             onRetry: () => { if (this.sessionProfile) {
               if (this.currentAccessMode) { this.connectTrusted(this.sessionProfile, this.currentAccessMode); }
-              else { this.connect(this.sessionProfile); }
+              else { this.connect(this.sessionProfile, '', this.sessionControl); }
             } } })
         }, (key: number) => String(key))
       }

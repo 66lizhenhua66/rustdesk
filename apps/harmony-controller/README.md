@@ -1,8 +1,10 @@
 # 鸿蒙控制端：原生工作台、ID/中继与可信只读访问
 
+2026-10-07 增量：普通连接现在默认「控制」，连接前可选择「仅查看」。Windows 本次批准、首帧和真实输入启用回执到达后，可直接在远程画面点按、拖动、长按右击及双指滚动；外接鼠标/滚轮/键盘直接映射，键盘按钮调起系统输入法，确认文字自动发送。独立控制面板已移除，收起工具栏不关闭控制。F1—F12、标点、左右 Windows 键与数字小键盘要求同步更新 Windows 被控端。139 项本轮回归和双端构建通过，模拟器安装/启动已验，真实输入与真机仍待验收，见 [本轮记录](../../docs/project/research/2026-10-07-direct-session-input.md)。下面各日期段落保留历史范围。
+
 2026-10-05 增量：工作台支持 IP、设备 ID 自动连接、强制中继与实际路径显示。ID/中继必须填写自建服务、公钥、中继及固定目标身份。新增「登记只读访问」「无人值守查看」「删除本机凭据」；绑定状态和到期时间来自 Asset Store。Windows 必须显式 `-Video -Unattended` 并单独批准登记，普通批准不能登记长期权限。首版无人值守只读、每次最多 15 分钟；授权 30 天，可从 Windows 撤销。详见 [入口说明](../../docs/project/OFFICIAL-SECURE-ENTRY.md)、[协议](../../docs/project/specs/003-trusted-controller-access.md) 和 [本轮验证](../../docs/project/research/2026-10-05-id-relay-unattended-validation.md)。以下 2026-10-04 记录保留前阶段范围。
 
-默认入口为 ArkUI 原生 `pages/Desk.ets`，按照当前原型推荐的 A 方案实现设备工作台、连接等待、远程桌面、会话工具和结束页。签名身份校验、v1 加密、IP 直连、CM 逐连接批准及主屏 VP8 已接入。**默认仍只读；Windows 一次批准连接后，由控制端选择是否启用键鼠，不再需要第二次本机批准。构建与自动化通过，v2 真实输入尚未验收。**
+默认入口为 ArkUI 原生 `pages/Desk.ets`，按照当前原型推荐的 A 方案实现设备工作台、连接等待、远程桌面、会话工具和结束页。签名身份校验、v1 加密、IP 直连、CM 逐连接批准及主屏 VP8 已接入。**普通连接默认控制，可选仅查看；Windows 一次批准连接后自动请求所选输入能力，无第二次本机批准或额外控制面板。新版真实输入验收状态以上方 2026-10-07 记录为准。**
 
 2026-10-04：Windows Debug 整包与鸿蒙双 ABI/HAP 构建通过并已安装，新 HAP 运行于手机模拟器，回环服务已按 `-Video -Input` 启动。84 项 core、9 项旧 DEMO、15 项 Windows、4 项 Flutter 与 10 项鸿蒙模型测试合计 **122 项通过**。正在等待新的本机连接批准，不能宣称 v2 的真实系统输入、中文输入、开关切换或清理已实测通过，详见 [本轮能力切换验证记录](../../docs/project/research/2026-10-04-controller-capability-validation.md)。
 
@@ -11,13 +13,13 @@
 ## 当前界面与能力
 
 - 设备资料：新增、编辑、确认移除、公开配置导入预览、搜索与常用设备；继续读取原有 `controller_profiles/profiles`，保留既有设备。收藏和最近连接使用独立的非敏感存储键。
-- 连接：IP 与端口分字段，预存可信设备 ID、公钥和可选指纹；保存不连接。新版 Desk 显式使用 `secure_control` 协商视频与 `input_version=2`，连接后仍默认仅查看；旧 host 缺少新能力时失败，不自动降级。身份、批准等待、首帧等待和呈现分别显示真实状态。
-- 会话：原生 Surface 保持远端比例，浮动工具栏可收起；连接获批、支持输入且已有画面时可点击“控制”请求启用，实际输入必须等待真实 `input_state` 回执。已实现相对触控板、轻点/明确鼠标按钮、按住左键拖动、滚轮、基本物理键与确认文本；文本不发送输入法预编辑内容。文件按钮仍禁用。
-- 生命周期：返回设备页保留同一会话与 Surface，但立即停止本地输入、释放按下状态并请求关闭键鼠；切回查看或关闭输入面板也请求关闭，等待真实关闭回执。旋转、触摸取消、失焦和已启用时切换触控板/文本面板会清理按下状态。取消、断开、后台和退出清理会话及画面，重连需重新批准且默认只读。新增输入清理路径的设备实测尚待完成。
+- 连接：IP 与端口分字段，预存可信设备 ID、公钥和可选指纹；保存不连接。新版 Desk 显式使用 `secure_control` 协商视频与 `input_version=2`。普通连接默认控制、可选仅查看；旧 host 缺少协商能力时失败，不自动降级。身份、批准等待、首帧等待和呈现分别显示真实状态。
+- 会话：原生 Surface 保持远端比例，浮动工具栏可收起；选择控制后，在连接获批、支持输入且已有画面时自动请求启用，实际输入等待真实 `input_state` 回执。直接触摸定位、拖动、长按右键、双指滚动及外接键鼠均绑定实际画面，黑边不发送点击。系统输入法只转发确认文字，无单独发送按钮。文件按钮仍禁用。
+- 生命周期：返回设备页保留同一会话与 Surface，但立即停止本地输入、释放按下状态并请求关闭键鼠；返回已有会话时可再次选择控制。切回查看也请求关闭，等待真实回执。旋转、触摸/鼠标取消及失焦清理按下状态；收起工具栏/键盘不切换成仅查看。取消、断开、后台和退出清理会话及画面，重连需重新批准。新增输入清理路径的设备实测尚待完成。
 - 最近连接：只记录真实获批连接，不预置样例，不保存密码、画面或输入内容。保存设备不代表设备在线或已获访问权。
 - 响应式布局：小于 600 vp 为单列和底栏，600–1099 vp 为导航轨和双列，1100 vp 起为完整侧栏与多列设备卡。横竖屏根据当前窗口宽高布局，弹窗及工具内容可滚动。
 
-文件、跨端剪贴板、声音、多屏、硬件解码和画质切换仍未实现。ID/中继和可信设备只读访问已接入，真实服务、公网与设备现场待验；不能把协议 fixtures 当实际网络结果。Unicode 确认文本已实现并有前轮现场记录；完整即时输入法跨端同步未实现。ArkUI 不使用 WebView，视频像素不经过 ArkTS/JSON。
+文件、跨端剪贴板、声音、多屏、硬件解码和画质切换仍未实现。ID/中继和可信设备只读访问已接入，真实服务、公网与设备现场待验；不能把协议 fixtures 当实际网络结果。系统输入法确认文字直接发送，但远端编辑上下文和候选状态没有跨端同步；新版输入法接线仍待设备验证。ArkUI 不使用 WebView，视频像素不经过 ArkTS/JSON。
 
 ## 连接与安全边界
 
@@ -51,6 +53,7 @@ Windows 的“批准连接”只确认连接获批，CM 回执不表示视频已
 
 ## 结构
 
+- 会话输入已接入跨平台共享核心：手势、坐标、滚轮、按键状态与确认文本分块由 `libs/controller-core/src/interaction.rs` 实现，鸿蒙 NAPI 和 Flutter FFI 复用同一份。`entry/src/main/ets/input/` 只保留鸿蒙事件转换及会话 UI 状态适配。扩展操作体验的位置与约束见 [输入模块说明](entry/src/main/ets/input/README.md)。
 - `entry/src/main/ets/pages/Desk.ets`：正式工作台、设备存储及会话调度；`components/RemoteSession.ets` 承载原生画面与工具栏，`model/DeskModels.ts` 将核心事件投影为界面状态。
 - `entry/src/main/ets/pages/Index.ets`：保留旧连接诊断和独立 DEMO 操作路径。
 - `entry/src/main/cpp`：薄 NAPI 桥接、原生 libvpx 解码和 NativeWindow 渲染。网络操作在后台，取消不在 UI 线程等待网络 worker 退出。
@@ -62,7 +65,7 @@ Windows 的“批准连接”只确认连接获批，CM 回执不表示视频已
 从 RustDesk 仓库根目录运行：
 
 ```powershell
-node --experimental-strip-types --test apps/harmony-controller/tests/desk-models.test.ts apps/harmony-controller/tests/input-models.test.ts
+node --experimental-strip-types --test apps/harmony-controller/tests/desk-models.test.ts apps/harmony-controller/tests/input-models.test.ts apps/harmony-controller/tests/access-models.test.ts apps/harmony-controller/tests/session-input.test.ts
 cargo test --manifest-path libs/controller-core/Cargo.toml --locked
 cargo test --manifest-path apps/windows-demo-host/Cargo.toml --locked
 & ./scripts/build-windows-host.ps1 -Test

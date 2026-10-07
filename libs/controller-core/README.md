@@ -7,12 +7,26 @@ VP8 video and separately authorized input protocol. It directly compiles the ups
 `../base/protos/message.proto` and the rendezvous definitions at build time. Those protocol sources are not
 copied into this crate.
 
-The C ABI is declared in `include/controller.h` and `include/session.h`.
+The C ABI is declared in `include/controller.h`, `include/session.h`, and `include/input.h`.
 Preflight never authenticates. Strict login requires an explicitly pinned peer ID
 and Ed25519 public key, validates the signed ephemeral key, requires key exchange
 v1, and accepts only encrypted challenges/results. A successful login reports
 `authenticated:true` and immediately closes. This original single-login API keeps
 `authorized:false`.
+
+The platform-neutral input engine in `src/interaction.rs` owns touch gestures,
+pointer coordinates, wheel accumulation, physical key state and UTF-8 text
+chunking. Harmony's NAPI adapter and `flutter/lib/controller_input/` call the
+same `controller_input_*_v1` ABI. Each engine has an exclusive opaque handle;
+its synchronous sink must route generated commands through the strict session
+API. The engine never grants access. A failed sink aborts remaining commands;
+the adapter must disable session input or disconnect. See
+[cross-platform input](../../docs/project/specs/004-cross-platform-input.md).
+
+Default static builds remain unchanged. Build a Windows FFI test library with
+`cargo rustc --manifest-path libs/controller-core/Cargo.toml --lib --crate-type cdylib --locked`
+from the repository root. Android/iOS packaging and actual device validation
+remain separate work; a Windows DLL test is not a mobile build result.
 
 `controller_connection_create` selects a persistent protocol with `expectedPeer`:
 
