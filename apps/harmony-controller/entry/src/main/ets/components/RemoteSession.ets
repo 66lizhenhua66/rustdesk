@@ -336,7 +336,7 @@ export struct RemoteSession {
     }.width(this.toolsLayout().panelWidth).height(this.toolsLayout().panelHeight)
       .backgroundColor('#FCFEFA').border({ width: 1, color: '#DCE6DC' }).borderRadius(15).clip(true)
       .position({ x: this.toolsLayout().panelX, y: this.toolsLayout().panelY })
-      .hitTestBehavior(HitTestMode.Block)
+      .hitTestBehavior(HitTestMode.Default)
       .onTouch((event: TouchEvent) => event.stopPropagation())
       .onMouse((event: MouseEvent) => event.stopPropagation())
   }
