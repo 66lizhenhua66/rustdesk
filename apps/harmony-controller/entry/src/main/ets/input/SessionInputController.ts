@@ -21,6 +21,7 @@ interface CanvasConfiguration {
   remoteHeight: number;
   insets: CanvasInsets;
   padding: number;
+  fullViewport: boolean;
   enabled: boolean;
 }
 
@@ -102,7 +103,7 @@ export class SessionInputController {
       this.screen.width <= 0 || this.screen.height <= 0) { return; }
     const event: CanvasConfiguration = { kind: 'configure', viewportWidth: this.width,
       viewportHeight: this.height, remoteWidth: this.screen.width, remoteHeight: this.screen.height,
-      insets: this.insets, padding: 8, enabled: this.ready() };
+      insets: this.insets, padding: 0, fullViewport: true, enabled: this.ready() };
     this.nativeEvent(JSON.stringify(event));
   }
 

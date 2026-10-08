@@ -43,6 +43,8 @@ struct Configure {
     insets: Insets,
     #[serde(default = "default_padding")]
     padding: f64,
+    #[serde(default)]
+    full_viewport: bool,
     enabled: bool,
 }
 
@@ -98,6 +100,7 @@ pub struct ControllerCanvas {
     remote_h: f64,
     inset: Insets,
     padding: f64,
+    full_viewport: bool,
     safe_x: f64,
     safe_y: f64,
     safe_w: f64,
@@ -129,6 +132,7 @@ impl ControllerCanvas {
             remote_h: 0.0,
             inset: Insets::default(),
             padding: SAFE_PADDING,
+            full_viewport: false,
             safe_x: 0.0,
             safe_y: 0.0,
             safe_w: 0.0,
@@ -166,6 +170,7 @@ impl ControllerCanvas {
             || self.inset.right != c.insets.right
             || self.inset.bottom != c.insets.bottom
             || self.padding != c.padding
+            || self.full_viewport != c.full_viewport
     }
     fn clamp_image(&mut self) {
         let iw = self.image_w();
@@ -173,6 +178,10 @@ impl ControllerCanvas {
         if !self.valid || iw <= 0.0 || ih <= 0.0 {
             self.image_x = self.safe_x;
             self.image_y = self.safe_y;
+            return;
+        }
+        if self.full_viewport {
+            self.clamp_full_viewport();
             return;
         }
         let min_x = self.safe_x + self.safe_w - iw;
@@ -190,9 +199,30 @@ impl ControllerCanvas {
             self.image_y.clamp(min_y, max_y)
         };
     }
+    fn clamp_full_viewport(&mut self) {
+        let iw = self.image_w();
+        let ih = self.image_h();
+        let center_x = (self.viewport_w - iw) / 2.0;
+        let center_y = (self.viewport_h - ih) / 2.0;
+        if self.zoom <= 1.0 {
+            self.image_x = center_x;
+            self.image_y = center_y;
+            return;
+        }
+        // Let remote edges clear the input-safe boundary while the image stays
+        // centered at 1x, including when it is smaller than the viewport.
+        self.image_x = self.image_x.clamp(
+            (center_x - SAFE_PADDING).min(self.safe_x + self.safe_w - iw - SAFE_PADDING),
+            (center_x + SAFE_PADDING).max(self.safe_x + SAFE_PADDING),
+        );
+        self.image_y = self.image_y.clamp(
+            (center_y - SAFE_PADDING).min(self.safe_y + self.safe_h - ih - SAFE_PADDING),
+            (center_y + SAFE_PADDING).max(self.safe_y + SAFE_PADDING),
+        );
+    }
     fn configure(
         &mut self,
-        c: Configure,
+        mut c: Configure,
         sink: Option<ControllerInputSink>,
         ctx: *mut c_void,
     ) -> i32 {
@@ -239,6 +269,12 @@ impl ControllerCanvas {
             self.enabled = c.enabled;
             return 0;
         }
+        if c.full_viewport
+            && (c.viewport_width <= c.insets.left + c.insets.right + 2.0 * c.padding
+                || c.viewport_height <= c.insets.top + c.insets.bottom + 2.0 * c.padding)
+        {
+            c.enabled = false;
+        }
         let changed = self.geometry_changed(&c);
         if !changed {
             if self.enabled && !c.enabled {
@@ -253,6 +289,11 @@ impl ControllerCanvas {
         let old_center = if changed && self.valid && self.scale() > 0.0 {
             let cx = self.safe_x + self.safe_w / 2.0;
             let cy = self.safe_y + self.safe_h / 2.0;
+            let (cx, cy) = if self.full_viewport {
+                (self.viewport_w / 2.0, self.viewport_h / 2.0)
+            } else {
+                (cx, cy)
+            };
             Some((
                 (cx - self.image_x) / self.image_w(),
                 (cy - self.image_y) / self.image_h(),
@@ -277,6 +318,7 @@ impl ControllerCanvas {
         self.remote_h = c.remote_height;
         self.inset = c.insets;
         self.padding = c.padding;
+        self.full_viewport = c.full_viewport;
         self.safe_x = c.insets.left + c.padding;
         self.safe_y = c.insets.top + c.padding;
         self.safe_w =
@@ -284,6 +326,9 @@ impl ControllerCanvas {
         self.safe_h =
             (c.viewport_height - c.insets.top - c.insets.bottom - 2.0 * c.padding).max(0.0);
         self.fit = (self.safe_w / c.remote_width).min(self.safe_h / c.remote_height);
+        if self.full_viewport {
+            self.fit = (c.viewport_width / c.remote_width).min(c.viewport_height / c.remote_height);
+        }
         self.valid = self.fit.is_finite() && self.fit > 0.0;
         if self.valid {
             if let Some((nx, ny)) = old_center {
@@ -292,6 +337,11 @@ impl ControllerCanvas {
             } else {
                 self.image_x = self.safe_x + (self.safe_w - self.image_w()) / 2.0;
                 self.image_y = self.safe_y + (self.safe_h - self.image_h()) / 2.0;
+            }
+            if self.full_viewport {
+                let (nx, ny) = old_center.unwrap_or((0.5, 0.5));
+                self.image_x = self.viewport_w / 2.0 - nx * self.image_w();
+                self.image_y = self.viewport_h / 2.0 - ny * self.image_h();
             }
             self.clamp_image();
             let (cursor_x, cursor_y) = old_cursor.unwrap_or((0.5, 0.5));
@@ -842,6 +892,7 @@ impl ControllerCanvas {
                 "remoteHeight",
                 "insets",
                 "padding",
+                "fullViewport",
                 "enabled",
             ][..],
             "touch" => &["kind", "action", "points", "changedPoints", "time"][..],

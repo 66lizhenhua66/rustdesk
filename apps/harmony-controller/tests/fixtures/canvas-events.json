@@ -1,8 +1,8 @@
 {
   "events": [
-    { "kind": "configure", "viewportWidth": 400, "viewportHeight": 300, "remoteWidth": 200, "remoteHeight": 100, "insets": { "left": 0, "top": 40, "right": 0, "bottom": 20 }, "padding": 8, "enabled": true },
-    { "kind": "touch", "action": "down", "points": [{ "id": 1, "x": 200, "y": 160 }], "changedPoints": [{ "id": 1, "x": 200, "y": 160 }], "time": 100 },
-    { "kind": "touch", "action": "up", "points": [], "changedPoints": [{ "id": 1, "x": 200, "y": 160 }], "time": 200 }
+    { "kind": "configure", "viewportWidth": 400, "viewportHeight": 300, "remoteWidth": 200, "remoteHeight": 100, "insets": { "left": 0, "top": 40, "right": 0, "bottom": 20 }, "padding": 0, "fullViewport": true, "enabled": true },
+    { "kind": "touch", "action": "down", "points": [{ "id": 1, "x": 200, "y": 150 }], "changedPoints": [{ "id": 1, "x": 200, "y": 150 }], "time": 100 },
+    { "kind": "touch", "action": "up", "points": [], "changedPoints": [{ "id": 1, "x": 200, "y": 150 }], "time": 200 }
   ],
   "expectedCommands": [
     { "kind": "move", "x": 32768, "y": 32768 },

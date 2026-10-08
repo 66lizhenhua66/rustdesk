@@ -16,6 +16,8 @@
 
 InputEvents.ts 只声明标准事件载荷；坐标来自未缩放 viewport，和 canvas snapshot 的 imageX/Y 使用同一原点。尺寸仅通过 configure 传递，touch/mouse/wheel 不再携带 width/height。CanvasModels 解析真实快照、计算系统避让区和实际视口的交叠，CanvasAvoidArea 监听窗口区域变化。物理键同时传 opaque physicalCode 和远端语义 code；触点和按下状态只由 Rust 持有。
 
+当前鸿蒙会话使用 `fullViewport=true`、`padding=0`，fit 和居中按完整屏幕计算，真实系统 insets 只用于远端输入安全区与浮层位置。Surface 直接使用 imageX/Y 并按整个 viewport 裁剪；浮球菜单不参与配置尺寸，不会改变图像变换。其他调用未传 fullViewport 时仍沿用原安全画布布局。
+
 本目录的 ScreenState、中文提示、默认模式和系统键盘属于鸿蒙 UI 适配。真实授权在共享会话核心及被控执行点；本地查看手势不依赖远程输入许可。输入事件错误时 NAPI suspend 本地引擎并关闭输入，关闭失败取消会话。release 释放真实持有的按键；suspend 禁用输入但保留缩放/画布位置。定时器按 nextTickMs 安排，失焦、隐藏、撤权时取消。
 
 tests/fixtures/canvas-events.json 同时被 Node 实际发包测试与 Rust ABI 测试读取，固定跨语言事件契约，避免两边各自通过却无法互通。

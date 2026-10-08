@@ -339,3 +339,86 @@ fn pointer_two_finger_tap_in_padding_does_not_click() {
     assert_eq!(c.event(touch("up", &[], &[(1, 10.0, 150.0)], 100)), 0);
     assert!(c.1.values.is_empty());
 }
+
+fn full_viewport_config(width: f64, height: f64) -> Value {
+    json!({"kind":"configure","viewportWidth":width,"viewportHeight":height,
+        "remoteWidth":1920,"remoteHeight":1080,"fullViewport":true,
+        "insets":{"left":40,"top":0,"right":0,"bottom":16},"padding":24,"enabled":true})
+}
+
+#[test]
+fn full_viewport_fit_uses_screen_even_when_input_insets_change() {
+    let mut c = Canvas::new();
+    let mut config = full_viewport_config(809.0, 376.0);
+    assert_eq!(c.event(config.clone()), 0);
+    let fitted = c.state();
+    let width = 376.0 * 16.0 / 9.0;
+    assert!((fitted["imageWidth"].as_f64().unwrap() - width).abs() < 0.01);
+    assert!((fitted["imageX"].as_f64().unwrap() - (809.0 - width) / 2.0).abs() < 0.01);
+    assert_eq!(fitted["imageY"], 0.0);
+    assert_eq!(fitted["imageHeight"], 376.0);
+    assert_eq!(fitted["safeX"], 64.0);
+    config["insets"] = json!({"left":80,"top":32,"right":8,"bottom":24});
+    assert_eq!(c.event(config.clone()), 0);
+    let inset = c.state();
+    for field in ["imageX", "imageY", "imageWidth", "imageHeight"] {
+        assert_eq!(inset[field], fitted[field]);
+    }
+    assert_eq!(inset["safeX"], 104.0);
+    config["padding"] = json!(500);
+    assert_eq!(c.event(config), 0);
+    assert_eq!(c.state()["inputEnabled"], false);
+    assert_eq!(c.state()["imageHeight"], 376.0);
+    c.1.values.clear();
+    assert_eq!(c.event(json!({"kind":"text","text":"blocked"})), 0);
+    assert!(c.1.values.is_empty());
+}
+
+#[test]
+fn full_viewport_rotation_preserves_zoom_and_screen_center_until_reset() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(full_viewport_config(809.0, 376.0)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 354.5, 188.0), (2, 454.5, 188.0)], &[], 0)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 304.5, 188.0), (2, 504.5, 188.0)], &[], 20)), 0);
+    assert_eq!(c.event(touch("up", &[], &[], 30)), 0);
+    assert_eq!(c.event(touch("down", &[(3, 404.5, 188.0)], &[], 40)), 0);
+    assert_eq!(c.event(touch("move", &[(3, 454.5, 198.0)], &[], 60)), 0);
+    let before = c.state();
+    let center_x = (404.5 - before["imageX"].as_f64().unwrap()) / before["imageWidth"].as_f64().unwrap();
+    let center_y = (188.0 - before["imageY"].as_f64().unwrap()) / before["imageHeight"].as_f64().unwrap();
+    assert_eq!(c.event(full_viewport_config(376.0, 809.0)), 0);
+    let rotated = c.state();
+    assert_eq!(rotated["zoom"], 2.0);
+    assert!(((188.0 - rotated["imageX"].as_f64().unwrap()) / rotated["imageWidth"].as_f64().unwrap() - center_x).abs() < 0.001);
+    assert!(((404.5 - rotated["imageY"].as_f64().unwrap()) / rotated["imageHeight"].as_f64().unwrap() - center_y).abs() < 0.001);
+    assert_eq!(c.event(json!({"kind":"reset_view"})), 0);
+    let reset = c.state();
+    assert_eq!(reset["zoom"], 1.0);
+    assert_eq!(reset["imageX"], 0.0);
+    assert_eq!(reset["imageWidth"], 376.0);
+    assert!((reset["imageY"].as_f64().unwrap() - (809.0 - 376.0 * 9.0 / 16.0) / 2.0).abs() < 0.01);
+}
+
+#[test]
+fn full_viewport_pan_exposes_remote_edges_inside_input_safe_rect() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(full_viewport_config(809.0, 376.0)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 354.5, 188.0), (2, 454.5, 188.0)], &[], 0)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 304.5, 188.0), (2, 504.5, 188.0)], &[], 20)), 0);
+    assert_eq!(c.event(touch("up", &[], &[], 30)), 0);
+    assert_eq!(c.event(touch("down", &[(3, 404.5, 188.0)], &[], 40)), 0);
+    assert_eq!(c.event(touch("move", &[(3, 3000.0, 3000.0)], &[], 60)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(3, 3000.0, 3000.0)], 70)), 0);
+    let edge = c.state();
+    let x = edge["imageX"].as_f64().unwrap();
+    let y = edge["imageY"].as_f64().unwrap();
+    assert_eq!(x, edge["safeX"].as_f64().unwrap() + 24.0);
+    assert_eq!(y, edge["safeY"].as_f64().unwrap() + 24.0);
+    c.1.values.clear();
+    assert_eq!(c.event(json!({"kind":"mouse","action":"press","button":"left","x":x - 12.0,"y":y + 12.0})), 0);
+    assert_eq!(c.event(json!({"kind":"mouse","action":"press","button":"left","x":x + 12.0,"y":y - 12.0})), 0);
+    assert!(c.1.values.is_empty());
+    assert_eq!(c.event(touch("down", &[(4, x + 1.0, y + 1.0)], &[], 100)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(4, x + 1.0, y + 1.0)], 150)), 0);
+    assert_eq!(c.1.values.iter().filter(|v| v["kind"] == "button" && v["button"] == "left").count(), 2);
+}

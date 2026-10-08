@@ -1,5 +1,6 @@
 import controller, { ControllerEvent } from 'libcontroller.so';
 import { preferences } from '@kit.ArkData';
+import { KeyboardAvoidMode } from '@kit.ArkUI';
 import { RemoteSession } from '../components/RemoteSession';
 import { Profile, ScreenState, initialScreenState, projectScreenEvent, endedScreenState, markInputRequest,
   screenIsLive, splitEndpoint, joinEndpoint, canConnectProfile, buildScreenRequest, connectionPathLabel } from '../model/DeskModels';
@@ -70,7 +71,7 @@ struct Desk {
   @State private importJson: string = '';
   @State private importPreview: Profile | undefined = undefined;
   @State private sessionProfile: Profile | undefined = undefined;
-  @State private sessionOpen: boolean = false;
+  @State @Watch('sessionLayoutChanged') private sessionOpen: boolean = false;
   @State private sessionKey: number = 0;
   @State private enterControl: boolean = true;
   @State private sessionControl: boolean = true;
@@ -82,15 +83,16 @@ struct Desk {
   private task: number = 0;
   private generation: number = 0;
   private loadGeneration: number = 0;
-  private visible: boolean = true;
+  @State private visible: boolean = true;
+  private previousKeyboardAvoidMode?: KeyboardAvoidMode;
   private surfaceId: string = '';
   private currentAccessMode: string = '';
   private pairGrantReceived: boolean = false;
   private pairingSaved: boolean = false;
   private pendingPairConnected?: ControllerEvent;
 
-  aboutToAppear(): void { this.visible = true; this.loadProfiles(); }
-  onPageShow(): void { this.visible = true; this.loadProfiles(); }
+  aboutToAppear(): void { this.visible = true; this.sessionLayoutChanged(); this.loadProfiles(); }
+  onPageShow(): void { this.visible = true; this.sessionLayoutChanged(); this.loadProfiles(); }
   onPageHide(): void { this.leavePage(); }
   aboutToDisappear(): void { this.leavePage(); }
 
@@ -98,6 +100,7 @@ struct Desk {
     if (!this.applicationForeground) { this.leavePage(); }
     else {
       this.visible = true;
+      this.sessionLayoutChanged();
       if (screenIsLive(this.screen)) { this.disconnect('应用曾离开前台，请重新连接并等待本机批准。'); }
     }
   }
@@ -110,9 +113,27 @@ struct Desk {
 
   private leavePage(): void {
     this.visible = false;
+    this.sessionLayoutChanged();
     this.loadGeneration++;
     if (screenIsLive(this.screen)) { this.disconnect('应用已离开前台，连接已结束。请重新连接并等待本机批准。'); }
     controller.dispose();
+  }
+
+  private sessionLayoutChanged(): void {
+    try {
+      const ui = this.getUIContext();
+      if (this.sessionOpen && this.visible && this.applicationForeground) {
+        if (this.previousKeyboardAvoidMode === undefined) {
+          this.previousKeyboardAvoidMode = ui.getKeyboardAvoidMode();
+          ui.setKeyboardAvoidMode(KeyboardAvoidMode.NONE);
+        }
+      } else if (this.previousKeyboardAvoidMode !== undefined) {
+        ui.setKeyboardAvoidMode(this.previousKeyboardAvoidMode);
+        this.previousKeyboardAvoidMode = undefined;
+      }
+    } catch {
+      console.warn('RemoteDesk: failed to update session keyboard avoidance.');
+    }
   }
 
   private validate(profile: Profile): ValidationResult {
@@ -1022,7 +1043,10 @@ struct Desk {
           Scroll() { this.editor() }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
         }.width('92%').constraintSize({ maxWidth: 600 }).height('90%').padding(24).backgroundColor('#FFFFFF').borderRadius(20)
       }
-    }.width('100%').height('100%').background(this.sessionOpen ? '#10181B' : '#F6F8F5')
+    }.width(this.sessionOpen && this.visible ? LayoutPolicy.matchParent : '100%')
+      .height(this.sessionOpen && this.visible ? LayoutPolicy.matchParent : '100%')
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], this.sessionOpen && this.visible ? [LayoutSafeAreaEdge.ALL] : [])
+      .background(this.sessionOpen ? '#10181B' : '#F6F8F5')
       .onAreaChange((_old: Area, area: Area) => { this.windowWidth = Number(area.width); })
   }
 }

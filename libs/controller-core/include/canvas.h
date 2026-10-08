@@ -13,7 +13,11 @@ typedef struct ControllerCanvas ControllerCanvas;
 
 ControllerCanvas *controller_canvas_new_v1(void);
 /* Events are UTF-8 JSON and are consumed synchronously. The sink is borrowed
- * for the duration of this call and must not re-enter the canvas handle. */
+ * for the duration of this call and must not re-enter the canvas handle.
+ * Configure accepts optional fullViewport (default false): fit and 1x centering
+ * use the whole viewport, while insets and padding only restrict remote input.
+ * State image coordinates are absolute viewport coordinates; fullViewport
+ * callers render against the viewport rather than clipping to the safe rect. */
 int32_t controller_canvas_event_v1(ControllerCanvas *canvas, const char *event_json,
     ControllerInputSink sink, void *context);
 /* Returned state is owned and must be freed with controller_free_string. */

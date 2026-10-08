@@ -7,6 +7,8 @@ import { CanvasAvoidArea } from '../service/CanvasAvoidArea';
 import { SessionKeepScreenOn } from '../service/SessionKeepScreenOn';
 import { createSessionKeepScreenOn } from '../service/HarmonyKeepScreenOn';
 import { CanvasInsets, CanvasAvoidRegion, remainingCanvasInsets } from '../input/CanvasModels';
+import { SessionOrbDrag, SessionToolsLayout, sessionToolsLayout, SESSION_ORB_SIZE,
+  SESSION_ORB_DRAG_THRESHOLD } from '../model/SessionToolsModels';
 
 @Component
 export struct RemoteSession {
@@ -29,12 +31,13 @@ export struct RemoteSession {
   onSetInputEnabled: (enabled: boolean) => number = () => 1;
   @State private areaWidth: number = 390;
   @State private areaHeight: number = 720;
-  @State private toolbarCollapsed: boolean = true;
   @State private toolsOpen: boolean = false;
+  @State private detailsOpen: boolean = false;
+  @State private orbPosition: number = 0.5;
   @State private inputState: InputSessionState = new InputSessionState();
   @State private safeInsets: CanvasInsets = new CanvasInsets();
   @State private safeAreaNotice: string = '';
-  @State private toolbarHeight: number = 0;
+  private orbDrag: SessionOrbDrag = new SessionOrbDrag();
   private viewportX: number = 0;
   private viewportY: number = 0;
   private avoidRegions: CanvasAvoidRegion[] = [];
@@ -87,12 +90,7 @@ export struct RemoteSession {
   private updateCanvasLayout(): void {
     this.safeInsets = remainingCanvasInsets({ x: this.viewportX, y: this.viewportY,
       width: this.areaWidth, height: this.areaHeight }, this.avoidRegions);
-    const insets = new CanvasInsets();
-    insets.left = this.safeInsets.left;
-    insets.right = this.safeInsets.right;
-    insets.top = this.safeInsets.top + (this.toolbarCollapsed ? 48 : (this.toolbarHeight || (this.compact() ? 111 : 60)) + 12);
-    insets.bottom = this.safeInsets.bottom;
-    this.inputController?.setViewport(this.areaWidth, this.areaHeight, insets);
+    this.inputController?.setViewport(this.areaWidth, this.areaHeight, this.safeInsets);
   }
 
   private inputStatus(): string {
@@ -107,8 +105,40 @@ export struct RemoteSession {
   }
 
   private toggleTools(): void {
+    if (this.toolsOpen) { this.closeTools(); return; }
     this.inputController?.blur();
-    this.toolsOpen = !this.toolsOpen;
+    this.detailsOpen = false;
+    this.toolsOpen = true;
+  }
+
+  private closeTools(): void {
+    this.toolsOpen = false;
+    this.detailsOpen = false;
+    this.inputController?.focus();
+  }
+
+  private toolsLayout(): SessionToolsLayout {
+    return sessionToolsLayout(this.areaWidth, this.areaHeight, this.safeInsets, this.orbPosition, this.detailsOpen);
+  }
+
+  private orbTouch(event: TouchEvent): void {
+    event.stopPropagation();
+    if (event.type === TouchType.Cancel) { this.orbDrag.cancel(); return; }
+    for (const point of event.changedTouches) {
+      if (event.type === TouchType.Down) {
+        this.inputController?.blur();
+        this.orbDrag.begin(point.id, point.windowY, this.toolsLayout().orbY);
+      } else if (event.type === TouchType.Move) {
+        const position = this.orbDrag.move(point.id, point.windowY, this.toolsLayout());
+        if (position !== undefined) {
+          this.toolsOpen = false;
+          this.detailsOpen = false;
+          this.orbPosition = position;
+        }
+      } else if (event.type === TouchType.Up) {
+        this.orbDrag.end(point.id);
+      }
+    }
   }
 
   private compact(): boolean { return this.areaWidth < 600; }
@@ -128,14 +158,9 @@ export struct RemoteSession {
 
   private surfaceWidth(): number { return Math.max(1, Math.min(this.areaWidth, this.areaHeight * this.ratio())); }
   private surfaceHeight(): number { return this.surfaceWidth() / this.ratio(); }
-  private panelTop(): number { return this.compact() ? 134 : 80; }
 
   private canvasWidth(): number { return this.inputState.canvas.imageWidth > 0 ? this.inputState.canvas.imageWidth / this.inputState.canvas.zoom : this.surfaceWidth(); }
   private canvasHeight(): number { return this.canvasWidth() / this.ratio(); }
-  private canvasX(): number { return this.inputState.canvas.imageX - this.inputState.canvas.safeX; }
-  private canvasY(): number { return this.inputState.canvas.imageY - this.inputState.canvas.safeY; }
-  private safeWidth(): number { return this.screen.approved ? this.inputState.canvas.safeWidth : this.areaWidth; }
-  private safeHeight(): number { return this.screen.approved ? this.inputState.canvas.safeHeight : this.areaHeight; }
 
   private leave(): void {
     this.inputController?.stop();
@@ -146,25 +171,27 @@ export struct RemoteSession {
   private disconnect(): void {
     this.inputController?.stop();
     this.toolsOpen = false;
-    this.toolbarCollapsed = true;
     this.onDisconnect();
   }
 
   private retry(): void {
     this.inputController?.stop();
     this.toolsOpen = false;
-    this.toolbarCollapsed = true;
     this.onRetry();
   }
 
   @Builder
   private resetCanvasButton() {
-    if (this.inputState.canvas.resetVisible) {
-      Button('还原画面', { type: ButtonType.Normal }).height(38).fontSize(11).fontColor('#196B52')
-        .backgroundColor('#F9FCF7').borderRadius(9).border({ width: 1, color: '#DCE6DC' })
-        .width(94).focusOnTouch(false)
+    if (this.inputState.canvas.zoom > 1) {
+      Button(`${this.inputState.canvas.zoom.toFixed(1)}× 还原`, { type: ButtonType.Normal })
+        .height(36).fontSize(11).fontColor('#196B52')
+        .backgroundColor('#F9FCF7').border({ width: 1, color: '#DCE6DC' }).borderRadius(18).clip(true)
+        .padding({ left: 12, right: 12 })
+        .position({ x: this.safeInsets.left + 12, y: this.safeInsets.top + 12 })
         .accessibilityText('还原画面到适应窗口并居中')
-        .onClick(() => this.inputController?.resetView())
+        .hitTestBehavior(HitTestMode.Block)
+        .onTouch((event: TouchEvent) => event.stopPropagation())
+        .onClick(() => { this.inputController?.resetView(); this.inputController?.focus(); })
     }
   }
 
@@ -177,132 +204,83 @@ export struct RemoteSession {
   }
 
   @Builder
-  private identity() {
-    Column({ space: 3 }) {
-      Text(this.deviceName || '远程设备').fontSize(13).fontWeight(FontWeight.Medium)
-        .fontColor('#20352F').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text('现场批准 · IP 直连').fontSize(10).fontColor('#778780').maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-    }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-  }
-
-  @Builder
   private modeSwitch() {
     Row({ space: 3 }) {
       Button('仅查看', { type: ButtonType.Normal }).fontSize(12).height(38).fontColor('#196B52')
-        .padding({ left: 9, right: 9 }).backgroundColor(this.inputState.controlMode ? Color.Transparent : '#FFFFFF').borderRadius(6)
-        .onClick(() => this.inputController?.stop())
+        .layoutWeight(1).backgroundColor(this.inputState.controlMode ? Color.Transparent : '#FFFFFF').borderRadius(6)
+        .onClick(() => { this.toolsOpen = false; this.inputController?.stop(); })
       Button(this.screen.code === 'INPUT_ENABLING' ? '开启中' : '控制', { type: ButtonType.Normal }).fontSize(12).height(38)
-        .padding({ left: 9, right: 9 }).borderRadius(6).backgroundColor(this.inputState.controlMode ? '#FFFFFF' : Color.Transparent)
+        .layoutWeight(1).borderRadius(6).backgroundColor(this.inputState.controlMode ? '#FFFFFF' : Color.Transparent)
         .fontColor('#196B52').enabled(this.inputState.canControl)
         .onClick(() => { this.toolsOpen = false; this.inputController?.selectControl(true); })
-    }.padding(3).borderRadius(9).backgroundColor('#EEF3E9').border({ width: 1, color: '#DCE6D7' })
+    }.width('100%').padding(3).backgroundColor('#EEF3E9').border({ width: 1, color: '#DCE6D7' })
+      .borderRadius(9).clip(true)
   }
 
   @Builder
-  private unavailableTool(icon: Resource, label: string) {
+  private floatingOrb() {
     Button({ type: ButtonType.Normal }) {
-      Column({ space: 2 }) {
-        Image(icon).width(18).height(18)
-        Text(label).fontSize(10).fontColor('#627662')
-      }
-    }.width(44).height(44).borderRadius(8).backgroundColor(Color.Transparent)
-      .enabled(false).accessibilityText(`${label}，尚未实现`)
-  }
-
-  @Builder
-  private tools() {
-    Row({ space: 1 }) {
-      this.unavailableTool($r('app.media.desk_session_folder'), '文件')
-      Button({ type: ButtonType.Normal }) {
-        Column({ space: 2 }) {
-          Image($r('app.media.desk_session_keyboard')).width(18).height(18)
-          Text('键盘').fontSize(10).fontColor('#426A4D')
-        }
-      }.width(44).height(44).borderRadius(8).backgroundColor(this.inputState.keyboardOpen ? '#E4EFDF' : Color.Transparent)
-        .enabled(this.readyForInput()).focusOnTouch(false).accessibilityText(this.inputState.keyboardOpen ? '收起系统键盘' : '打开系统键盘')
-        .onClick(() => this.inputController?.toggleKeyboard())
-      Button({ type: ButtonType.Normal }) {
-        Column({ space: 2 }) {
-          Image($r('app.media.desk_session_settings')).width(18).height(18)
-          Text('工具').fontSize(10).fontColor('#426A4D')
-        }
-      }.width(44).height(44).borderRadius(8)
-        .backgroundColor(this.toolsOpen ? '#E4EFDF' : Color.Transparent)
-        .accessibilityText(this.toolsOpen ? '关闭会话工具' : '打开会话工具')
-        .onClick(() => this.toggleTools())
-    }
-  }
-
-  @Builder
-  private endButtons() {
-    Row({ space: 1 }) {
-      Button('断开', { type: ButtonType.Normal }).height(44).fontSize(12).fontColor('#A8443C')
-        .padding({ left: 12, right: 12 }).borderRadius(8).backgroundColor('#FFF5F2')
-        .onClick(() => this.disconnect())
-      this.iconButton($r('app.media.desk_session_up'), '收起工具栏', () => {
-        this.inputController?.blur();
-        this.toolsOpen = false;
-        this.toolbarCollapsed = true;
-        this.updateCanvasLayout();
-      })
-    }
-  }
-
-  @Builder
-  private sessionToolbar() {
-    Column({ space: 7 }) {
-      if (this.compact()) {
-        Row({ space: 3 }) {
-          this.iconButton($r('app.media.desk_session_back'), '返回设备，保持连接', () => this.leave())
-          this.identity()
-          this.resetCanvasButton()
-          this.endButtons()
-        }.width('100%')
-        Row() {
-          this.modeSwitch()
-          Blank()
-          this.tools()
-        }.width('100%')
-      } else {
-        Row({ space: 6 }) {
-          this.iconButton($r('app.media.desk_session_back'), '返回设备，保持连接', () => this.leave())
-          this.identity()
-          this.modeSwitch()
-          this.tools()
-          this.resetCanvasButton()
-          this.endButtons()
-        }.width('100%')
-      }
-    }.padding(8).width(Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24, 920)).borderRadius(14)
+      Image($r('app.media.desk_session_monitor')).width(21).height(21)
+    }.width(SESSION_ORB_SIZE).height(SESSION_ORB_SIZE)
       .backgroundColor('#F9FCF7').border({ width: 1, color: '#DCE6DC' })
-      .position({ x: this.safeInsets.left + (this.areaWidth - this.safeInsets.left - this.safeInsets.right - Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24, 920)) / 2, y: this.safeInsets.top + 12 })
-      .onAreaChange((_old: Area, area: Area) => {
-        const height = Number(area.height);
-        if (height > 0 && height !== this.toolbarHeight) { this.toolbarHeight = height; this.updateCanvasLayout(); }
-      })
+      .borderRadius(SESSION_ORB_SIZE / 2).clip(true)
+      .shadow({ radius: 10, color: '#33000000', offsetY: 3 })
+      .position({ x: this.toolsLayout().orbX, y: this.toolsLayout().orbY })
+      .accessibilityText(this.toolsOpen ? '收起会话工具' : '展开会话工具，可上下拖动')
+      .hitTestBehavior(HitTestMode.Block)
+      .onTouch((event: TouchEvent) => this.orbTouch(event))
+      .onClick(() => this.toggleTools(), SESSION_ORB_DRAG_THRESHOLD)
   }
 
   @Builder
-  private collapsedToolbar() {
-    Row({ space: 8 }) {
-      Button({ type: ButtonType.Normal }) {
-        Row({ space: 8 }) {
-          Image($r('app.media.desk_session_monitor')).width(18).height(18)
-          Text(`${this.inputState.canvas.zoom.toFixed(1)}× · ${this.readyForInput() ? '控制中' :
-            this.screen.code === 'INPUT_DISABLING' ? '关闭中' : '仅查看'}`).fontSize(12).fontColor('#20352F')
-            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-          Image($r('app.media.desk_session_down')).width(16).height(16)
-        }.padding({ left: 12, right: 12 })
-      }.height(40).layoutWeight(1).borderRadius(10).backgroundColor('#F9FCF7')
-        .accessibilityText('展开会话工具栏，包含断开按钮')
-        .onClick(() => { this.toolbarCollapsed = false; this.updateCanvasLayout(); })
-      this.resetCanvasButton()
-    }.width(Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24,
-      this.inputState.canvas.resetVisible ? 286 : 184)).height(40)
-      .position({ x: this.safeInsets.left + (this.areaWidth - this.safeInsets.left - this.safeInsets.right -
-        Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24,
-          this.inputState.canvas.resetVisible ? 286 : 184)) / 2, y: this.safeInsets.top + 4 })
+  private toolsActions() {
+    Column({ space: 8 }) {
+      this.modeSwitch()
+      Row({ space: 8 }) {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 5 }) {
+            Image($r('app.media.desk_session_keyboard')).width(18).height(18)
+            Text('键盘').fontSize(12).fontColor('#426A4D')
+          }
+        }.layoutWeight(1).height(44).borderRadius(8).backgroundColor('#EEF3E9')
+          .enabled(this.readyForInput()).accessibilityText('打开系统键盘')
+          .onClick(() => { this.toolsOpen = false; this.inputController?.toggleKeyboard(); })
+        Button(this.inputState.canvas.touchMode === 'pointer' ? '指针模式' : '触屏模式', { type: ButtonType.Normal })
+          .layoutWeight(1).height(44).fontSize(12).fontColor('#426A4D').borderRadius(8).backgroundColor('#EEF3E9')
+          .accessibilityText(this.inputState.canvas.touchMode === 'pointer' ? '切换到触屏模式' : '切换到指针模式')
+          .onClick(() => {
+            this.inputController?.setTouchMode(this.inputState.canvas.touchMode === 'pointer' ? 'direct' : 'pointer');
+            this.closeTools();
+          })
+      }.width('100%')
+      Row({ space: 8 }) {
+        Button('还原画面', { type: ButtonType.Normal }).layoutWeight(1).height(44).fontSize(12)
+          .fontColor('#426A4D').borderRadius(8).backgroundColor('#EEF3E9')
+          .onClick(() => { this.inputController?.resetView(); this.closeTools(); })
+        Button('状态详情', { type: ButtonType.Normal }).layoutWeight(1).height(44).fontSize(12)
+          .fontColor('#426A4D').borderRadius(8).backgroundColor('#EEF3E9')
+          .onClick(() => { this.detailsOpen = true; })
+      }.width('100%')
+      Row({ space: 8 }) {
+        Button('返回设备', { type: ButtonType.Normal }).layoutWeight(1).height(44).fontSize(12)
+          .fontColor('#426A4D').borderRadius(8).backgroundColor('#EEF3E9')
+          .accessibilityText('返回设备，保持连接').onClick(() => this.leave())
+        Button('断开', { type: ButtonType.Normal }).layoutWeight(1).height(44).fontSize(12)
+          .fontColor('#A8443C').borderRadius(8).backgroundColor('#FFF0EB')
+          .onClick(() => this.disconnect())
+      }.width('100%')
+      Text(this.inputStatus()).fontSize(11).fontColor('#778780').lineHeight(17).width('100%')
+    }.width('100%')
+  }
+
+  @Builder
+  private toolsBackdrop() {
+    Column() {
+    }.width('100%').height('100%').backgroundColor(Color.Transparent)
+      .hitTestBehavior(HitTestMode.Block)
+      .onTouch((event: TouchEvent) => event.stopPropagation())
+      .onMouse((event: MouseEvent) => event.stopPropagation())
+      .onClick(() => this.closeTools())
   }
 
   @Builder
@@ -318,42 +296,49 @@ export struct RemoteSession {
   private toolsPanel() {
     Column() {
       Row() {
-        Text('会话工具').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#20352F').layoutWeight(1)
-        this.iconButton($r('app.media.desk_session_close'), '关闭会话工具', () => { this.toolsOpen = false; this.inputController?.focus(); })
-      }.padding({ left: 18, right: 5 }).width('100%')
+        if (this.detailsOpen) {
+          this.iconButton($r('app.media.desk_session_back'), '返回会话工具', () => { this.detailsOpen = false; })
+        }
+        Text(this.detailsOpen ? '状态详情' : this.deviceName || '远程设备')
+          .fontSize(13).fontWeight(FontWeight.Medium).fontColor('#20352F').layoutWeight(1)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        this.iconButton($r('app.media.desk_session_close'), '关闭会话工具', () => this.closeTools())
+      }.padding({ left: this.detailsOpen ? 0 : 12, right: 3 }).width('100%').height(44)
       Scroll() {
-        Column({ space: 12 }) {
-          Column({ space: 7 }) {
-            Text(this.inputStatus()).fontSize(15).fontWeight(FontWeight.Medium).fontColor('#196B52')
-            Text('轻点左键，双指轻点右键，双指滑动滚轮；捏合缩放 1～10 倍。单指滑动画布，长按 1 秒出现提示后拖动远程对象。')
-              .fontSize(12).fontColor('#778780').lineHeight(20)
-          }.alignItems(HorizontalAlign.Start).width('100%').padding(14).borderRadius(10).backgroundColor('#EDF4E6')
-          this.stat('连接地址', () => this.endpoint || '未提供')
-          this.stat('实际连接方式', () => connectionPathLabel(this.screen.connectionPath))
-          this.stat('设备身份', () => this.screen.verified ? '已通过可信身份核验' : '尚未完成核验')
-          this.stat('本次授权', () => !this.screen.approved ? '尚未确认' :
-            this.screen.accessMode === 'unattended' ? '无人值守凭据已验证 · 只读' :
-              this.screen.accessMode === 'pair' ? 'Windows 已批准登记 · 只读' : 'Windows 本机已批准连接')
-          this.stat('键盘与鼠标', () => this.screen.code === 'INPUT_ENABLING' ? '正在开启，等待状态回执' : this.screen.code === 'INPUT_DISABLING' ? '正在关闭，等待状态回执' : this.screen.inputGranted ? '设备已确认开启' : '设备当前未开启')
-          this.stat('远端画面', () => this.screen.approved && this.screen.width > 0 && this.screen.height > 0 ?
-            `${this.screen.width} × ${this.screen.height}` : '等待画面协商')
-          this.stat('实际接收 / 呈现', () => `${this.screen.frames} 帧 / ${this.screen.rendered} 帧`)
-          this.stat('已接收视频数据', () => `${Math.round(this.screen.bytes / 1024)} KiB`)
-          this.stat('画面显示', () => `${this.inputState.canvas.zoom.toFixed(1)} 倍 · 保持远端比例`)
-          Row({ space: 8 }) {
-            Button('触屏模式').fontSize(12).height(40).onClick(() => this.inputController?.setTouchMode('direct'))
-            Button('指针模式').fontSize(12).height(40).onClick(() => this.inputController?.setTouchMode('pointer'))
+        Column({ space: 8 }) {
+          if (this.detailsOpen) {
+            Column({ space: 7 }) {
+              Text(this.inputStatus()).fontSize(13).fontWeight(FontWeight.Medium).fontColor('#196B52')
+              Text('轻点左键，双指轻点右键，双指滑动滚轮；捏合缩放 1～10 倍。单指滑动画布，长按 1 秒出现提示后拖动远程对象。')
+                .fontSize(12).fontColor('#778780').lineHeight(20)
+            }.alignItems(HorizontalAlign.Start).width('100%').padding(14).borderRadius(10).backgroundColor('#EDF4E6')
+            this.stat('连接地址', () => this.endpoint || '未提供')
+            this.stat('实际连接方式', () => connectionPathLabel(this.screen.connectionPath))
+            this.stat('设备身份', () => this.screen.verified ? '已通过可信身份核验' : '尚未完成核验')
+            this.stat('本次授权', () => !this.screen.approved ? '尚未确认' :
+              this.screen.accessMode === 'unattended' ? '无人值守凭据已验证 · 只读' :
+                this.screen.accessMode === 'pair' ? 'Windows 已批准登记 · 只读' : 'Windows 本机已批准连接')
+            this.stat('键盘与鼠标', () => this.screen.code === 'INPUT_ENABLING' ? '正在开启，等待状态回执' : this.screen.code === 'INPUT_DISABLING' ? '正在关闭，等待状态回执' : this.screen.inputGranted ? '设备已确认开启' : '设备当前未开启')
+            this.stat('远端画面', () => this.screen.approved && this.screen.width > 0 && this.screen.height > 0 ?
+              `${this.screen.width} × ${this.screen.height}` : '等待画面协商')
+            this.stat('实际接收 / 呈现', () => `${this.screen.frames} 帧 / ${this.screen.rendered} 帧`)
+            this.stat('已接收视频数据', () => `${Math.round(this.screen.bytes / 1024)} KiB`)
+            this.stat('画面显示', () => `${this.inputState.canvas.zoom.toFixed(1)} 倍 · 保持远端比例`)
+            this.stat('画质', () => 'VP8 软件视频 · 画质切换尚未实现')
+            Text(this.accessMode ? '此连接仅可查看。Windows 可随时撤销已登记设备。' :
+              '本次批准仅用于当前连接。断开或重新连接后，需要再次在 Windows 本机批准。')
+              .fontSize(12).fontColor('#778780').lineHeight(20).width('100%')
+          } else {
+            this.toolsActions()
           }
-          this.stat('画质', () => 'VP8 软件视频 · 画质切换尚未实现')
-          Text(this.accessMode ? '此连接仅可查看。Windows 可随时撤销已登记设备。' :
-            '本次批准仅用于当前连接。断开或重新连接后，需要再次在 Windows 本机批准。')
-            .fontSize(12).fontColor('#778780').lineHeight(20).width('100%')
-        }.width('100%').padding({ left: 18, right: 18, top: 8, bottom: 20 })
+        }.width('100%').padding({ left: 12, right: 12, top: 4, bottom: 12 })
       }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
-    }.width(this.compact() ? this.areaWidth - 24 : 316)
-      .height(Math.max(100, this.areaHeight - this.panelTop() - 12))
-      .borderRadius(15).clip(true).backgroundColor('#FCFEFA').border({ width: 1, color: '#DCE6DC' })
-      .position({ x: this.areaWidth - (this.compact() ? this.areaWidth - 24 : 316) - 12, y: this.panelTop() })
+    }.width(this.toolsLayout().panelWidth).height(this.toolsLayout().panelHeight)
+      .backgroundColor('#FCFEFA').border({ width: 1, color: '#DCE6DC' }).borderRadius(15).clip(true)
+      .position({ x: this.toolsLayout().panelX, y: this.toolsLayout().panelY })
+      .hitTestBehavior(HitTestMode.Block)
+      .onTouch((event: TouchEvent) => event.stopPropagation())
+      .onMouse((event: MouseEvent) => event.stopPropagation())
   }
 
   @Builder
@@ -434,22 +419,18 @@ export struct RemoteSession {
     Stack({ alignContent: Alignment.Center }) {
       if (this.surfaceActive) {
         Stack({ alignContent: Alignment.TopStart }) {
-          Stack({ alignContent: Alignment.TopStart }) {
-            XComponent({ type: XComponentType.SURFACE, controller: this.controller })
-              .width(this.canvasWidth()).height(this.canvasHeight()).backgroundColor('#10181B')
-              .scale({ x: this.inputState.canvas.zoom, y: this.inputState.canvas.zoom, centerX: 0, centerY: 0 })
-              .position({ x: this.canvasX(), y: this.canvasY() })
-              .hitTestBehavior(HitTestMode.None)
-          }.width(this.safeWidth()).height(this.safeHeight()).clip(true)
-            .position({ x: this.inputState.canvas.safeX, y: this.inputState.canvas.safeY })
+          XComponent({ type: XComponentType.SURFACE, controller: this.controller })
+            .width(this.canvasWidth()).height(this.canvasHeight()).backgroundColor('#10181B')
+            .scale({ x: this.inputState.canvas.zoom, y: this.inputState.canvas.zoom, centerX: 0, centerY: 0 })
+            .position({ x: this.inputState.canvas.imageX, y: this.inputState.canvas.imageY })
             .hitTestBehavior(HitTestMode.None)
         }.width('100%').height('100%').backgroundColor('#10181B').clip(true)
           .id('remote-desktop-input').focusable(true).focusOnTouch(true)
-          .onTouch((event: TouchEvent) => this.inputAdapter?.touch(event))
-          .onMouse((event: MouseEvent) => this.inputAdapter?.mouse(event))
-          .onAxisEvent((event: AxisEvent) => this.inputAdapter?.wheel(event))
-          .onKeyPreIme((event: KeyEvent) => (this.inputAdapter?.key(event) ?? false))
-          .onKeyEvent((event: KeyEvent) => (this.inputAdapter?.key(event) ?? false))
+          .onTouch((event: TouchEvent) => { if (!this.toolsOpen) { this.inputAdapter?.touch(event); } })
+          .onMouse((event: MouseEvent) => { if (!this.toolsOpen) { this.inputAdapter?.mouse(event); } })
+          .onAxisEvent((event: AxisEvent) => { if (!this.toolsOpen) { this.inputAdapter?.wheel(event); } })
+          .onKeyPreIme((event: KeyEvent) => (!this.toolsOpen && (this.inputAdapter?.key(event) ?? false)))
+          .onKeyEvent((event: KeyEvent) => (!this.toolsOpen && (this.inputAdapter?.key(event) ?? false)))
           .onBlur(() => this.inputController?.blur())
       }
       if (!this.pictureVisible()) {
@@ -465,14 +446,12 @@ export struct RemoteSession {
             .position({ x: this.safeInsets.left + 12, y: Math.max(0, this.areaHeight - this.safeInsets.bottom - 52) })
             .hitTestBehavior(HitTestMode.None)
         }
-        if (this.toolbarCollapsed) {
-          this.collapsedToolbar()
-        } else {
-          this.sessionToolbar()
-        }
+        this.resetCanvasButton()
         if (this.toolsOpen) {
+          this.toolsBackdrop()
           this.toolsPanel()
         }
+        this.floatingOrb()
       }
     }.width('100%').height('100%').backgroundColor('#344B45').clip(true)
       .onAreaChange((_oldArea: Area, area: Area) => {

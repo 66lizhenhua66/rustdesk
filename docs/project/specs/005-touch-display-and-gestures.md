@@ -1,13 +1,13 @@
 # SPEC-005：触屏展示与手势控制
 
-日期：2026-10-08。状态：共享核心、鸿蒙接线和 Flutter 画布组件已完成自动化与构建验证；真机由用户后续验收。
+日期：2026-10-08。状态：用户确认的整屏画布与侧边浮球已实施、构建并安装，部分真机显示验证通过，完整体验继续验收。见 [实施计划](../plans/2026-10-08-fullscreen-orb.md)；取代显示区域裁成 SafeRect 的早期布局。
 
 本规格细化 [SPEC-004](004-cross-platform-input.md)，解决手机与远程 Windows 分辨率不同、自动旋转、安全区域、画布缩放和触屏手势之间的关系。
 
 ## 1. 目标
 
 - 竖屏和横屏都完整显示远程画面，默认保持远程宽高比。
-- 顶部状态栏、底部手势区、刘海、圆角和会话工具栏不遮挡可操作的远程内容。
+- 系统安全区保护输入与悬浮控件，显示可以延伸至边缘；浮层挡住的远端内容可通过平移移入可操作区域。
 - 捏合缩放范围为 `1.0x` 到 `10.0x`，缩放只影响本地展示和坐标换算，不改变远程分辨率、编码或网络流量。
 - 手机旋转后保留当前缩放比例和画布中心，重新计算安全区域和画布边界。
 - 缩放后显示浮动“还原画面”按钮，一次恢复 `1.0x` 和居中位置。
@@ -15,18 +15,21 @@
 
 ## 2. 展示模型
 
-### 2.1 安全画布
+### 2.1 整屏画布与安全输入区域
 
-先从窗口计算 `SafeRect`：扣除系统安全区、顶部会话工具栏和必要的交互间距。鸿蒙工具栏默认收起，底部不再为常驻说明条预留高度；额外交互间距为 8 vp。远程画面只在 `SafeRect` 中布局；额外黑边属于本地画布背景，不属于远程坐标，也不能产生点击。画布背景绘制延伸至系统避让区，消除底部白色横条，交互内容仍避让系统手势区域。
+`Viewport` 是整屏画布，显示时使用完整窗口。浮球、工具面板、还原按钮和系统键盘覆盖画面，不为它们留出固定条带。单独计算 `SafeRect`，仅用于远端输入命中与悬浮控件避让系统区域；不再用它缩小画面。
 
 ```text
-safeRect = windowRect - systemInsets - sessionOverlays
-fitScale = min(safeRect.width / remote.width,
-               safeRect.height / remote.height)
+viewport = fullWindowRect
+safeRect = viewport - systemInsets
+fitScale = min(viewport.width / remote.width,
+               viewport.height / remote.height)
 actualScale = fitScale * zoomFactor
 ```
 
-`zoomFactor` 的范围是 `[1.0, 10.0]`。`1.0x` 表示完整适应窗口，画面居中；大于 `1.0x` 时，远程画面可以超过安全画布并通过 `panOffset` 移动。画布边界限制保证远程内容可以移动到安全区域内，黑边不会被误认为远程画面。
+`zoomFactor` 的范围是 `[1.0, 10.0]`。`1.0x` 表示完整适应整个屏幕并居中，不表示远端像素与本地像素 1:1。16:9 远端在约 2.15:1 手机横屏中会有左右自然黑边；这是保持完整比例的结果。约 1.2× 可以填满宽度，此时远端上下部分超出屏幕，需要平移查看。
+
+大于 `1.0x` 时可以单指平移，并允许越过边界约 24 vp 的额外余量，把远端边缘移入安全操作区域。黑边属于本地画布，触屏 direct 模式不把图像外点击发送到远端；指针模式保留触摸板语义。菜单展开和关闭不能改变 fit、缩放或画布中心。
 
 ### 2.2 坐标变换
 
@@ -51,9 +54,9 @@ remoteY = (localY - imageOffsetY - panY) / actualScale
 窗口尺寸或系统安全区变化时：
 
 1. 取消当前触摸、捏合和长按计时，释放远程按键/按钮。
-2. 用旧变换把当前视口中心转换为远程坐标 `remoteCenter`。
-3. 重新计算 `SafeRect`、`fitScale` 和 `actualScale`。
-4. 让 `remoteCenter` 继续落在新的安全画布中心。
+2. 用旧变换把整个视口中心转换为远程坐标 `remoteCenter`。
+3. 根据新的完整视口计算 `fitScale` 和 `actualScale`，另行更新输入 `SafeRect`。
+4. 让 `remoteCenter` 继续落在新的视口中心。
 5. 按新的画布边界限制 `panOffset`。
 
 如果旧中心在新的边界下无法保持，使用最近的合法偏移；不静默改变远程控制模式，不断开会话。
@@ -80,15 +83,17 @@ remoteY = (localY - imageOffsetY - panY) / actualScale
 
 捏合和滚轮的判定以距离变化优先；一旦进入捏合，本次双指序列不再产生右键或滚轮。
 
-### 3.3 浮动按钮
+### 3.3 侧边浮球与还原
 
-当 `zoomFactor > 1.0` 时，在顶部悬浮工具栏旁显示“还原画面”按钮，不为它单独占用底部空间。点击按钮：
+右侧 44 vp 浮球可以沿安全区域上下移动。点击向屏幕内侧展开紧凑工具面板，提供控制/仅查看、键盘、触屏/指针、还原、断开与返回设备。浮球拖动和菜单点击不进入远端输入；点击菜单外关闭时消费该次操作，避免点穿远端。已批准的手势和前台常亮继续保留。
+
+当 `zoomFactor > 1.0` 时，在安全区域左上方显示包含当前倍数的“还原”按钮。它浮在整屏画布上，不占据固定布局高度。点击按钮：
 
 ```text
 取消当前手势
 zoomFactor = 1.0
 panOffset = 居中位置
-remoteCenter = 远程画面中心
+remoteCenter = 远程画面中心，映射至完整视口中心
 ```
 
 按钮恢复本地展示，不断开会话或关闭键鼠授权。如有远端按钮按住，先释放并取消当前手势，避免卡键；还原后隐藏按钮。
@@ -101,7 +106,9 @@ remoteCenter = 远程画面中心
 
 共享 Rust `canvas.rs` 保存缩放、画布位置、触点和手势状态，`canvas.h` 提供版本化 C ABI。鸿蒙、Android、iOS 和 Windows 控制端各自提供窗口尺寸、安全区、系统输入法和浮动按钮；不复制手势判定。
 
-鸿蒙读取窗口的 SYSTEM、CUTOUT、NAVIGATION_INDICATOR 与 KEYBOARD 避让矩形，转换为 vp 后与 `onAreaChange.globalPosition` 对应的实际视口求交，避免重复扣除 ArkUI 已处理的安全区。顶部工具栏高度和 8 vp 交互黑边在该结果上计算；缩放提示与还原按钮上移，底部只在错误或长按拖动状态下显示短暂悬浮提示。画面基础尺寸保持 fit 大小，由绘制缩放呈现 1～10 倍，父容器裁剪；触摸、鼠标和滚轮绑定未缩放的整个视口，坐标与 Rust 快照使用同一原点。
+鸿蒙读取窗口的 SYSTEM、CUTOUT、NAVIGATION_INDICATOR 与 KEYBOARD 避让矩形，转换为 vp 后与实际完整视口求交，形成输入和浮层安全区域。会话页使用真正扩展的整窗布局，工作台保持常规布局；系统键盘以覆盖方式显示，隐藏会话时恢复原键盘避让模式。
+
+鸿蒙 configure 使用 `fullViewport=true`、`padding=0`；画面基础尺寸保持完整 viewport 的 fit 大小，由绘制缩放呈现 1～10 倍，按完整 viewport 裁剪；输入绑定未缩放的整个视口，使用 Rust 快照的 imageX/Y 绝对坐标，不再扣 safeX/Y。错误和长按拖动提示仍为短暂悬浮层。`fullViewport` 缺省为 false，保留其他现有调用的安全画布行为。
 
 Flutter 提供 `ControllerCanvasEngine`、`FlutterCanvasInputAdapter`、`ControllerCanvasView`，共用同一 ABI，读取 MediaQuery 安全区并叠加应用工具栏区域。组件要求父布局随软键盘收缩（例如 Scaffold 默认 `resizeToAvoidBottomInset: true`）；保留覆盖式键盘的页面须先按键盘可见区域约束画布。该可复用组件尚未接入完整 Windows/Android/iOS 生产控制端页面，原生库打包、签名与设备测试是相应平台后续交付。
 
