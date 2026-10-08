@@ -4,6 +4,7 @@ import { RemoteSession } from '../components/RemoteSession';
 import { Profile, ScreenState, initialScreenState, projectScreenEvent, endedScreenState, markInputRequest,
   screenIsLive, splitEndpoint, joinEndpoint, canConnectProfile, buildScreenRequest, connectionPathLabel } from '../model/DeskModels';
 import { canRequestSystemInput, canSendSystemInput } from '../model/InputModels';
+import { connectionCandidates, selectedConnectionProfile } from '../model/DeviceIdModels';
 import { AccessStatus, accessStatus, buildTrustedScreenRequest, credentialForTarget, parsePairingGrant,
   secretRequest } from '../model/AccessModels';
 import { loadIdentity, saveIdentity, loadAccess, readAccess, saveAccess, removeAccess } from '../service/CredentialStore';
@@ -50,6 +51,8 @@ struct Desk {
   @State private search: string = '';
   @State private onlyFavorites: boolean = false;
   @State private selectedId: string = '';
+  @State private entryMode: string = 'id';
+  @State private entryPeerId: string = '';
   @State private windowWidth: number = 390;
   @State private modal: string = '';
   @State private editingId: string = '';
@@ -168,8 +171,7 @@ struct Desk {
       this.recent = recent.slice(0, 30);
       this.storeError = '';
       if (!normalized.some((p: Profile) => p.id === this.selectedId)) {
-        const ready = normalized.find((p: Profile) => canConnectProfile(p));
-        this.selectedId = ready ? ready.id : normalized.length > 0 ? normalized[0].id : '';
+        this.selectedId = '';
       }
     } catch {
       if (owner === this.loadGeneration) {
@@ -262,14 +264,15 @@ struct Desk {
     }
     this.editingId = profile?.id ?? '';
     this.name = profile?.name ?? '';
-    this.connectionMode = profile?.mode ?? 'direct';
+    this.connectionMode = profile?.mode ?? this.entryMode;
     this.server = profile?.server ?? '';
     this.serverKey = profile?.serverKey ?? '';
     this.relayServer = profile?.relayServer ?? '';
     const parts = splitEndpoint(profile?.mode === 'direct' ? profile.target : '');
     this.address = parts.address;
     this.port = parts.port;
-    this.peerId = profile?.peerId || (profile?.mode !== 'direct' ? profile?.target ?? '' : '');
+    this.peerId = profile ? profile.peerId || (profile.mode !== 'direct' ? profile.target : '') :
+      this.entryMode === 'direct' ? '' : this.entryPeerId.trim();
     this.peerPublicKey = profile?.peerPublicKey ?? '';
     this.fingerprint = profile?.peerFingerprint ?? '';
     this.formError = '';
@@ -291,7 +294,7 @@ struct Desk {
     const next = this.editingId ? this.profiles.map((p: Profile) => p.id === this.editingId ? normalized : p) : this.profiles.concat([normalized]);
     if (await this.persistProfiles(next)) {
       this.refreshAccessStatus(normalized);
-      this.selectedId = normalized.id;
+      this.selectConnectionProfile(normalized);
       this.modal = '';
       this.notice = '设备已保存。连接前请核对地址和可信身份。';
     }
@@ -320,7 +323,7 @@ struct Desk {
     }
     if (await this.persistProfiles(this.profiles.concat([profile]))) {
       this.refreshAccessStatus(profile);
-      this.selectedId = profile.id; this.modal = ''; this.importJson = ''; this.importPreview = undefined;
+      this.selectConnectionProfile(profile); this.modal = ''; this.importJson = ''; this.importPreview = undefined;
       this.notice = '公开配置已保存，未自动连接。请核对设备身份后主动连接。';
     }
   }
@@ -345,7 +348,25 @@ struct Desk {
     finally { this.accessBusy = false; }
   }
 
-  private selectedProfile(): Profile | undefined { return this.profiles.find((p: Profile) => p.id === this.selectedId); }
+  private connectionProfiles(): Profile[] { return connectionCandidates(this.profiles, this.entryMode, this.entryPeerId); }
+  private selectedProfile(): Profile | undefined {
+    return selectedConnectionProfile(this.profiles, this.entryMode, this.entryPeerId, this.selectedId);
+  }
+  private selectConnectionProfile(profile: Profile): void {
+    this.selectedId = profile.id;
+    this.entryMode = profile.mode;
+    this.entryPeerId = profile.mode === 'direct' ? '' : profile.peerId ?? '';
+  }
+  private changeEntryMode(mode: string): void {
+    if (screenIsLive(this.screen) || this.loading || this.saving || this.accessBusy) { return; }
+    this.entryMode = mode;
+    this.entryPeerId = '';
+    this.selectedId = '';
+  }
+  private connectionProfileLabel(profile?: Profile): string {
+    if (!profile) { return '请选择设备与服务'; }
+    return profile.mode === 'direct' ? profile.name : `${profile.name} · ${profile.server}`;
+  }
   private filteredProfiles(): Profile[] {
     const query = this.search.trim().toLowerCase();
     return this.profiles.filter((p: Profile) => (!this.onlyFavorites || this.favorites.includes(p.id)) &&
@@ -353,9 +374,9 @@ struct Desk {
   }
 
   private connectSelected(): void {
+    if (screenIsLive(this.screen)) { this.sessionOpen = true; return; }
     const profile = this.selectedProfile();
     if (profile) { this.connect(profile); }
-    else { this.openEditor(); }
   }
 
   private sameTarget(profile: Profile, owner: number): boolean {
@@ -423,7 +444,7 @@ struct Desk {
     this.pairingSaved = false;
     this.pendingPairConnected = undefined;
     const owner = this.generation;
-    this.selectedId = profile.id;
+    this.selectConnectionProfile(profile);
     this.sessionProfile = profile;
     this.surfaceController = new DeskSurface((id: string) => {
       if (!this.visible || this.generation !== owner || !screenIsLive(this.screen) || this.task !== 0) { return; }
@@ -644,21 +665,50 @@ struct Desk {
   private connectionCard() {
     Column({ space: 14 }) {
       Text('↗  连接远程设备').fontSize(17).fontWeight(FontWeight.Medium).fontColor('#20352F')
-      Row({ space: 18 }) {
-        Text('设备 ID').fontSize(11).fontColor('#53695C')
-        Text('IP 直连').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#196B52')
-        Text('安全中继').fontSize(11).fontColor('#53695C')
+      Row({ space: 6 }) {
+        ForEach(['id', 'direct', 'relay'], (mode: string) => {
+          Button(mode === 'id' ? '设备 ID' : mode === 'direct' ? 'IP 直连' : '安全中继', { type: ButtonType.Normal })
+            .fontSize(12).fontColor(this.entryMode === mode ? '#196B52' : '#53695C')
+            .backgroundColor(this.entryMode === mode ? '#E5F2E9' : Color.Transparent).borderRadius(8).height(32).layoutWeight(1)
+            .enabled(!screenIsLive(this.screen) && !this.loading && !this.saving && !this.accessBusy)
+            .onClick(() => this.changeEntryMode(mode))
+        })
       }.width('100%').height(34).border({ width: { bottom: 1 }, color: '#E4EAE5' })
-      if (this.profiles.length > 0) {
-        Select(this.profiles.map((p: Profile): SelectOption => { return { value: p.name }; }))
-          .value(this.selectedProfile()?.name ?? '选择已保存的设备').width('100%').height(46)
-          .backgroundColor('#F6F8F5').font({ size: 14 }).fontColor('#20352F')
-          .onSelect((index: number) => { this.selectedId = this.profiles[index].id; })
-        Text(this.selectedProfile()?.target ?? '请先选择设备').fontSize(13).fontColor('#778780').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-      } else {
-        Text('先添加一台你的电脑').fontSize(17).fontColor('#20352F').margin({ top: 6 })
-        Text('保存 IP 或自建服务配置与可信设备身份，随时从这里连接。').fontSize(13).fontColor('#778780').lineHeight(22)
+      if (this.entryMode !== 'direct') {
+        TextInput({ text: this.entryPeerId, placeholder: '输入被控设备 ID（6 至 20 位数字）' })
+          .height(46).width('100%').fontSize(14).backgroundColor('#F6F8F5').borderRadius(10)
+          .type(InputType.Number).maxLength(20)
+          .enabled(!screenIsLive(this.screen) && !this.loading && !this.saving && !this.accessBusy)
+          .onChange((value: string) => { this.entryPeerId = value; this.selectedId = ''; })
+        Text(this.entryMode === 'id' ? '优先尝试 ID 协调直连，无法直连时使用已配置的中继。' : '通过已配置的中继服务连接此设备。')
+          .fontSize(11).fontColor('#778780').lineHeight(18)
       }
+      if (this.connectionProfiles().length > 0) {
+        Select(this.connectionProfiles().map((p: Profile): SelectOption => { return { value: this.connectionProfileLabel(p) }; }))
+          .selected(this.connectionProfiles().findIndex((p: Profile) => p.id === this.selectedProfile()?.id))
+          .value(this.connectionProfileLabel(this.selectedProfile())).width('100%').height(46)
+          .backgroundColor('#F6F8F5').font({ size: 14 }).fontColor('#20352F')
+          .enabled(!screenIsLive(this.screen) && !this.loading && !this.saving && !this.accessBusy)
+          .onSelect((index: number) => {
+            const profile = this.connectionProfiles()[index];
+            if (profile) { this.selectConnectionProfile(profile); }
+          })
+        if (this.entryMode !== 'direct' && this.entryPeerId.length > 0 && this.connectionProfiles().length > 1 && !this.selectedProfile()) {
+          Text('此 ID 有多份已保存资料，请核对并选择要连接的设备与服务。').fontSize(12).fontColor('#A26A2C').lineHeight(20)
+        }
+        Text(this.selectedProfile()?.target ?? '选择已保存资料后连接').fontSize(13).fontColor('#778780')
+      } else {
+        Text(this.entryMode === 'direct' ? '还没有保存 IP 直连设备' : this.entryPeerId.length > 0 ? '此 ID 尚未保存可信资料' : '添加你的第一台 ID 设备')
+          .fontSize(15).fontColor('#20352F').margin({ top: 6 })
+        Text(this.entryMode === 'direct' ? '先保存地址和可信设备身份，再连接桌面。' : '首次连接请导入被控端的公开配置，或填写自建服务信息和已核对的设备公钥。')
+          .fontSize(12).fontColor('#778780').lineHeight(20)
+      }
+      Row({ space: 10 }) {
+        this.action('导入公开配置', () => this.openImport(), false,
+          () => !this.loading && !this.saving && !this.accessBusy && this.storeError.length === 0)
+        this.action('添加设备', () => this.openEditor(), false,
+          () => !this.loading && !this.saving && !this.accessBusy && this.storeError.length === 0)
+      }.width('100%')
       Row({ space: 8 }) {
         Text('●  现场批准').fontSize(12).fontColor('#196B52')
         Text('无人值守 · 未实现').fontSize(11).fontColor('#9CA79F')
@@ -670,10 +720,10 @@ struct Desk {
           .enabled(!screenIsLive(this.screen))
           .onSelect((index: number) => { this.enterControl = index === 0; })
       }.width('100%')
-      Button(this.profiles.length === 0 ? '添加设备  ＋' : screenIsLive(this.screen) && this.sessionProfile?.id === this.selectedId ? '返回会话  →' : '连接桌面  →', { type: ButtonType.Normal })
+      Button(screenIsLive(this.screen) ? '返回当前会话  →' : '连接桌面  →', { type: ButtonType.Normal })
         .width('100%').height(46).borderRadius(10).backgroundColor('#196B52').fontColor('#FFFFFF').fontSize(14)
-        .enabled(!this.loading && !this.saving && this.storeError.length === 0 &&
-          (this.profiles.length === 0 || (this.selectedProfile() !== undefined && canConnectProfile(this.selectedProfile()!))))
+        .enabled(!this.loading && !this.saving && !this.accessBusy && this.storeError.length === 0 &&
+          (screenIsLive(this.screen) || (this.selectedProfile() !== undefined && canConnectProfile(this.selectedProfile()!))))
         .onClick(() => this.connectSelected())
       Text('Windows 批准连接后，即可按所选模式进入桌面。').fontSize(11).fontColor('#778780')
     }.width('100%').padding(24).alignItems(HorizontalAlign.Start).backgroundColor('#FFFFFF')
@@ -905,6 +955,8 @@ struct Desk {
           this.field('IP 地址', this.address, '192.168.1.10 或 ::1', (v: string) => { this.address = v; })
           this.field('端口', this.port, '21120', (v: string) => { this.port = v; })
         } else {
+          Text('服务验证公钥与被控设备公钥用途不同，请分别从自建服务管理者和被控端核对。也可直接导入被控端导出的 ID 公开配置。')
+            .fontSize(12).fontColor('#778780').lineHeight(20)
           this.field('ID 服务地址', this.server, '服务器域名或 IP:21116', (v: string) => { this.server = v; })
           this.field('服务验证公钥', this.serverKey, '从自建服务管理者处核对并复制', (v: string) => { this.serverKey = v; })
           this.field('中继服务地址', this.relayServer, '服务器域名或 IP:21117', (v: string) => { this.relayServer = v; })

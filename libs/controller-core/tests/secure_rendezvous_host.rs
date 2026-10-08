@@ -6,6 +6,45 @@ pub use remote_controller_core::protos::rendezvous as rendezvous_proto;
 #[path = "../../../src/server/secure_rendezvous_policy.rs"]
 mod host;
 #[test]
+fn id_export_coexists_with_direct_and_other_servers_without_replacing_identity() {
+    let direct = serde_json::json!({
+        "id": "official-123456789", "name": "Windows secure entry", "mode": "direct",
+        "target": "127.0.0.1:21120", "peerId": "123456789",
+        "peerPublicKey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "peerFingerprint": "saved-fingerprint"
+    });
+    let config = host::RendezvousConfig::parse(
+        "hbbs:21116",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "hbbr:21117",
+        "127.0.0.1",
+    )
+    .unwrap()
+    .unwrap();
+    let routed: serde_json::Value =
+        serde_json::from_str(&host::id_profile(&direct.to_string(), &config).unwrap()).unwrap();
+    assert_ne!(routed["id"], direct["id"]);
+    assert!(routed["id"].as_str().unwrap().len() <= 128);
+    assert_eq!(routed["mode"], "id");
+    assert_eq!(routed["target"], direct["peerId"]);
+    assert_eq!(routed["peerPublicKey"], direct["peerPublicKey"]);
+    assert_eq!(routed["peerFingerprint"], direct["peerFingerprint"]);
+    assert_eq!(routed["server"], config.server);
+    assert_eq!(routed["serverKey"], config.key);
+    assert_eq!(routed["relayServer"], config.relay);
+    let mut other_config = config.clone();
+    other_config.server = "other-hbbs:21116".into();
+    let other: serde_json::Value =
+        serde_json::from_str(&host::id_profile(&direct.to_string(), &other_config).unwrap())
+            .unwrap();
+    assert_ne!(routed["id"], other["id"]);
+    assert_eq!(
+        host::id_profile(&direct.to_string(), &config).unwrap(),
+        routed.to_string()
+    );
+}
+
+#[test]
 fn explicit_complete_configuration_only() {
     let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     assert!(host::RendezvousConfig::parse("", "", "", "")

@@ -57,6 +57,27 @@ impl RendezvousConfig {
     }
 }
 
+pub fn id_profile(direct_profile: &str, config: &RendezvousConfig) -> ResultType<String> {
+    use sha2::{Digest, Sha256};
+    let mut profile: serde_json::Value = serde_json::from_str(direct_profile)?;
+    let Some(id) = profile["peerId"].as_str() else {
+        bail!("Missing public peer identity");
+    };
+    let id = id.to_owned();
+    // Local profile IDs distinguish transports and servers, never replace existing trust.
+    profile["id"] = format!(
+        "official-id-{id}-{:x}",
+        Sha256::digest(config.server.as_bytes())
+    )
+    .into();
+    profile["mode"] = "id".into();
+    profile["target"] = id.into();
+    profile["server"] = config.server.clone().into();
+    profile["serverKey"] = config.key.clone().into();
+    profile["relayServer"] = config.relay.clone().into();
+    Ok(serde_json::to_string(&profile)?)
+}
+
 // Decode with checked arithmetic: malformed network addresses must not panic.
 pub fn decode_source(bytes: &[u8]) -> ResultType<SocketAddr> {
     if bytes.len() == 18 {

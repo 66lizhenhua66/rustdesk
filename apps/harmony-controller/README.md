@@ -1,5 +1,7 @@
 # 鸿蒙控制端：原生工作台、ID/中继与可信只读访问
 
+2026-10-08 增量：首页可选择设备 ID、IP 直连或安全中继，输入 ID 并选定保存的可信配置；首次连接可导入 Windows ID 公开配置。同 ID 多服务要求明确选择，未知 ID 不复用其他设备身份。IP 与 ID 导出资料可同时保存。核心 130、鸿蒙 25 项测试以及 Windows/HAP 构建通过；真实 hbbs/hbbr、公网和真机仍待验。见 [接入说明](../../docs/project/DEVICE-ID-ACCESS.md) 与 [验证记录](../../docs/project/research/2026-10-08-device-id-entry-validation.md)。
+
 2026-10-07 增量：普通连接现在默认「控制」，连接前可选择「仅查看」。Windows 本次批准、首帧和真实输入启用回执到达后，可直接在远程画面点按、拖动、长按右击及双指滚动；外接鼠标/滚轮/键盘直接映射，键盘按钮调起系统输入法，确认文字自动发送。独立控制面板已移除，收起工具栏不关闭控制。F1—F12、标点、左右 Windows 键与数字小键盘要求同步更新 Windows 被控端。139 项本轮回归和双端构建通过，模拟器安装/启动已验，真实输入与真机仍待验收，见 [本轮记录](../../docs/project/research/2026-10-07-direct-session-input.md)。下面各日期段落保留历史范围。
 
 2026-10-05 增量：工作台支持 IP、设备 ID 自动连接、强制中继与实际路径显示。ID/中继必须填写自建服务、公钥、中继及固定目标身份。新增「登记只读访问」「无人值守查看」「删除本机凭据」；绑定状态和到期时间来自 Asset Store。Windows 必须显式 `-Video -Unattended` 并单独批准登记，普通批准不能登记长期权限。首版无人值守只读、每次最多 15 分钟；授权 30 天，可从 Windows 撤销。详见 [入口说明](../../docs/project/OFFICIAL-SECURE-ENTRY.md)、[协议](../../docs/project/specs/003-trusted-controller-access.md) 和 [本轮验证](../../docs/project/research/2026-10-05-id-relay-unattended-validation.md)。以下 2026-10-04 记录保留前阶段范围。

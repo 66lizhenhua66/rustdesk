@@ -199,13 +199,10 @@ mod runtime {
                     &pk,
                     "127.0.0.1:1".parse()?,
                 )?;
-                let mut profile: serde_json::Value = serde_json::from_str(&base)?;
-                profile["mode"] = "id".into();
-                profile["target"] = Config::get_id().into();
-                profile["server"] = config.server.clone().into();
-                profile["serverKey"] = config.key.clone().into();
-                profile["relayServer"] = config.relay.clone().into();
-                std::fs::write(path, serde_json::to_string(&profile)?)?;
+                std::fs::write(
+                    path,
+                    crate::server::secure_rendezvous_policy::id_profile(&base, &config)?,
+                )?;
             }
         }
         log::info!("Secure host ID registered with configured rendezvous");
