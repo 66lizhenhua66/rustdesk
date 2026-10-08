@@ -1,9 +1,11 @@
-import { ScreenState, connectionPathLabel } from '../model/DeskModels';
+import { ScreenState, connectionPathLabel, screenIsLive } from '../model/DeskModels';
 import { SystemInputCommand } from '../model/InputModels';
 import { SessionInputController, InputSessionState } from '../input/SessionInputController';
 import { HarmonyInputAdapter } from '../input/HarmonyInputAdapter';
 import { RemoteInputMethod } from '../service/RemoteInputMethod';
 import { CanvasAvoidArea } from '../service/CanvasAvoidArea';
+import { SessionKeepScreenOn } from '../service/SessionKeepScreenOn';
+import { createSessionKeepScreenOn } from '../service/HarmonyKeepScreenOn';
 import { CanvasInsets, CanvasAvoidRegion, remainingCanvasInsets } from '../input/CanvasModels';
 
 @Component
@@ -13,7 +15,7 @@ export struct RemoteSession {
   @Prop endpoint: string = '';
   @Prop accessMode: string = '';
   @Prop initialControl: boolean = true;
-  @Prop surfaceActive: boolean = false;
+  @Prop @Watch('keepScreenOnChanged') surfaceActive: boolean = false;
   @Prop @Watch('inputAvailabilityChanged') sessionVisible: boolean = true;
   controller: XComponentController = new XComponentController();
   onBack: () => void = () => {};
@@ -37,6 +39,7 @@ export struct RemoteSession {
   private viewportY: number = 0;
   private avoidRegions: CanvasAvoidRegion[] = [];
   private avoidArea?: CanvasAvoidArea;
+  private keepScreenOn?: SessionKeepScreenOn;
   private inputController?: SessionInputController;
   private inputAdapter?: HarmonyInputAdapter;
   private keyboard: RemoteInputMethod = new RemoteInputMethod(
@@ -44,6 +47,7 @@ export struct RemoteSession {
     (open: boolean, error: string) => this.inputController?.keyboardChanged(open, error));
 
   aboutToAppear(): void {
+    this.keepScreenOn = createSessionKeepScreenOn(this.getUIContext());
     this.inputController = new SessionInputController({
       send: (command: SystemInputCommand) => this.onInput(JSON.stringify(command)),
       sendEvent: (event: string) => this.onInputEvent(event),
@@ -66,13 +70,18 @@ export struct RemoteSession {
     this.inputAvailabilityChanged();
   }
 
-  aboutToDisappear(): void { this.avoidArea?.stop(); this.inputController?.stop(); }
+  aboutToDisappear(): void { this.keepScreenOn?.stop(); this.avoidArea?.stop(); this.inputController?.stop(); }
 
   private readyForInput(): boolean { return this.inputState.ready; }
 
   private inputAvailabilityChanged(): void {
+    this.keepScreenOnChanged();
     this.updateCanvasLayout();
     this.inputController?.update(this.screen, this.sessionVisible);
+  }
+
+  private keepScreenOnChanged(): void {
+    this.keepScreenOn?.setEnabled(this.sessionVisible && this.surfaceActive && screenIsLive(this.screen));
   }
 
   private updateCanvasLayout(): void {

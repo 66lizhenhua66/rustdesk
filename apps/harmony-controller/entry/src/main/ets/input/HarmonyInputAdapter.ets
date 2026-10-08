@@ -1,6 +1,7 @@
 import { KeyCode } from '@kit.InputKit';
 import { InputPoint } from './InputEvents';
 import { SessionInputController } from './SessionInputController';
+import { activeHarmonyTouches } from './HarmonyTouchEvents';
 
 export class HarmonyInputAdapter {
   private readonly input: SessionInputController;
@@ -22,7 +23,8 @@ export class HarmonyInputAdapter {
     }
     const action = event.type === TouchType.Down ? 'down' : event.type === TouchType.Up ? 'up' :
       event.type === TouchType.Move ? 'move' : event.type === TouchType.Cancel ? 'cancel' : '';
-    if (this.input.touch({ action: action, points: points, changedPoints: changedPoints, time: Date.now() })) {
+    if (this.input.touch({ action: action, points: activeHarmonyTouches(action, points, changedPoints),
+      changedPoints: changedPoints, time: Date.now() })) {
       event.stopPropagation();
     }
   }
