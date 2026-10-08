@@ -2,17 +2,20 @@ use std::ffi::{c_char, c_void, CStr, CString};
 
 use remote_controller_core::canvas::{
     controller_canvas_event_v1, controller_canvas_free_v1, controller_canvas_new_v1,
-    controller_canvas_state_v1,
+    controller_canvas_state_v1, controller_canvas_suspend_v1,
 };
 use remote_controller_core::controller_free_string;
 use serde_json::{json, Value};
 
 #[derive(Default)]
-struct Commands(Vec<Value>);
+struct Commands {
+    values: Vec<Value>,
+    fail_at: Option<usize>,
+}
 unsafe extern "C" fn capture(ctx: *mut c_void, raw: *const c_char) -> i32 {
     let c = &mut *(ctx as *mut Commands);
-    c.0.push(serde_json::from_str(CStr::from_ptr(raw).to_str().unwrap()).unwrap());
-    0
+    c.values.push(serde_json::from_str(CStr::from_ptr(raw).to_str().unwrap()).unwrap());
+    if c.fail_at == Some(c.values.len()) { 73 } else { 0 }
 }
 struct Canvas(
     *mut remote_controller_core::canvas::ControllerCanvas,
@@ -69,13 +72,13 @@ fn direct_tap_is_transformed_and_black_bars_do_not_click() {
     c.event(json!({"kind":"touch","action":"up","points":[],"changedPoints":[{"id":1,"x":200,"y":150}],"time":100}));
     assert!(c
         .1
-         .0
+         .values
         .iter()
         .any(|v| v["kind"] == "button" && v["button"] == "left"));
-    c.1 .0.clear();
+    c.1.values.clear();
     c.event(json!({"kind":"touch","action":"down","points":[{"id":1,"x":25,"y":25}],"changedPoints":[{"id":1,"x":25,"y":25}],"time":200}));
     c.event(json!({"kind":"touch","action":"up","points":[],"changedPoints":[{"id":1,"x":25,"y":25}],"time":250}));
-    assert!(c.1 .0.is_empty());
+    assert!(c.1.values.is_empty());
 }
 
 #[test]
@@ -84,6 +87,255 @@ fn disabled_input_still_allows_view_gesture_and_releases() {
     c.event(config(false));
     c.event(json!({"kind":"touch","action":"down","points":[{"id":1,"x":200,"y":150}],"changedPoints":[{"id":1,"x":200,"y":150}],"time":0}));
     c.event(json!({"kind":"touch","action":"move","points":[{"id":1,"x":220,"y":150}],"changedPoints":[{"id":1,"x":220,"y":150}],"time":20}));
-    assert!(c.1 .0.is_empty());
+    assert!(c.1.values.is_empty());
     assert_eq!(c.state()["inputEnabled"], false);
+}
+
+fn touch(action: &str, points: &[(i64, f64, f64)], changed: &[(i64, f64, f64)], time: u64) -> Value {
+    let points: Vec<_> = points.iter().map(|(id, x, y)| json!({"id":id,"x":x,"y":y})).collect();
+    let changed: Vec<_> = changed.iter().map(|(id, x, y)| json!({"id":id,"x":x,"y":y})).collect();
+    json!({"kind":"touch","action":action,"points":points,"changedPoints":changed,"time":time})
+}
+
+#[test]
+fn finite_wheel_reaches_sink() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(json!({"kind":"wheel","action":"update","x":200,"y":150,"dx":0,"dy":2,"discrete":true})), 0);
+    assert!(c.1.values.iter().any(|v| v == &json!({"kind":"wheel","dx":0,"dy":2})));
+}
+
+#[test]
+fn sink_failure_stops_tap_and_disables_input() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    c.1.values.clear();
+    c.1.fail_at = Some(2);
+    assert_eq!(c.event(touch("down", &[(1, 200.0, 150.0)], &[(1, 200.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(1, 200.0, 150.0)], 50)), 73);
+    assert_eq!(c.1.values.len(), 2);
+    assert_eq!(c.state()["inputEnabled"], false);
+    assert_eq!(c.state()["gesture"], "idle");
+}
+
+#[test]
+fn release_propagates_failure_and_disabling_preserves_view() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.event(json!({"kind":"mouse","action":"press","button":"left","x":200,"y":150})), 0);
+    c.1.values.clear();
+    c.1.fail_at = Some(1);
+    assert_eq!(c.event(config(false)), 73);
+    assert_eq!(c.1.values, vec![json!({"kind":"release_all"})]);
+    assert_eq!(c.state()["inputEnabled"], false);
+    assert_eq!(c.state()["zoom"], 1.0);
+}
+
+#[test]
+fn pinch_and_rotation_keep_normalized_safe_center() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(false)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0)], &[(1, 150.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0), (2, 250.0, 150.0)], &[(2, 250.0, 150.0)], 10)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 100.0, 150.0), (2, 300.0, 150.0)], &[(1, 100.0, 150.0), (2, 300.0, 150.0)], 30)), 0);
+    assert_eq!(c.state()["zoom"], 2.0);
+    assert_eq!(c.event(touch("up", &[(1, 100.0, 150.0)], &[(2, 300.0, 150.0)], 40)), 0);
+    let before = c.state();
+    assert_eq!(c.event(touch("move", &[(1, 130.0, 150.0)], &[(1, 130.0, 150.0)], 50)), 0);
+    let panned = c.state();
+    assert!((panned["imageX"].as_f64().unwrap() - before["imageX"].as_f64().unwrap() - 30.0).abs() < 0.01);
+    let center_fraction = |s: &Value| ((s["safeX"].as_f64().unwrap() + s["safeWidth"].as_f64().unwrap() / 2.0 - s["imageX"].as_f64().unwrap()) / s["imageWidth"].as_f64().unwrap(), (s["safeY"].as_f64().unwrap() + s["safeHeight"].as_f64().unwrap() / 2.0 - s["imageY"].as_f64().unwrap()) / s["imageHeight"].as_f64().unwrap());
+    let old_center = center_fraction(&panned);
+    assert_eq!(c.event(json!({"kind":"configure","viewportWidth":500,"viewportHeight":320,"remoteWidth":400,"remoteHeight":200,"enabled":false})), 0);
+    let rotated = c.state();
+    let new_center = center_fraction(&rotated);
+    assert_eq!(rotated["zoom"], 2.0);
+    assert!((old_center.0 - new_center.0).abs() < 0.01);
+    assert!((old_center.1 - new_center.1).abs() < 0.01);
+    assert!(c.1.values.is_empty());
+}
+
+#[test]
+fn long_press_drag_and_two_finger_gestures_do_not_misclick() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 200.0, 150.0)], &[(1, 200.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(json!({"kind":"tick","time":1000})), 0);
+    assert_eq!(c.state()["gesture"], "dragReady");
+    assert!(c.1.values.is_empty());
+    assert_eq!(c.event(touch("move", &[(1, 215.0, 150.0)], &[(1, 215.0, 150.0)], 1100)), 0);
+    assert_eq!(c.state()["gesture"], "dragging");
+    assert_eq!(c.event(touch("up", &[], &[(1, 215.0, 150.0)], 1200)), 0);
+    assert_eq!(c.1.values.iter().filter(|v| v["kind"] == "button" && v["button"] == "left").count(), 2);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 180.0, 150.0)], &[(1, 180.0, 150.0)], 1300)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 180.0, 150.0), (2, 220.0, 150.0)], &[(2, 220.0, 150.0)], 1320)), 0);
+    assert_eq!(c.state()["nextTickMs"], 0);
+    assert_eq!(c.event(touch("up", &[(1, 180.0, 150.0)], &[(2, 220.0, 150.0)], 1380)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(1, 180.0, 150.0)], 1400)), 0);
+    assert_eq!(c.1.values.iter().filter(|v| v["kind"] == "button" && v["button"] == "right").count(), 2);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 180.0, 150.0)], &[(1, 180.0, 150.0)], 1500)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 180.0, 150.0), (2, 220.0, 150.0)], &[(2, 220.0, 150.0)], 1520)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 180.0, 150.0), (2, 220.0, 150.0), (3, 200.0, 180.0)], &[(3, 200.0, 180.0)], 1540)), 0);
+    assert_eq!(c.state()["nextTickMs"], 0);
+    assert_eq!(c.event(touch("up", &[], &[(1, 180.0, 150.0)], 1580)), 0);
+    assert!(c.1.values.iter().all(|v| v["kind"] != "button"));
+}
+
+#[test]
+fn read_only_pan_has_no_drag_timer_or_remote_commands() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(false)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 200.0, 150.0)], &[(1, 200.0, 150.0)], 0)), 0);
+    assert_eq!(c.state()["nextTickMs"], 0);
+    assert_eq!(c.event(json!({"kind":"tick","time":1100})), 0);
+    assert_eq!(c.state()["dragReady"], false);
+    assert_eq!(c.event(touch("up", &[], &[(1, 200.0, 150.0)], 1200)), 0);
+    assert!(c.1.values.is_empty());
+}
+
+#[test]
+fn pointer_mode_moves_relatively_and_keeps_pinch_local() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.event(json!({"kind":"touch_mode","mode":"pointer"})), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 200.0, 150.0)], &[(1, 200.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 212.0, 150.0)], &[(1, 212.0, 150.0)], 20)), 0);
+    assert!(c.1.values.iter().any(|v| v["kind"] == "move_relative" && v["dx"] == 7));
+    assert_eq!(c.event(touch("up", &[], &[(1, 212.0, 150.0)], 40)), 0);
+    assert!(c.1.values.iter().all(|v| v["kind"] != "button"));
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0)], &[(1, 150.0, 150.0)], 100)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0), (2, 250.0, 150.0)], &[(2, 250.0, 150.0)], 110)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 100.0, 150.0), (2, 300.0, 150.0)], &[(1, 100.0, 150.0), (2, 300.0, 150.0)], 120)), 0);
+    assert_eq!(c.state()["zoom"], 2.0);
+    assert!(c.1.values.iter().all(|v| v["kind"] != "button" && v["kind"] != "wheel"));
+}
+
+#[test]
+fn two_finger_scroll_does_not_right_click() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 180.0, 150.0)], &[(1, 180.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 180.0, 150.0), (2, 220.0, 150.0)], &[(2, 220.0, 150.0)], 10)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 180.0, 180.0), (2, 220.0, 180.0)], &[(1, 180.0, 180.0), (2, 220.0, 180.0)], 30)), 0);
+    assert!(c.1.values.iter().any(|v| v == &json!({"kind":"wheel","dx":0,"dy":1})));
+    assert_eq!(c.event(touch("up", &[], &[(1, 180.0, 180.0)], 50)), 0);
+    assert!(c.1.values.iter().all(|v| v["kind"] != "button"));
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 180.0, 150.0)], &[(1, 180.0, 150.0)], 100)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 180.0, 150.0), (2, 220.0, 150.0)], &[(2, 220.0, 150.0)], 110)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 180.0, 162.0), (2, 220.0, 162.0)], &[(1, 180.0, 162.0), (2, 220.0, 162.0)], 120)), 0);
+    assert_eq!(c.event(touch("up", &[(1, 180.0, 162.0)], &[(2, 220.0, 162.0)], 140)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(1, 180.0, 162.0)], 150)), 0);
+    assert!(c.1.values.is_empty());
+}
+
+#[test]
+fn suspend_clears_local_hold_without_sink_and_keeps_view() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0)], &[(1, 150.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0), (2, 250.0, 150.0)], &[(2, 250.0, 150.0)], 10)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 100.0, 150.0), (2, 300.0, 150.0)], &[(1, 100.0, 150.0), (2, 300.0, 150.0)], 20)), 0);
+    assert_eq!(c.state()["zoom"], 2.0);
+    assert_eq!(c.event(json!({"kind":"mouse","action":"press","button":"left","x":200,"y":150})), 0);
+    c.1.values.clear();
+    controller_canvas_suspend_v1(c.0);
+    assert!(c.1.values.is_empty());
+    assert_eq!(c.state()["inputEnabled"], false);
+    assert_eq!(c.state()["zoom"], 2.0);
+    assert_eq!(c.state()["nextTickMs"], 0);
+    assert_eq!(c.event(json!({"kind":"release"})), 0);
+    assert!(c.1.values.is_empty());
+}
+
+#[test]
+fn reset_view_releases_keyboard_and_mouse_hold_but_keeps_authorization() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.event(json!({"kind":"key","action":"down","physicalCode":42,"code":"Shift"})), 0);
+    assert_eq!(c.event(json!({"kind":"mouse","action":"press","button":"left","x":200,"y":150})), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(json!({"kind":"reset_view"})), 0);
+    assert_eq!(c.1.values, vec![json!({"kind":"release_all"})]);
+    assert_eq!(c.state()["inputEnabled"], true);
+    assert_eq!(c.state()["zoom"], 1.0);
+    assert_eq!(c.state()["nextTickMs"], 0);
+    c.1.values.clear();
+    assert_eq!(c.event(json!({"kind":"release"})), 0);
+    assert!(c.1.values.is_empty());
+}
+
+#[test]
+fn zoomed_image_outside_safe_rect_cannot_click() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0)], &[(1, 150.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0), (2, 250.0, 150.0)], &[(2, 250.0, 150.0)], 10)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 100.0, 150.0), (2, 300.0, 150.0)], &[(1, 100.0, 150.0), (2, 300.0, 150.0)], 20)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(1, 100.0, 150.0)], 30)), 0);
+    assert_eq!(c.state()["zoom"], 2.0);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(3, 10.0, 150.0)], &[(3, 10.0, 150.0)], 100)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(3, 10.0, 150.0)], 150)), 0);
+    assert!(c.1.values.is_empty());
+}
+
+#[test]
+fn shared_canvas_event_fixture_matches_public_abi() {
+    let fixture: Value = serde_json::from_str(include_str!("../../../apps/harmony-controller/tests/fixtures/canvas-events.json")).unwrap();
+    let mut c = Canvas::new();
+    for event in fixture["events"].as_array().unwrap() {
+        assert_eq!(c.event(event.clone()), 0);
+    }
+    assert_eq!(c.1.values, fixture["expectedCommands"].as_array().unwrap().clone());
+}
+
+#[test]
+fn read_only_pointer_mode_can_pan_zoomed_canvas() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(false)), 0);
+    assert_eq!(c.event(json!({"kind":"touch_mode","mode":"pointer"})), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0)], &[(1, 150.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0), (2, 250.0, 150.0)], &[(2, 250.0, 150.0)], 10)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 100.0, 150.0), (2, 300.0, 150.0)], &[(1, 100.0, 150.0), (2, 300.0, 150.0)], 20)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(1, 100.0, 150.0)], 30)), 0);
+    let before = c.state()["imageX"].as_f64().unwrap();
+    assert_eq!(c.event(touch("down", &[(3, 200.0, 150.0)], &[(3, 200.0, 150.0)], 100)), 0);
+    assert_eq!(c.event(touch("move", &[(3, 220.0, 150.0)], &[(3, 220.0, 150.0)], 120)), 0);
+    assert!((c.state()["imageX"].as_f64().unwrap() - before - 20.0).abs() < 0.01);
+    assert!(c.1.values.is_empty());
+}
+
+#[test]
+fn pointer_drag_releases_at_safe_edge() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.event(json!({"kind":"touch_mode","mode":"pointer"})), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 200.0, 150.0)], &[(1, 200.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(json!({"kind":"tick","time":1000})), 0);
+    assert_eq!(c.event(touch("move", &[(1, 210.0, 150.0)], &[(1, 210.0, 150.0)], 1100)), 0);
+    assert_eq!(c.state()["gesture"], "dragging");
+    assert_eq!(c.event(touch("move", &[(1, 410.0, 150.0)], &[(1, 410.0, 150.0)], 1200)), 0);
+    assert_eq!(c.state()["gesture"], "idle");
+    assert_eq!(c.1.values.iter().filter(|v| v["kind"] == "button" && v["button"] == "left").count(), 2);
+}
+
+#[test]
+fn pointer_two_finger_tap_in_padding_does_not_click() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.event(json!({"kind":"touch_mode","mode":"pointer"})), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 10.0, 150.0)], &[(1, 10.0, 150.0)], 0)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 10.0, 150.0), (2, 20.0, 150.0)], &[(2, 20.0, 150.0)], 10)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(1, 10.0, 150.0)], 100)), 0);
+    assert!(c.1.values.is_empty());
 }

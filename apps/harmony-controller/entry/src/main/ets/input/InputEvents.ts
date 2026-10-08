@@ -39,8 +39,7 @@ export interface NativeInputEvent {
   points?: InputPoint[];
   changedPoints?: InputPoint[];
   time?: number;
-  width?: number;
-  height?: number;
+  mode?: string;
   x?: number;
   y?: number;
   dx?: number;

@@ -553,7 +553,8 @@ struct Desk {
   }
 
   private sendSystemInputEvent(event: string): number {
-    if (!this.visible || this.task <= 0 || !canSendSystemInput(this.screen, this.sessionOpen, true)) { return 2; }
+    // View gestures are also available in read-only sessions; Rust gates every remote command.
+    if (!this.visible || this.task <= 0 || !this.sessionOpen || !this.screen.approved || !screenIsLive(this.screen)) { return 2; }
     try { return controller.sendInputEvent(this.task, event); }
     catch { return 1; }
   }
@@ -574,7 +575,7 @@ struct Desk {
     if (this.task <= 0) { return; }
     try {
       const result = controller.sendInputEvent(this.task, '{"kind":"release"}');
-      if (result === 3 || result === 4) {
+      if (result !== 0) {
         this.disconnect('输入释放请求无法提交，连接已结束。请重新连接并等待本机批准。');
       }
     } catch {

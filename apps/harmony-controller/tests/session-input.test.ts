@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { ScreenState } from '../entry/src/main/ets/model/DeskModels.ts';
 import type { SystemInputCommand } from '../entry/src/main/ets/model/InputModels.ts';
@@ -8,108 +9,123 @@ registerHooks({ resolve(specifier, context, nextResolve) {
   return nextResolve(specifier.startsWith('.') && !/\.[a-z]+$/i.test(specifier) ? specifier + '.ts' : specifier, context);
 } });
 const { SessionInputController } = await import('../entry/src/main/ets/input/SessionInputController.ts');
+const { CanvasState, CanvasInsets, remainingCanvasInsets } = await import('../entry/src/main/ets/input/CanvasModels.ts');
 
 function setup(initialControl = true, accessMode = '') {
   const events: Record<string, unknown>[] = [];
+  const commands: SystemInputCommand[] = [];
   const enabled: boolean[] = [];
-  let resets = 0;
+  const canvas = new CanvasState();
+  canvas.imageWidth = 352; canvas.imageHeight = 176;
+  canvas.imageX = 24; canvas.imageY = 72;
+  canvas.safeX = 24; canvas.safeY = 64; canvas.safeWidth = 352; canvas.safeHeight = 192;
   let releases = 0;
   let failure = 0;
   const input = new SessionInputController({
-    send: (_command: SystemInputCommand) => failure,
-    sendEvent: (json: string) => { events.push(JSON.parse(json)); return failure; },
-    reset: () => { resets++; },
+    send: (command: SystemInputCommand) => { commands.push(command); return failure; },
+    sendEvent: (json: string) => {
+      const event = JSON.parse(json);
+      events.push(event);
+      if (event.kind === 'configure') { canvas.inputEnabled = event.enabled; }
+      return failure;
+    },
+    reset: () => { canvas.inputEnabled = false; canvas.nextTickMs = 0; },
     setEnabled: (value: boolean) => { enabled.push(value); return 0; },
-    release: () => { releases++; },
+    release: () => { releases++; canvas.nextTickMs = 0; canvas.dragReady = false; },
     focus: () => {},
     openKeyboard: () => input.keyboardChanged(true, ''),
     closeKeyboard: () => input.keyboardChanged(false, ''),
-    canvasState: () => '{}',
+    canvasState: () => JSON.stringify(canvas),
     changed: () => {}
   }, initialControl, accessMode);
   const screen = new ScreenState();
   screen.phase = 'viewing'; screen.approved = true; screen.inputSupported = true;
-  screen.rendered = 1; screen.code = 'INPUT_STATE';
-  input.setViewport(1000, 500);
+  screen.rendered = 1; screen.code = 'INPUT_STATE'; screen.width = 200; screen.height = 100;
+  input.setViewport(400, 300);
   input.update(screen, true);
-  return { input, screen, events, enabled, resets: () => resets, releases: () => releases,
-    grant: () => { screen.inputGranted = true; input.update(screen, true); }, fail: () => { failure = 3; } };
+  return { input, screen, events, enabled, canvas, commands, releases: () => releases,
+    grant: () => { screen.inputGranted = true; input.update(screen, true); },
+    fail: () => { failure = 3; } };
 }
 
-test('Harmony forwards standard events to the shared native engine after input confirmation', () => {
-  const h = setup();
-  assert.deepEqual(h.enabled, [true]);
-  assert.equal(h.input.send({ kind: 'text', text: '未批准' }), false);
-  h.screen.code = 'INPUT_ENABLING'; h.input.update(h.screen, true);
-  assert.deepEqual(h.enabled, [true]);
-  h.screen.code = 'INPUT_STATE'; h.grant();
-  const point = { id: 1, x: 500, y: 250 };
-  h.input.touch({ action: 'down', points: [point], changedPoints: [point], time: 100 });
-  assert.deepEqual(h.events.at(-1), { kind: 'touch', action: 'down', points: [point], changedPoints: [point], time: 100, width: 1000, height: 500 });
-  h.input.mouse({ action: 'press', button: 'left', x: 100, y: 50 });
-  assert.equal(h.events.at(-1)?.kind, 'mouse');
-  h.input.wheel({ action: 'update', x: 100, y: 50, dx: 0, dy: -1, discrete: true });
-  assert.equal(h.events.at(-1)?.kind, 'wheel');
-  h.input.key({ action: 'down', physicalCode: 2017, code: 'KeyA' });
-  assert.deepEqual(h.events.at(-1), { kind: 'key', action: 'down', physicalCode: 2017, code: 'KeyA' });
+test('Harmony sends the same viewport event contract accepted by the real Rust canvas fixture', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/canvas-events.json', import.meta.url), 'utf8'));
+  const h = setup(); h.grant(); h.events.length = 0;
+  const insets = new CanvasInsets(); insets.top = 40; insets.bottom = 20;
+  h.input.setViewport(400, 300, insets);
+  for (const event of fixture.events.slice(1)) { h.input.touch(event); }
+  assert.deepEqual(h.events, fixture.events);
+  assert.equal(h.input.state.canvas.imageX, 24);
+  h.input.mouse({ action: 'press', button: 'left', x: 200, y: 160 });
+  assert.deepEqual(h.events.at(-1), { kind: 'mouse', action: 'press', button: 'left', x: 200, y: 160 });
+  h.input.wheel({ action: 'update', x: 200, y: 160, dx: 0, dy: -1, discrete: true });
+  assert.deepEqual(h.events.at(-1), { kind: 'wheel', action: 'update', x: 200, y: 160, dx: 0, dy: -1, discrete: true });
   h.input.toggleKeyboard();
   assert.equal(h.input.key({ action: 'down', physicalCode: 2017, code: 'KeyA' }), false);
-  const text = '确认文字🙂'.repeat(100);
-  h.input.send({ kind: 'text', text });
-  assert.deepEqual(h.events.at(-1), { kind: 'text', text });
+  h.input.send({ kind: 'text', text: '确认文字🙂' });
+  assert.deepEqual(h.events.at(-1), { kind: 'text', text: '确认文字🙂' });
   h.input.blur();
   assert.equal(h.input.state.keyboardOpen, false);
   assert.equal(h.input.state.controlMode, true);
-  assert.ok(h.releases() > 0);
 });
 
-test('native failure, view-only, revocation and hidden sessions stop every input source', () => {
-  const h = setup(); h.grant();
-  h.input.selectControl(false);
-  assert.deepEqual(h.enabled, [true, false]);
-  assert.equal(h.input.send({ kind: 'text', text: '仅查看' }), false);
-  h.screen.inputGranted = false; h.input.update(h.screen, true);
-  h.input.selectControl(true); h.grant(); h.fail();
-  h.input.touch({ action: 'down', points: [], changedPoints: [], time: 0 });
-  assert.equal(h.input.state.controlMode, false);
-  assert.match(h.input.state.notice, /暂停控制/);
-  const count = h.events.length;
-  assert.equal(h.input.key({ action: 'down', physicalCode: 1, code: 'KeyA' }), false);
-  assert.equal(h.events.length, count);
-  assert.ok(h.resets() > 0);
-  const hidden = setup(); hidden.grant(); hidden.input.update(hidden.screen, false);
-  assert.equal(hidden.input.state.ready, false);
-  assert.deepEqual(hidden.enabled, [true, false]);
-  const denied = setup(); denied.input.update(denied.screen, true); denied.input.update(denied.screen, true);
-  assert.equal(denied.input.state.controlMode, false);
-  assert.deepEqual(denied.enabled, [true]);
-  assert.deepEqual(setup(false).enabled, []);
-  for (const mode of ['pair', 'unattended']) {
-    const trusted = setup(true, mode); trusted.input.selectControl(true); trusted.grant();
-    assert.equal(trusted.input.state.ready, false);
-    assert.deepEqual(trusted.enabled, []);
+test('view-only can pan, zoom and reset locally while keys and text remain gated', () => {
+  for (const mode of ['', 'pair', 'unattended']) {
+    const h = setup(false, mode);
+    assert.deepEqual(h.enabled, []);
+    assert.equal(h.input.state.canvas.inputEnabled, false);
+    assert.equal(h.input.touch({ action: 'down', points: [], changedPoints: [], time: 0 }), true);
+    h.input.resetView();
+    assert.deepEqual(h.events.at(-1), { kind: 'reset_view' });
+    assert.equal(h.input.send({ kind: 'text', text: '不能发往远端' }), false);
+    assert.equal(h.input.key({ action: 'down', physicalCode: 1, code: 'KeyA' }), false);
   }
+  const h = setup(); h.grant();
+  h.canvas.zoom = 4; h.canvas.resetVisible = true;
+  h.input.setViewport(400, 300);
+  h.input.selectControl(false);
+  assert.equal(h.input.state.canvas.zoom, 4);
+  assert.equal(h.input.state.ready, false);
+  assert.deepEqual(h.enabled, [true, false]);
+  const count = h.events.length;
+  h.input.update(h.screen, false);
+  assert.equal(h.input.touch({ action: 'down', points: [], changedPoints: [], time: 0 }), false);
+  assert.equal(h.events.length, count);
 });
 
-test('canvas viewport configuration is emitted with remote dimensions and reset view is explicit', () => {
-  const h = setup();
-  h.grant();
-  h.input.setViewport(400, 300, 1920, 1080);
-  const configure = h.events.at(-1);
-  assert.deepEqual(configure, {
-    kind: 'configure', viewportWidth: 400, viewportHeight: 300,
-    remoteWidth: 1920, remoteHeight: 1080,
-    insets: { left: 0, top: 0, right: 0, bottom: 0 }, padding: 24, enabled: true
-  });
-  h.input.resetView();
-  assert.deepEqual(h.events.at(-1), { kind: 'reset_view' });
+test('native failure stops input and pending long-press timers never survive blur or hiding', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
+  const h = setup(); h.grant();
+  h.canvas.nextTickMs = 1100;
+  h.input.touch({ action: 'down', points: [{ id: 1, x: 200, y: 160 }], changedPoints: [{ id: 1, x: 200, y: 160 }], time: 100 });
+  h.input.blur();
+  const before = h.events.length;
+  t.mock.timers.tick(1001);
+  assert.equal(h.events.length, before);
+  h.canvas.nextTickMs = 2200;
+  h.input.touch({ action: 'down', points: [], changedPoints: [], time: 1101 });
+  h.input.update(h.screen, false);
+  const hiddenCount = h.events.length;
+  t.mock.timers.tick(2000);
+  assert.equal(h.events.length, hiddenCount);
+  const failed = setup(); failed.grant(); failed.fail();
+  failed.input.mouse({ action: 'move', button: '', x: 200, y: 160 });
+  assert.equal(failed.input.state.controlMode, false);
+  assert.match(failed.input.state.notice, /暂停控制/);
+  const count = failed.events.length;
+  assert.equal(failed.input.key({ action: 'down', physicalCode: 1, code: 'KeyA' }), false);
+  assert.equal(failed.events.length, count);
 });
 
-test('canvas state can expose zoom and drag readiness without changing key/text routing', () => {
-  const h = setup();
-  h.grant();
-  h.input.canvasState({ zoom: 2, resetVisible: true, dragReady: true });
-  assert.deepEqual(h.input.state.canvas, { zoom: 2, resetVisible: true, dragReady: true });
-  h.input.send({ kind: 'text', text: '仍走文字通道' });
-  assert.deepEqual(h.events.at(-1), { kind: 'text', text: '仍走文字通道' });
+test('safe-area overlap avoids double subtraction and preserves uncovered cutout and keyboard edges', () => {
+  const regions = [
+    { edge: 'top', x: 0, y: 0, width: 800, height: 24 },
+    { edge: 'left', x: 0, y: 0, width: 40, height: 480 },
+    { edge: 'bottom', x: 0, y: 280, width: 800, height: 200 },
+    { edge: 'bottom', x: 0, y: 464, width: 800, height: 16 }
+  ];
+  const actual = remainingCanvasInsets({ x: 0, y: 24, width: 800, height: 440 }, regions);
+  assert.deepEqual({ ...actual }, { left: 40, top: 0, right: 0, bottom: 184 });
+  const alreadySafe = remainingCanvasInsets({ x: 40, y: 24, width: 760, height: 256 }, regions);
+  assert.deepEqual({ ...alreadySafe }, { left: 0, top: 0, right: 0, bottom: 0 });
 });

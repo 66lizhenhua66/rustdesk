@@ -7,7 +7,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::interaction::{
-    controller_input_event_v1, controller_input_free_v1, controller_input_new_v1, ControllerInput,
+    controller_input_event_v1, controller_input_free_v1, controller_input_new_v1,
+    controller_input_reset_v1, ControllerInput,
     ControllerInputSink,
 };
 
@@ -51,6 +52,7 @@ fn default_padding() -> f64 {
 
 #[derive(Clone, Copy, Default)]
 struct Pt {
+    id: i64,
     x: f64,
     y: f64,
 }
@@ -63,6 +65,7 @@ struct Single {
     moved: bool,
     ready: bool,
     dragging: bool,
+    hit: bool,
 }
 
 #[derive(Default)]
@@ -75,6 +78,8 @@ struct Multi {
     pinch: bool,
     scroll: bool,
     third: bool,
+    remaining: Option<Pt>,
+    hit: bool,
 }
 
 #[derive(Default)]
@@ -214,8 +219,11 @@ impl ControllerCanvas {
             || c.insets.right < 0.0
             || c.insets.bottom < 0.0
         {
+            let status = self.cancel(sink, ctx);
+            if status != 0 {
+                return status;
+            }
             self.valid = false;
-            self.cancel(sink, ctx);
             self.viewport_w = c.viewport_width.max(0.0);
             self.viewport_h = c.viewport_height.max(0.0);
             self.remote_w = 0.0;
@@ -234,7 +242,10 @@ impl ControllerCanvas {
         let changed = self.geometry_changed(&c);
         if !changed {
             if self.enabled && !c.enabled {
-                self.release(sink, ctx);
+                let status = self.release(sink, ctx);
+                if status != 0 {
+                    return status;
+                }
             }
             self.enabled = c.enabled;
             return 0;
@@ -243,14 +254,22 @@ impl ControllerCanvas {
             let cx = self.safe_x + self.safe_w / 2.0;
             let cy = self.safe_y + self.safe_h / 2.0;
             Some((
-                (cx - self.image_x) / self.scale(),
-                (cy - self.image_y) / self.scale(),
+                (cx - self.image_x) / self.image_w(),
+                (cy - self.image_y) / self.image_h(),
             ))
         } else {
             None
         };
+        let old_cursor = if self.remote_w > 0.0 && self.remote_h > 0.0 {
+            Some((self.cursor_x / self.remote_w, self.cursor_y / self.remote_h))
+        } else {
+            None
+        };
         if changed {
-            self.cancel(sink, ctx);
+            let status = self.cancel(sink, ctx);
+            if status != 0 {
+                return status;
+            }
         }
         self.viewport_w = c.viewport_width;
         self.viewport_h = c.viewport_height;
@@ -267,42 +286,58 @@ impl ControllerCanvas {
         self.fit = (self.safe_w / c.remote_width).min(self.safe_h / c.remote_height);
         self.valid = self.fit.is_finite() && self.fit > 0.0;
         if self.valid {
-            if let Some((rx, ry)) = old_center {
-                self.image_x = self.safe_x + self.safe_w / 2.0 - rx * self.scale();
-                self.image_y = self.safe_y + self.safe_h / 2.0 - ry * self.scale();
+            if let Some((nx, ny)) = old_center {
+                self.image_x = self.safe_x + self.safe_w / 2.0 - nx * self.image_w();
+                self.image_y = self.safe_y + self.safe_h / 2.0 - ny * self.image_h();
             } else {
                 self.image_x = self.safe_x + (self.safe_w - self.image_w()) / 2.0;
                 self.image_y = self.safe_y + (self.safe_h - self.image_h()) / 2.0;
             }
             self.clamp_image();
-            self.cursor_x = c.remote_width / 2.0;
-            self.cursor_y = c.remote_height / 2.0;
+            let (cursor_x, cursor_y) = old_cursor.unwrap_or((0.5, 0.5));
+            self.cursor_x = (cursor_x * c.remote_width).clamp(0.0, c.remote_width);
+            self.cursor_y = (cursor_y * c.remote_height).clamp(0.0, c.remote_height);
         }
         if self.enabled && !c.enabled {
-            self.release(sink, ctx);
+            let status = self.release(sink, ctx);
+            if status != 0 {
+                return status;
+            }
         }
         self.enabled = c.enabled;
         0
     }
-    fn cancel(&mut self, sink: Option<ControllerInputSink>, ctx: *mut c_void) {
+    fn cancel(&mut self, sink: Option<ControllerInputSink>, ctx: *mut c_void) -> i32 {
         self.gesture = Gesture::default();
         self.remote_held = false;
         if let Some(cb) = sink {
-            self.release_with(cb, ctx);
+            self.release_with(cb, ctx)
+        } else {
+            0
         }
     }
-    fn release(&mut self, sink: Option<ControllerInputSink>, ctx: *mut c_void) {
-        self.cancel(sink, ctx);
+    fn release(&mut self, sink: Option<ControllerInputSink>, ctx: *mut c_void) -> i32 {
+        self.cancel(sink, ctx)
     }
-    fn release_with(&mut self, cb: ControllerInputSink, ctx: *mut c_void) {
-        let Ok(e) = CString::new(r#"{\"kind\":\"release\"}"#) else {
-            return;
-        };
-        controller_input_event_v1(self.input, e.as_ptr(), Some(cb), ctx);
+    fn release_with(&mut self, cb: ControllerInputSink, ctx: *mut c_void) -> i32 {
+        let status = controller_input_event_v1(self.input, c"{\"kind\":\"release\"}".as_ptr(), Some(cb), ctx);
+        if status != 0 {
+            self.fail_input();
+        }
+        status
+    }
+    fn fail_input(&mut self) {
+        self.gesture = Gesture::default();
+        self.remote_held = false;
+        self.enabled = false;
+        controller_input_reset_v1(self.input);
+    }
+    fn suspend(&mut self) {
+        self.fail_input();
     }
     fn local_to_remote(&self, x: f64, y: f64) -> Option<(f64, f64)> {
         let s = self.scale();
-        if !self.valid || s <= 0.0 {
+        if !self.valid || s <= 0.0 || !self.in_safe(x, y) {
             return None;
         }
         let rx = (x - self.image_x) / s;
@@ -313,6 +348,19 @@ impl ControllerCanvas {
             Some((rx, ry))
         }
     }
+    fn in_safe(&self, x: f64, y: f64) -> bool {
+        x >= self.safe_x && y >= self.safe_y
+            && x <= self.safe_x + self.safe_w && y <= self.safe_y + self.safe_h
+    }
+    fn local_to_remote_clamped(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        if !self.valid || self.scale() <= 0.0 {
+            return None;
+        }
+        let x = x.clamp(self.safe_x, self.safe_x + self.safe_w);
+        let y = y.clamp(self.safe_y, self.safe_y + self.safe_h);
+        Some((((x - self.image_x) / self.scale()).clamp(0.0, self.remote_w),
+              ((y - self.image_y) / self.scale()).clamp(0.0, self.remote_h)))
+    }
     fn input_event(&mut self, value: Value, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
         if !self.enabled || !self.valid {
             return 0;
@@ -322,7 +370,7 @@ impl ControllerCanvas {
         };
         let status = controller_input_event_v1(self.input, raw.as_ptr(), Some(sink), ctx);
         if status != 0 {
-            self.gesture = Gesture::default();
+            self.fail_input();
         }
         status
     }
@@ -336,12 +384,12 @@ impl ControllerCanvas {
         ctx: *mut c_void,
     ) -> i32 {
         if action == "cancel" {
-            self.release_with(sink, ctx);
-            return 0;
+            return self.cancel(Some(sink), ctx);
         }
         let Some((rx, ry)) = self.local_to_remote(x, y) else {
             if action == "release" && self.remote_held {
-                let status=self.input_event(json!({"kind":"mouse","action":"release","button":button,"x":0.0,"y":0.0,"width":self.remote_w,"height":self.remote_h}), sink, ctx);
+                let Some((rx, ry)) = self.local_to_remote_clamped(x, y) else { return 0 };
+                let status=self.input_event(json!({"kind":"mouse","action":"release","button":button,"x":rx,"y":ry,"width":self.remote_w,"height":self.remote_h}), sink, ctx);
                 if status == 0 {
                     self.remote_held = false;
                 }
@@ -373,6 +421,12 @@ impl ControllerCanvas {
         };
         self.input_event(json!({"kind":"wheel","action":"update","x":rx,"y":ry,"dx":dx,"dy":dy,"discrete":discrete,"width":self.remote_w,"height":self.remote_h}), sink, ctx)
     }
+    fn pointer_mouse(&mut self, action: &str, button: &str, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
+        self.input_event(json!({"kind":"mouse","action":action,"button":button,"x":self.cursor_x,"y":self.cursor_y,"width":self.remote_w,"height":self.remote_h}), sink, ctx)
+    }
+    fn pointer_wheel(&mut self, dx: f64, dy: f64, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
+        self.input_event(json!({"kind":"wheel","action":"update","x":self.cursor_x,"y":self.cursor_y,"dx":dx,"dy":dy,"discrete":true,"width":self.remote_w,"height":self.remote_h}), sink, ctx)
+    }
     fn points(v: &Value, key: &str) -> Option<Vec<Pt>> {
         v.get(key)?
             .as_array()?
@@ -385,7 +439,7 @@ impl ControllerCanvas {
                 {
                     return None;
                 }
-                let _ = p.get("id")?.as_i64()?;
+                let id = p.get("id")?.as_i64()?;
                 let x = p.get("x")?.as_f64()?;
                 let y = p.get("y")?.as_f64()?;
                 if !x.is_finite()
@@ -395,13 +449,14 @@ impl ControllerCanvas {
                 {
                     return None;
                 }
-                Some(Pt { x, y })
+                Some(Pt { id, x, y })
             })
             .collect()
     }
     fn centroid(points: &[Pt]) -> Pt {
         let n = points.len() as f64;
         Pt {
+            id: 0,
             x: points.iter().map(|p| p.x).sum::<f64>() / n,
             y: points.iter().map(|p| p.y).sum::<f64>() / n,
         }
@@ -431,33 +486,37 @@ impl ControllerCanvas {
             return 1;
         }
         if action == "cancel" {
-            self.cancel(Some(sink), ctx);
-            return 0;
+            return self.cancel(Some(sink), ctx);
         }
         if !self.valid {
             return 0;
         }
-        if self.touch_mode {
-            return self.pointer_touch(action, &points, &changed, time, sink, ctx);
-        }
         if points.len() >= 3 {
+            if self.gesture.multi.as_ref().map_or(false, |m| m.third) {
+                return 0;
+            }
             self.gesture.suppress = true;
             self.gesture.single = None;
-            self.cancel_input(sink, ctx);
+            self.gesture.next_tick = 0;
+            let status = self.cancel_input(sink, ctx);
+            if status != 0 { return status; }
             self.gesture
                 .multi
                 .get_or_insert_with(Default::default)
                 .third = true;
-            return if action == "up" && points.is_empty() {
-                0
-            } else {
-                0
-            };
+            return 0;
+        }
+        if self.gesture.multi.as_ref().map_or(false, |m| m.third) {
+            if points.is_empty() {
+                self.gesture = Gesture::default();
+            }
+            return 0;
         }
         if points.len() >= 2 {
             if self.gesture.multi.is_none() {
                 self.gesture.single = None;
                 self.gesture.suppress = true;
+                self.gesture.next_tick = 0;
                 let c = Self::centroid(&points);
                 let d = Self::distance(&points);
                 self.gesture.multi = Some(Multi {
@@ -466,10 +525,10 @@ impl ControllerCanvas {
                     start_distance: d,
                     last_distance: d,
                     started: time,
+                    hit: points.iter().all(|p| self.in_safe(p.x, p.y)),
                     ..Default::default()
                 });
-                self.cancel_input(sink, ctx);
-                return 0;
+                return self.cancel_input(sink, ctx);
             }
             let Some(mut m) = self.gesture.multi.take() else {
                 return 0;
@@ -492,7 +551,7 @@ impl ControllerCanvas {
                     1.0
                 };
                 let focal = c;
-                let focal_remote = self.local_to_remote(focal.x, focal.y);
+                let focal_remote = self.local_to_remote_clamped(focal.x, focal.y);
                 self.zoom = (self.zoom * factor).clamp(1.0, 10.0);
                 if let Some((rx, ry)) = focal_remote {
                     self.image_x = focal.x - rx * self.scale();
@@ -504,12 +563,18 @@ impl ControllerCanvas {
                 self.gesture.multi = Some(m);
                 return 0;
             }
-            if delta_c >= 8.0 {
+            if delta_c >= 8.0 || m.scroll {
                 m.scroll = true;
                 let dx = ((m.last_centroid.x - c.x) / 24.0).trunc() as i32;
                 let dy = ((c.y - m.last_centroid.y) / 24.0).trunc() as i32;
                 if dx != 0 || dy != 0 {
-                    let status = self.wheel(c.x, c.y, dx as f64, dy as f64, true, sink, ctx);
+                    let status = if self.touch_mode && m.hit {
+                        self.pointer_wheel(dx as f64, dy as f64, sink, ctx)
+                    } else if self.touch_mode {
+                        0
+                    } else {
+                        self.wheel(c.x, c.y, dx as f64, dy as f64, true, sink, ctx)
+                    };
                     if status != 0 {
                         return status;
                     }
@@ -520,14 +585,20 @@ impl ControllerCanvas {
             return 0;
         }
         if let Some(mut m) = self.gesture.multi.take() {
-            if m.pinch && points.len() == 1 {
+            if points.len() == 1 {
                 let p = points[0];
-                let dx = p.x - m.last_centroid.x;
-                let dy = p.y - m.last_centroid.y;
-                self.image_x += dx;
-                self.image_y += dy;
-                self.clamp_image();
-                m.last_centroid = p;
+                if let Some(previous) = m.remaining.filter(|previous| previous.id == p.id) {
+                    let dx = p.x - previous.x;
+                    let dy = p.y - previous.y;
+                    if m.pinch {
+                        self.image_x += dx;
+                        self.image_y += dy;
+                        self.clamp_image();
+                    } else if dx.abs() + dy.abs() > PAN_THRESHOLD {
+                        m.scroll = true;
+                    }
+                }
+                m.remaining = Some(p);
                 self.gesture.multi = Some(m);
                 return 0;
             }
@@ -544,14 +615,26 @@ impl ControllerCanvas {
                 let c = m.start_centroid;
                 self.gesture.multi = None;
                 self.gesture.suppress = false;
-                if tap {
-                    let _ = self.mouse("press", "right", c.x, c.y, sink, ctx);
-                    let _ = self.mouse("release", "right", c.x, c.y, sink, ctx);
+                if tap && (!self.touch_mode || m.hit) {
+                    let status = if self.touch_mode {
+                        self.pointer_mouse("press", "right", sink, ctx)
+                    } else {
+                        self.mouse("press", "right", c.x, c.y, sink, ctx)
+                    };
+                    if status != 0 { return status; }
+                    return if self.touch_mode {
+                        self.pointer_mouse("release", "right", sink, ctx)
+                    } else {
+                        self.mouse("release", "right", c.x, c.y, sink, ctx)
+                    };
                 }
                 return 0;
             }
             self.gesture.multi = Some(m);
             return 0;
+        }
+        if self.touch_mode {
+            return self.pointer_touch(action, &points, &changed, time, sink, ctx);
         }
         if action == "down" && points.len() == 1 {
             let p = points[0];
@@ -559,16 +642,19 @@ impl ControllerCanvas {
                 start: p,
                 last: p,
                 time,
+                hit: self.local_to_remote(p.x, p.y).is_some(),
                 ..Default::default()
             });
-            self.gesture.next_tick = time.saturating_add(1000);
+            self.gesture.next_tick = if self.enabled && self.gesture.single.as_ref().map_or(false, |s| s.hit) {
+                time.saturating_add(1000)
+            } else { 0 };
             return 0;
         }
         if let Some(mut s) = self.gesture.single.take() {
             let p = changed
-                .first()
+                .iter().find(|p| p.id == s.start.id)
                 .copied()
-                .or_else(|| points.first().copied())
+                .or_else(|| points.iter().find(|p| p.id == s.start.id).copied())
                 .unwrap_or(s.last);
             let dx = p.x - s.last.x;
             let dy = p.y - s.last.y;
@@ -583,20 +669,40 @@ impl ControllerCanvas {
                         self.image_y += dy;
                         self.clamp_image();
                     }
-                } else if s.ready && !s.dragging {
-                    let _ = self.mouse("move", "", s.start.x, s.start.y, sink, ctx);
-                    let _ = self.mouse("press", "left", s.start.x, s.start.y, sink, ctx);
-                    s.dragging = true;
+                } else if s.ready && !s.dragging && (dx != 0.0 || dy != 0.0) {
+                    if s.hit && self.enabled {
+                        let status = self.mouse("move", "", s.start.x, s.start.y, sink, ctx);
+                        if status != 0 { return status; }
+                        let status = self.mouse("press", "left", s.start.x, s.start.y, sink, ctx);
+                        if status != 0 { return status; }
+                        s.dragging = true;
+                        if self.local_to_remote(p.x, p.y).is_none() {
+                            return self.mouse("release", "left", p.x, p.y, sink, ctx);
+                        }
+                        let status = self.mouse("move", "", p.x, p.y, sink, ctx);
+                        if status != 0 { return status; }
+                    }
                 } else if s.dragging {
-                    let _ = self.mouse("move", "", p.x, p.y, sink, ctx);
+                    if self.local_to_remote(p.x, p.y).is_none() {
+                        s.dragging = false;
+                        s.moved = true;
+                        let status = self.mouse("release", "left", p.x, p.y, sink, ctx);
+                        if status != 0 { return status; }
+                    } else {
+                        let status = self.mouse("move", "", p.x, p.y, sink, ctx);
+                        if status != 0 { return status; }
+                    }
                 }
             }
             if action == "up" {
                 if s.dragging {
-                    let _ = self.mouse("release", "left", p.x, p.y, sink, ctx);
-                } else if !s.moved && !s.ready && time.saturating_sub(s.time) < 1000 {
-                    let _ = self.mouse("press", "left", p.x, p.y, sink, ctx);
-                    let _ = self.mouse("release", "left", p.x, p.y, sink, ctx);
+                    let status = self.mouse("release", "left", p.x, p.y, sink, ctx);
+                    if status != 0 { return status; }
+                } else if s.hit && !s.moved && !s.ready && time.saturating_sub(s.time) < 1000 {
+                    let status = self.mouse("press", "left", p.x, p.y, sink, ctx);
+                    if status != 0 { return status; }
+                    let status = self.mouse("release", "left", p.x, p.y, sink, ctx);
+                    if status != 0 { return status; }
                 }
                 self.gesture.next_tick = 0;
             }
@@ -606,9 +712,10 @@ impl ControllerCanvas {
         }
         0
     }
-    fn cancel_input(&mut self, sink: ControllerInputSink, ctx: *mut c_void) {
-        self.release_with(sink, ctx);
+    fn cancel_input(&mut self, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
+        let status = self.release_with(sink, ctx);
         self.remote_held = false;
+        status
     }
     fn pointer_touch(
         &mut self,
@@ -619,66 +726,78 @@ impl ControllerCanvas {
         sink: ControllerInputSink,
         ctx: *mut c_void,
     ) -> i32 {
-        if points.len() >= 2 {
-            if self.gesture.multi.is_none() {
-                let c = Self::centroid(points);
-                self.gesture.multi = Some(Multi {
-                    start_centroid: c,
-                    last_centroid: c,
-                    started: time,
-                    ..Default::default()
-                });
-                self.gesture.suppress = true;
-            }
-            return 0;
-        }
-        if action == "up" && points.is_empty() {
-            if let Some(m) = self.gesture.multi.take() {
-                self.gesture.suppress = false;
-                if time.saturating_sub(m.started) <= 300 {
-                    let status =
-                        self.mouse("press", "right", self.cursor_x, self.cursor_y, sink, ctx);
-                    if status != 0 {
-                        return status;
-                    }
-                    let status =
-                        self.mouse("release", "right", self.cursor_x, self.cursor_y, sink, ctx);
-                    if status != 0 {
-                        return status;
-                    }
-                }
-                return 0;
-            }
-        }
         if action == "down" && points.len() == 1 {
             let p = points[0];
             self.gesture.single = Some(Single {
                 start: p,
                 last: p,
                 time,
+                hit: self.in_safe(p.x, p.y),
                 ..Default::default()
             });
-            self.gesture.next_tick = time + 1000;
+            self.gesture.next_tick = if self.enabled && self.gesture.single.as_ref().map_or(false, |s| s.hit) {
+                time.saturating_add(1000)
+            } else { 0 };
             return 0;
         }
         if let Some(mut s) = self.gesture.single.take() {
             let p = changed
-                .first()
+                .iter().find(|p| p.id == s.start.id)
                 .copied()
-                .or_else(|| points.first().copied())
+                .or_else(|| points.iter().find(|p| p.id == s.start.id).copied())
                 .unwrap_or(s.last);
             if action == "move" {
-                let dx = (p.x - s.last.x) / self.image_w().max(1.0) * self.remote_w;
-                let dy = (p.y - s.last.y) / self.image_h().max(1.0) * self.remote_h;
-                if dx != 0.0 || dy != 0.0 && self.enabled {
-                    let v = json!({"kind":"move_relative","dx":dx.round() as i32,"dy":dy.round() as i32});
-                    let _ = self.emit_raw(v, sink, ctx);
+                let distance = ((p.x - s.start.x).powi(2) + (p.y - s.start.y).powi(2)).sqrt();
+                if !self.enabled {
+                    if s.hit && distance > PAN_THRESHOLD && self.zoom > 1.0 {
+                        self.image_x += p.x - s.last.x;
+                        self.image_y += p.y - s.last.y;
+                        self.clamp_image();
+                    }
+                    s.moved = distance > PAN_THRESHOLD;
+                    s.last = p;
+                    self.gesture.single = Some(s);
+                    return 0;
+                }
+                if s.ready && !s.dragging && s.hit && self.enabled && (p.x != s.last.x || p.y != s.last.y) {
+                    let status = self.pointer_mouse("press", "left", sink, ctx);
+                    if status != 0 { return status; }
+                    s.dragging = true;
+                }
+                if !s.ready && distance > PAN_THRESHOLD {
+                    s.moved = true;
+                    self.gesture.next_tick = 0;
+                }
+                if !self.in_safe(p.x, p.y) && s.dragging {
+                    self.cursor_x = (self.cursor_x + (p.x.clamp(self.safe_x, self.safe_x + self.safe_w) - s.last.x) / self.scale()).clamp(0.0, self.remote_w);
+                    self.cursor_y = (self.cursor_y + (p.y.clamp(self.safe_y, self.safe_y + self.safe_h) - s.last.y) / self.scale()).clamp(0.0, self.remote_h);
+                    self.gesture = Gesture::default();
+                    return self.pointer_mouse("release", "left", sink, ctx);
+                }
+                let old_x = self.cursor_x;
+                let old_y = self.cursor_y;
+                if s.hit {
+                    self.cursor_x = (self.cursor_x + (p.x - s.last.x) / self.scale()).clamp(0.0, self.remote_w);
+                    self.cursor_y = (self.cursor_y + (p.y - s.last.y) / self.scale()).clamp(0.0, self.remote_h);
+                }
+                let dx = self.cursor_x.round() as i32 - old_x.round() as i32;
+                let dy = self.cursor_y.round() as i32 - old_y.round() as i32;
+                if s.hit && self.enabled && (dx != 0 || dy != 0) {
+                    let status = self.emit_raw(json!({"kind":"move_relative","dx":dx,"dy":dy}), sink, ctx);
+                    if status != 0 { return status; }
                 }
                 s.last = p;
             }
-            if action == "up" && !s.moved {
-                let _ = self.mouse("press", "left", self.cursor_x, self.cursor_y, sink, ctx);
-                let _ = self.mouse("release", "left", self.cursor_x, self.cursor_y, sink, ctx);
+            if action == "up" {
+                self.gesture.next_tick = 0;
+                if s.dragging {
+                    return self.pointer_mouse("release", "left", sink, ctx);
+                }
+                if s.hit && !s.moved && !s.ready && time.saturating_sub(s.time) < 1000 {
+                    let status = self.pointer_mouse("press", "left", sink, ctx);
+                    if status != 0 { return status; }
+                    return self.pointer_mouse("release", "left", sink, ctx);
+                }
             }
             if action != "up" {
                 self.gesture.single = Some(s);
@@ -693,11 +812,16 @@ impl ControllerCanvas {
         let Ok(raw) = CString::new(v.to_string()) else {
             return 1;
         };
-        unsafe { (sink)(ctx, raw.as_ptr()) }
+        let status = unsafe { (sink)(ctx, raw.as_ptr()) };
+        if status != 0 { self.fail_input(); }
+        status
     }
     fn tick(&mut self, time: u64, _sink: ControllerInputSink, _ctx: *mut c_void) -> i32 {
+        if self.gesture.single.is_none() {
+            self.gesture.next_tick = 0;
+        }
         if let Some(mut s) = self.gesture.single.take() {
-            if !s.ready && time >= s.time + 1000 && !s.moved {
+            if self.enabled && s.hit && !s.ready && time >= s.time.saturating_add(1000) && !s.moved {
                 s.ready = true;
                 self.gesture.next_tick = 0;
             }
@@ -745,7 +869,8 @@ impl ControllerCanvas {
                 self.tick(time, sink, ctx)
             }
             "reset_view" => {
-                self.cancel(Some(sink), ctx);
+                let status = self.cancel(Some(sink), ctx);
+                if status != 0 { return status; }
                 self.zoom = 1.0;
                 self.image_x = self.safe_x + (self.safe_w - self.image_w()) / 2.0;
                 self.image_y = self.safe_y + (self.safe_h - self.image_h()) / 2.0;
@@ -754,10 +879,18 @@ impl ControllerCanvas {
             }
             "touch_mode" => match v.get("mode").and_then(Value::as_str) {
                 Some("pointer") => {
+                    if !self.touch_mode {
+                        let status = self.cancel(Some(sink), ctx);
+                        if status != 0 { return status; }
+                    }
                     self.touch_mode = true;
                     0
                 }
                 Some("direct") => {
+                    if self.touch_mode {
+                        let status = self.cancel(Some(sink), ctx);
+                        if status != 0 { return status; }
+                    }
                     self.touch_mode = false;
                     0
                 }
@@ -792,7 +925,7 @@ impl ControllerCanvas {
                 let dy = v.get("dy").and_then(Value::as_f64).unwrap_or(f64::NAN);
                 let discrete = v.get("discrete").and_then(Value::as_bool).unwrap_or(false);
                 if !matches!(action, "begin" | "update" | "")
-                    || ![x, y, dx, dy].iter().any(|n| !n.is_finite())
+                    || [x, y, dx, dy].iter().any(|n| !n.is_finite())
                 {
                     1
                 } else {
@@ -806,8 +939,7 @@ impl ControllerCanvas {
                 self.input_event(v, sink, ctx)
             }
             "release" => {
-                self.cancel(Some(sink), ctx);
-                0
+                self.cancel(Some(sink), ctx)
             }
             _ => 1,
         }
@@ -863,6 +995,13 @@ pub extern "C" fn controller_canvas_state_v1(canvas: *mut ControllerCanvas) -> *
     }
     CString::new(unsafe { (*canvas).state().to_string() })
         .map_or(ptr::null_mut(), CString::into_raw)
+}
+
+#[no_mangle]
+pub extern "C" fn controller_canvas_suspend_v1(canvas: *mut ControllerCanvas) {
+    if let Some(canvas) = unsafe { canvas.as_mut() } {
+        canvas.suspend();
+    }
 }
 
 #[no_mangle]

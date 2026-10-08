@@ -54,7 +54,7 @@ Windows 的“批准连接”只确认连接获批，CM 回执不表示视频已
 ## 结构
 
 - 会话输入已接入跨平台共享核心：手势、坐标、滚轮、按键状态与确认文本分块由 `libs/controller-core/src/interaction.rs` 实现，鸿蒙 NAPI 和 Flutter FFI 复用同一份。`entry/src/main/ets/input/` 只保留鸿蒙事件转换及会话 UI 状态适配。扩展操作体验的位置与约束见 [输入模块说明](entry/src/main/ets/input/README.md)。
-- 触屏画布使用共享 `controller_canvas_*_v1`：默认适应窗口，支持 1.0x—10.0x 本地缩放、旋转保留画布中心、单指平移、1 秒长按拖动准备、双指右键/滚轮/捏合及安全区内的“还原画面”按钮。当前以固定交互 padding 代替真实系统 insets；该接线已构建并安装模拟器，真机触屏、系统安全区和 Flutter 画布接线仍待验证。
+- 触屏画布使用共享 `controller_canvas_*_v1`：默认适应窗口，支持 1.0x—10.0x 本地缩放、旋转保留画布中心、单指平移、1 秒长按拖动准备、双指右键/滚轮/捏合与一键还原。工具中可选触屏/指针模式；只读也可本地缩放。窗口避让矩形与实际视口求交后叠加工具栏和 24vp 黑边，避免重复扣安全区。Flutter 可复用画布已接相同 ABI，真机呈现和操作由用户后续验收，见 [交付记录](../../docs/project/research/2026-10-08-canvas-completion.md)。
 - `entry/src/main/ets/pages/Desk.ets`：正式工作台、设备存储及会话调度；`components/RemoteSession.ets` 承载原生画面与工具栏，`model/DeskModels.ts` 将核心事件投影为界面状态。
 - `entry/src/main/ets/pages/Index.ets`：保留旧连接诊断和独立 DEMO 操作路径。
 - `entry/src/main/cpp`：薄 NAPI 桥接、原生 libvpx 解码和 NativeWindow 渲染。网络操作在后台，取消不在 UI 线程等待网络 worker 退出。

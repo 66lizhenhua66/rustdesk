@@ -1,5 +1,6 @@
 import { ScreenState } from '../model/DeskModels';
 import { SessionInputMode, canRequestSystemInput, canSendSystemInput } from '../model/InputModels';
+import { CanvasInsets, CanvasState, decodeCanvasState } from './CanvasModels';
 import type { SystemInputCommand } from '../model/InputModels';
 import type { NativeInputEvent, TouchInputEvent, MouseInputEvent, WheelInputEvent, KeyInputEvent } from './InputEvents';
 
@@ -9,19 +10,18 @@ export class InputSessionState {
   canControl: boolean = false;
   keyboardOpen: boolean = false;
   notice: string = '';
-  zoom: number = 1;
-  imageX: number = 0;
-  imageY: number = 0;
-  imageWidth: number = 0;
-  imageHeight: number = 0;
-  safeX: number = 0;
-  safeY: number = 0;
-  safeWidth: number = 0;
-  safeHeight: number = 0;
-  dragReady: boolean = false;
-  resetVisible: boolean = false;
-  gesture: string = 'idle';
-  canvas: { zoom: number, resetVisible: boolean, dragReady: boolean } = { zoom: 1, resetVisible: false, dragReady: false };
+  canvas: CanvasState = new CanvasState();
+}
+
+interface CanvasConfiguration {
+  kind: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  remoteWidth: number;
+  remoteHeight: number;
+  insets: CanvasInsets;
+  padding: number;
+  enabled: boolean;
 }
 
 export interface InputSessionHost {
@@ -46,8 +46,8 @@ export class SessionInputController {
   private visible: boolean = false;
   private width: number = 0;
   private height: number = 0;
-  private remoteWidth: number = 0;
-  private remoteHeight: number = 0;
+  private insets: CanvasInsets = new CanvasInsets();
+  private canvas: CanvasState = new CanvasState();
   private keyboardOpen: boolean = false;
   private notice: string = '';
   private wasReady: boolean = false;
@@ -63,7 +63,6 @@ export class SessionInputController {
   update(screen: ScreenState, visible: boolean): void {
     this.screen = screen;
     this.visible = visible;
-    this.configureCanvas();
     if (!visible || screen.phase === 'ended' || screen.phase === 'failed' || screen.phase === 'idle') {
       this.stop();
       return;
@@ -84,66 +83,55 @@ export class SessionInputController {
     this.publish();
   }
 
-  setViewport(width: number, height: number, remoteWidth: number = this.remoteWidth,
-    remoteHeight: number = this.remoteHeight): void {
-    this.width = width;
-    this.height = height;
-    this.remoteWidth = remoteWidth;
-    this.remoteHeight = remoteHeight;
+  setViewport(width: number, height: number, insets: CanvasInsets = new CanvasInsets()): void {
+    this.width = Math.max(0, width);
+    this.height = Math.max(0, height);
+    this.insets = insets;
     this.configureCanvas();
+    this.publish();
+  }
+
+  private canView(): boolean {
+    return this.visible && this.screen.approved && this.screen.rendered > 0 &&
+      this.screen.phase === 'viewing';
   }
 
   private configureCanvas(): void {
-    const remoteWidth = this.remoteWidth > 0 ? this.remoteWidth : this.screen.width;
-    const remoteHeight = this.remoteHeight > 0 ? this.remoteHeight : this.screen.height;
-    if (this.width <= 0 || this.height <= 0 || remoteWidth <= 0 || remoteHeight <= 0) { return; }
-    this.host.sendEvent(JSON.stringify({ kind: 'configure', viewportWidth: this.width,
-      viewportHeight: this.height, remoteWidth: remoteWidth, remoteHeight: remoteHeight,
-      insets: { left: 0, top: 0, right: 0, bottom: 0 }, padding: 24, enabled: this.ready() }));
-    this.refreshCanvasState();
+    if (!this.visible || !this.screen.approved ||
+      (this.screen.phase !== 'approved' && this.screen.phase !== 'viewing') ||
+      this.screen.width <= 0 || this.screen.height <= 0) { return; }
+    const event: CanvasConfiguration = { kind: 'configure', viewportWidth: this.width,
+      viewportHeight: this.height, remoteWidth: this.screen.width, remoteHeight: this.screen.height,
+      insets: this.insets, padding: 24, enabled: this.ready() };
+    this.nativeEvent(JSON.stringify(event));
   }
 
-  private refreshCanvasState(): void {
+  private refreshCanvas(): boolean {
     try {
-      const value = JSON.parse(this.host.canvasState());
-      if (typeof value.zoom === 'number') {
-        this.state.zoom = value.zoom; this.state.imageX = value.imageX ?? 0; this.state.imageY = value.imageY ?? 0;
-        this.state.imageWidth = value.imageWidth ?? 0; this.state.imageHeight = value.imageHeight ?? 0;
-        this.state.safeX = value.safeX ?? 0; this.state.safeY = value.safeY ?? 0;
-        this.state.safeWidth = value.safeWidth ?? 0; this.state.safeHeight = value.safeHeight ?? 0;
-        this.state.dragReady = value.dragReady === true; this.state.resetVisible = value.resetVisible === true;
-        this.state.gesture = value.gesture ?? 'idle';
-      }
-    } catch { /* State remains usable while the native canvas is unavailable. */ }
-  }
-
-  resetView(): void {
-    if (!this.ready()) { return; }
-    this.dispatch({ kind: 'reset_view' });
-    this.refreshCanvasState();
-    this.publish();
-  }
-
-  canvasState(value?: Record<string, Object>): void {
-    if (value) {
-      this.state.zoom = Number(value.zoom ?? 1);
-      this.state.resetVisible = value.resetVisible === true;
-      this.state.dragReady = value.dragReady === true;
-      this.publish();
-      return;
+      this.canvas = decodeCanvasState(this.host.canvasState());
+      this.scheduleTick();
+      return true;
+    } catch {
+      this.fail(1);
+      this.notice = '画布状态读取失败，已停止输入，请重新连接。';
+      return false;
     }
-    this.refreshCanvasState();
-    this.publish();
+  }
+
+  resetView(): void { this.viewEvent({ kind: 'reset_view' }); }
+
+  setTouchMode(mode: string): void {
+    if (mode === 'direct' || mode === 'pointer') { this.viewEvent({ kind: 'touch_mode', mode: mode }); }
   }
 
   selectControl(enabled: boolean): void {
     if (!enabled) { this.stop(); return; }
     if (!canRequestSystemInput(this.screen, this.visible) || this.accessMode) { return; }
+    this.notice = '';
     if (!this.mode.controlMode) {
       this.mode.select(true);
       this.update(this.screen, this.visible);
     }
-    this.notice = '';
     this.focus();
     this.publish();
   }
@@ -171,76 +159,94 @@ export class SessionInputController {
     const shouldDisable = this.mode.requested || this.screen.inputGranted || this.screen.code === 'INPUT_ENABLING';
     this.mode.select(false);
     this.wasReady = false;
+    this.clearHoldTimer();
     this.host.reset();
     this.host.closeKeyboard();
     this.notice = '';
     if (notifyServer && shouldDisable && this.host.setEnabled(false) !== 0) {
       this.notice = '无法确认键鼠关闭，正在结束连接。';
     }
+    this.canvas.dragReady = false;
+    this.canvas.inputEnabled = false;
+    this.canvas.nextTickMs = 0;
+    this.canvas.gesture = 'idle';
     this.publish();
   }
 
   touch(event: TouchInputEvent): boolean {
-    if (!this.ready()) { return false; }
+    if (!this.canView()) { return false; }
     if (event.action === 'down' && event.points.length <= 1 && event.changedPoints.length > 0) { this.focus(); }
-    if (event.action === 'down') {
-      this.clearHoldTimer();
-      this.holdTimer = setTimeout(() => {
-        this.dispatch({ kind: 'tick', time: Date.now() });
-        this.refreshCanvasState(); this.publish();
-      }, 1000);
-    } else if (event.action === 'up' || event.action === 'cancel') { this.clearHoldTimer(); }
-    this.dispatch({ kind: 'touch', action: event.action, points: event.points, changedPoints: event.changedPoints,
-      time: event.time, width: this.width, height: this.height });
-    this.refreshCanvasState(); this.publish();
+    this.viewEvent({ kind: 'touch', action: event.action, points: event.points,
+      changedPoints: event.changedPoints, time: event.time });
     return true;
   }
 
   private clearHoldTimer(): void {
-    if (this.holdTimer >= 0) { clearTimeout(this.holdTimer); this.holdTimer = -1; }
+    if (this.holdTimer !== -1) { clearTimeout(this.holdTimer); this.holdTimer = -1; }
+  }
+
+  private scheduleTick(): void {
+    this.clearHoldTimer();
+    if (!this.canView() || this.canvas.nextTickMs <= 0) { return; }
+    this.holdTimer = setTimeout(() => {
+      this.holdTimer = -1;
+      this.viewEvent({ kind: 'tick', time: Date.now() });
+    }, Math.max(0, this.canvas.nextTickMs - Date.now()));
   }
 
   mouse(event: MouseInputEvent): boolean {
     if (!this.ready()) { return false; }
     if (event.action === 'press') { this.focus(); }
-    this.dispatch({ kind: 'mouse', action: event.action, button: event.button, x: event.x, y: event.y,
-      width: this.width, height: this.height });
+    this.viewEvent({ kind: 'mouse', action: event.action, button: event.button, x: event.x, y: event.y });
     return true;
   }
 
   wheel(event: WheelInputEvent): boolean {
     if (!this.ready()) { return false; }
-    this.dispatch({ kind: 'wheel', action: event.action, x: event.x, y: event.y, dx: event.dx, dy: event.dy,
-      discrete: event.discrete, width: this.width, height: this.height });
+    this.viewEvent({ kind: 'wheel', action: event.action, x: event.x, y: event.y,
+      dx: event.dx, dy: event.dy, discrete: event.discrete });
     return true;
   }
 
   key(event: KeyInputEvent): boolean {
     if (!this.ready() || this.keyboardOpen || event.code.length === 0) { return false; }
-    this.dispatch({ kind: 'key', action: event.action, physicalCode: event.physicalCode, code: event.code });
+    this.viewEvent({ kind: 'key', action: event.action, physicalCode: event.physicalCode, code: event.code });
     return true;
   }
 
   send(command: SystemInputCommand): boolean {
     if (!this.ready()) { return false; }
-    if (command.kind === 'text') { return this.dispatch({ kind: 'text', text: command.text ?? '' }); }
-    return this.acceptResult(this.host.send(command));
+    if (command.kind === 'text') { return this.viewEvent({ kind: 'text', text: command.text ?? '' }); }
+    const result = this.host.send(command);
+    if (result !== 0) { this.fail(result); this.publish(); }
+    return result === 0;
   }
 
-  private dispatch(event: NativeInputEvent): boolean {
-    if (!this.ready()) { return false; }
-    return this.acceptResult(this.host.sendEvent(JSON.stringify(event)));
-  }
-
-  private acceptResult(result: number): boolean {
-    if (result === 0) { return true; }
-    this.stop();
-    this.notice = result === 2 ? '键鼠已关闭或不可用，当前仅查看。' : '输入未能排队，已暂停控制。请检查连接后重试。';
+  private viewEvent(event: NativeInputEvent): boolean {
+    if (!this.canView()) { return false; }
+    const accepted = this.nativeEvent(JSON.stringify(event));
     this.publish();
-    return false;
+    return accepted;
   }
 
-  release(): void { this.host.release(); }
+  private nativeEvent(raw: string): boolean {
+    const result = this.host.sendEvent(raw);
+    if (result !== 0) { this.fail(result); return false; }
+    return this.refreshCanvas();
+  }
+
+  private fail(result: number): void {
+    this.stop();
+    this.notice = result === 2 ? '键鼠已关闭或不可用，当前仅查看。' :
+      '输入或画布操作失败，已暂停控制，请检查连接后重试。';
+  }
+
+  release(): void {
+    this.clearHoldTimer();
+    this.host.release();
+    if (this.canView()) { this.refreshCanvas(); }
+    this.publish();
+  }
 
   focus(): void {
     if (!this.ready()) { return; }
@@ -259,11 +265,7 @@ export class SessionInputController {
     state.canControl = !this.accessMode && canRequestSystemInput(this.screen, this.visible);
     state.keyboardOpen = this.keyboardOpen;
     state.notice = this.notice;
-    state.zoom = this.state.zoom; state.imageX = this.state.imageX; state.imageY = this.state.imageY;
-    state.imageWidth = this.state.imageWidth; state.imageHeight = this.state.imageHeight;
-    state.safeX = this.state.safeX; state.safeY = this.state.safeY; state.safeWidth = this.state.safeWidth; state.safeHeight = this.state.safeHeight;
-    state.dragReady = this.state.dragReady; state.resetVisible = this.state.resetVisible; state.gesture = this.state.gesture;
-    state.canvas = { zoom: state.zoom, resetVisible: state.resetVisible, dragReady: state.dragReady };
+    state.canvas = this.canvas;
     this.state = state;
     this.host.changed(state);
   }

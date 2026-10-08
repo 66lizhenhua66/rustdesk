@@ -91,7 +91,7 @@ class FlutterInputAdapter {
   }
 
   int key(KeyEvent event) {
-    final code = _keyCode(event.physicalKey, event.logicalKey);
+    final code = keyCode(event.physicalKey, event.logicalKey);
     if (code == null) return 0;
     return _complete(engine.key(
       down: event is! KeyUpEvent,
@@ -138,7 +138,7 @@ class FlutterInputAdapter {
     kMiddleMouseButton: ControllerMouseButton.middle,
   };
 
-  static String? _keyCode(
+  static String? keyCode(
       PhysicalKeyboardKey physical, LogicalKeyboardKey logical) {
     final usage = physical.usbHidUsage;
     if (usage >= 0x70059 && usage <= 0x70061) {

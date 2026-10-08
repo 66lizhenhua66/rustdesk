@@ -3,6 +3,8 @@ import { SystemInputCommand } from '../model/InputModels';
 import { SessionInputController, InputSessionState } from '../input/SessionInputController';
 import { HarmonyInputAdapter } from '../input/HarmonyInputAdapter';
 import { RemoteInputMethod } from '../service/RemoteInputMethod';
+import { CanvasAvoidArea } from '../service/CanvasAvoidArea';
+import { CanvasInsets, CanvasAvoidRegion, remainingCanvasInsets } from '../input/CanvasModels';
 
 @Component
 export struct RemoteSession {
@@ -28,6 +30,13 @@ export struct RemoteSession {
   @State private toolbarCollapsed: boolean = false;
   @State private toolsOpen: boolean = false;
   @State private inputState: InputSessionState = new InputSessionState();
+  @State private safeInsets: CanvasInsets = new CanvasInsets();
+  @State private safeAreaNotice: string = '';
+  @State private toolbarHeight: number = 0;
+  private viewportX: number = 0;
+  private viewportY: number = 0;
+  private avoidRegions: CanvasAvoidRegion[] = [];
+  private avoidArea?: CanvasAvoidArea;
   private inputController?: SessionInputController;
   private inputAdapter?: HarmonyInputAdapter;
   private keyboard: RemoteInputMethod = new RemoteInputMethod(
@@ -48,23 +57,43 @@ export struct RemoteSession {
       changed: (state: InputSessionState) => { this.inputState = state; }
     }, this.initialControl, this.accessMode);
     this.inputAdapter = new HarmonyInputAdapter(this.inputController);
+    this.avoidArea = new CanvasAvoidArea(this.getUIContext(), (regions: CanvasAvoidRegion[], error: string) => {
+      if (!error) { this.avoidRegions = regions; }
+      this.safeAreaNotice = error;
+      this.updateCanvasLayout();
+    });
+    this.avoidArea.start();
     this.inputAvailabilityChanged();
   }
 
-  aboutToDisappear(): void { this.inputController?.stop(); }
+  aboutToDisappear(): void { this.avoidArea?.stop(); this.inputController?.stop(); }
 
   private readyForInput(): boolean { return this.inputState.ready; }
 
   private inputAvailabilityChanged(): void {
-    this.inputController?.setViewport(this.surfaceWidth(), this.surfaceHeight());
+    this.updateCanvasLayout();
     this.inputController?.update(this.screen, this.sessionVisible);
+  }
+
+  private updateCanvasLayout(): void {
+    this.safeInsets = remainingCanvasInsets({ x: this.viewportX, y: this.viewportY,
+      width: this.areaWidth, height: this.areaHeight }, this.avoidRegions);
+    const insets = new CanvasInsets();
+    insets.left = this.safeInsets.left;
+    insets.right = this.safeInsets.right;
+    insets.top = this.safeInsets.top + (this.toolbarCollapsed ? 48 : (this.toolbarHeight || (this.compact() ? 111 : 60)) + 12);
+    insets.bottom = this.safeInsets.bottom + 56;
+    this.inputController?.setViewport(this.areaWidth, this.areaHeight, insets);
   }
 
   private inputStatus(): string {
     if (this.accessMode) { return '只读查看 · 键鼠不可用'; }
     if (this.screen.code === 'INPUT_ENABLING') { return '正在启用键鼠 · 等待设备确认'; }
     if (this.screen.code === 'INPUT_DISABLING') { return '正在关闭键鼠 · 本地输入已停止'; }
-    if (this.readyForInput()) { return '控制中 · 点按操作，滑动拖动，长按右键，双指滚动'; }
+    if (this.inputState.canvas.dragReady) { return '已进入拖动状态 · 移动手指拖动远程对象'; }
+    if (this.inputState.canvas.gesture === 'dragging') { return '正在拖动远程对象 · 抬手释放'; }
+    if (this.readyForInput()) { return this.inputState.canvas.touchMode === 'pointer' ?
+      '指针模式 · 滑动移动鼠标，轻点左键，双指右键/滚动' : '触屏模式 · 滑动画布，长按 1 秒后拖动，双指右键/滚动'; }
     return this.screen.inputSupported ? '仅查看 · 点“控制”开始操作' : '仅查看 · 当前设备未开放键鼠能力';
   }
 
@@ -88,14 +117,16 @@ export struct RemoteSession {
     return this.screen.width > 0 && this.screen.height > 0 ? this.screen.width / this.screen.height : 16 / 9;
   }
 
-  private surfaceWidth(): number { return Math.min(this.areaWidth, this.areaHeight * this.ratio()); }
+  private surfaceWidth(): number { return Math.max(1, Math.min(this.areaWidth, this.areaHeight * this.ratio())); }
   private surfaceHeight(): number { return this.surfaceWidth() / this.ratio(); }
   private panelTop(): number { return this.compact() ? 134 : 80; }
 
-  private canvasWidth(): number { return this.inputState.imageWidth > 0 ? this.inputState.imageWidth : this.surfaceWidth(); }
-  private canvasHeight(): number { return this.inputState.imageHeight > 0 ? this.inputState.imageHeight : this.surfaceHeight(); }
-  private canvasX(): number { return this.inputState.imageWidth > 0 ? this.inputState.imageX : (this.areaWidth - this.surfaceWidth()) / 2; }
-  private canvasY(): number { return this.inputState.imageHeight > 0 ? this.inputState.imageY : (this.areaHeight - this.surfaceHeight()) / 2; }
+  private canvasWidth(): number { return this.inputState.canvas.imageWidth > 0 ? this.inputState.canvas.imageWidth / this.inputState.canvas.zoom : this.surfaceWidth(); }
+  private canvasHeight(): number { return this.canvasWidth() / this.ratio(); }
+  private canvasX(): number { return this.inputState.canvas.imageX - this.inputState.canvas.safeX; }
+  private canvasY(): number { return this.inputState.canvas.imageY - this.inputState.canvas.safeY; }
+  private safeWidth(): number { return this.screen.approved ? this.inputState.canvas.safeWidth : this.areaWidth; }
+  private safeHeight(): number { return this.screen.approved ? this.inputState.canvas.safeHeight : this.areaHeight; }
 
   private leave(): void {
     this.inputController?.stop();
@@ -119,10 +150,10 @@ export struct RemoteSession {
 
   @Builder
   private resetCanvasButton() {
-    if (this.inputState.resetVisible) {
+    if (this.inputState.canvas.resetVisible) {
       Button('还原画面', { type: ButtonType.Normal }).height(38).fontSize(11).fontColor('#196B52')
         .backgroundColor('#F9FCF7').borderRadius(9).border({ width: 1, color: '#DCE6DC' })
-        .position({ x: Math.max(12, this.areaWidth - 100), y: Math.max(12, this.inputState.safeY + 8) })
+        .width(94).focusOnTouch(false)
         .accessibilityText('还原画面到适应窗口并居中')
         .onClick(() => this.inputController?.resetView())
     }
@@ -204,6 +235,7 @@ export struct RemoteSession {
         this.inputController?.blur();
         this.toolsOpen = false;
         this.toolbarCollapsed = true;
+        this.updateCanvasLayout();
       })
     }
   }
@@ -231,9 +263,13 @@ export struct RemoteSession {
           this.endButtons()
         }.width('100%')
       }
-    }.padding(8).width(Math.min(this.areaWidth - 24, 920)).borderRadius(14)
+    }.padding(8).width(Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24, 920)).borderRadius(14)
       .backgroundColor('#F9FCF7').border({ width: 1, color: '#DCE6DC' })
-      .position({ x: (this.areaWidth - Math.min(this.areaWidth - 24, 920)) / 2, y: 12 })
+      .position({ x: this.safeInsets.left + (this.areaWidth - this.safeInsets.left - this.safeInsets.right - Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24, 920)) / 2, y: this.safeInsets.top + 12 })
+      .onAreaChange((_old: Area, area: Area) => {
+        const height = Number(area.height);
+        if (height > 0 && height !== this.toolbarHeight) { this.toolbarHeight = height; this.updateCanvasLayout(); }
+      })
   }
 
   @Builder
@@ -248,9 +284,9 @@ export struct RemoteSession {
       }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 12 })
     }.width(Math.min(this.areaWidth - 24, 360)).borderRadius({ bottomLeft: 12, bottomRight: 12 })
       .backgroundColor('#F9FCF7')
-      .position({ x: (this.areaWidth - Math.min(this.areaWidth - 24, 360)) / 2, y: 0 })
+      .position({ x: (this.areaWidth - Math.min(this.areaWidth - 24, 360)) / 2, y: this.safeInsets.top })
       .accessibilityText('展开会话工具栏，包含断开按钮')
-      .onClick(() => { this.toolbarCollapsed = false; })
+      .onClick(() => { this.toolbarCollapsed = false; this.updateCanvasLayout(); })
   }
 
   @Builder
@@ -273,7 +309,7 @@ export struct RemoteSession {
         Column({ space: 12 }) {
           Column({ space: 7 }) {
             Text(this.inputStatus()).fontSize(15).fontWeight(FontWeight.Medium).fontColor('#196B52')
-            Text(this.screen.inputSupported ? '直接在远程画面点按或拖动，长按右击，双指滚动。外接鼠标与键盘可直接操作，键盘按钮可调起系统输入法。' : '当前被控入口未开放键鼠能力。')
+            Text('轻点左键，双指轻点右键，双指滑动滚轮；捏合缩放 1～10 倍。单指滑动画布，长按 1 秒出现提示后拖动远程对象。')
               .fontSize(12).fontColor('#778780').lineHeight(20)
           }.alignItems(HorizontalAlign.Start).width('100%').padding(14).borderRadius(10).backgroundColor('#EDF4E6')
           this.stat('连接地址', () => this.endpoint || '未提供')
@@ -287,7 +323,11 @@ export struct RemoteSession {
             `${this.screen.width} × ${this.screen.height}` : '等待画面协商')
           this.stat('实际接收 / 呈现', () => `${this.screen.frames} 帧 / ${this.screen.rendered} 帧`)
           this.stat('已接收视频数据', () => `${Math.round(this.screen.bytes / 1024)} KiB`)
-          this.stat('画面显示', () => '适应窗口 · 保持远端比例')
+          this.stat('画面显示', () => `${this.inputState.canvas.zoom.toFixed(1)} 倍 · 保持远端比例`)
+          Row({ space: 8 }) {
+            Button('触屏模式').fontSize(12).height(40).onClick(() => this.inputController?.setTouchMode('direct'))
+            Button('指针模式').fontSize(12).height(40).onClick(() => this.inputController?.setTouchMode('pointer'))
+          }
           this.stat('画质', () => 'VP8 软件视频 · 画质切换尚未实现')
           Text(this.accessMode ? '此连接仅可查看。Windows 可随时撤销已登记设备。' :
             '本次批准仅用于当前连接。断开或重新连接后，需要再次在 Windows 本机批准。')
@@ -377,9 +417,17 @@ export struct RemoteSession {
   build() {
     Stack({ alignContent: Alignment.Center }) {
       if (this.surfaceActive) {
-        XComponent({ type: XComponentType.SURFACE, controller: this.controller })
-          .width(this.canvasWidth()).height(this.canvasHeight()).backgroundColor('#10181B')
-          .position({ x: this.canvasX(), y: this.canvasY() })
+        Stack({ alignContent: Alignment.TopStart }) {
+          Stack({ alignContent: Alignment.TopStart }) {
+            XComponent({ type: XComponentType.SURFACE, controller: this.controller })
+              .width(this.canvasWidth()).height(this.canvasHeight()).backgroundColor('#10181B')
+              .scale({ x: this.inputState.canvas.zoom, y: this.inputState.canvas.zoom, centerX: 0, centerY: 0 })
+              .position({ x: this.canvasX(), y: this.canvasY() })
+              .hitTestBehavior(HitTestMode.None)
+          }.width(this.safeWidth()).height(this.safeHeight()).clip(true)
+            .position({ x: this.inputState.canvas.safeX, y: this.inputState.canvas.safeY })
+            .hitTestBehavior(HitTestMode.None)
+        }.width('100%').height('100%').backgroundColor('#10181B').clip(true)
           .id('remote-desktop-input').focusable(true).focusOnTouch(true)
           .onTouch((event: TouchEvent) => this.inputAdapter?.touch(event))
           .onMouse((event: MouseEvent) => this.inputAdapter?.mouse(event))
@@ -393,11 +441,14 @@ export struct RemoteSession {
           this.stateCard()
         }.width('100%').height('100%').backgroundColor('#344B45')
       } else {
-        this.resetCanvasButton()
-        Text(this.inputState.notice.length > 0 && this.screen.code !== 'INPUT_DISABLING' ? this.inputState.notice : this.inputStatus()).fontSize(11).fontColor('#426A4D')
-          .padding({ left: 12, right: 12, top: 9, bottom: 9 }).borderRadius(8).backgroundColor('#EDF4E6')
-          .height(32).constraintSize({ maxWidth: this.areaWidth - 24 }).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          .position({ x: 12, y: this.areaHeight - 44 })
+        Row({ space: 8 }) {
+          Text(this.safeAreaNotice || (this.inputState.notice.length > 0 && this.screen.code !== 'INPUT_DISABLING' ? this.inputState.notice :
+            `${this.inputState.canvas.zoom.toFixed(1)}× · ${this.inputStatus()}`)).fontSize(11).fontColor('#426A4D')
+            .padding({ left: 12, right: 12, top: 8, bottom: 8 }).borderRadius(8).backgroundColor('#EDF4E6')
+            .height(38).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          this.resetCanvasButton()
+        }.width(Math.max(1, this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24))
+          .position({ x: this.safeInsets.left + 12, y: Math.max(0, this.areaHeight - this.safeInsets.bottom - 50) })
         if (this.toolbarCollapsed) {
           this.collapsedToolbar()
         } else {
@@ -411,10 +462,12 @@ export struct RemoteSession {
       .onAreaChange((_oldArea: Area, area: Area) => {
         const width: number = parseFloat(String(area.width));
         const height: number = parseFloat(String(area.height));
-        if (width !== this.areaWidth || height !== this.areaHeight) { this.inputController?.release(); }
         if (width > 0) { this.areaWidth = width; }
         if (height > 0) { this.areaHeight = height; }
-        this.inputController?.setViewport(this.surfaceWidth(), this.surfaceHeight());
+        this.viewportX = Number(area.globalPosition.x);
+        this.viewportY = Number(area.globalPosition.y);
+        this.avoidArea?.refresh();
+        this.updateCanvasLayout();
       })
   }
 }

@@ -2,6 +2,8 @@
 
 此图描述当前跨平台输入分层。鸿蒙已接入共享 Rust；Flutter 的 FFI 与事件适配已在 Windows 使用真实 DLL 验证，完整客户端 UI、Android/iOS 原生打包仍待后续。
 
+画布输入增量：未缩放 viewport 采集坐标 → `canvas.h` 共享变换与手势判定 → 本地缩放/平移状态回传 UI，或生成远端语义命令进入原会话授权。系统安全区和应用工具栏只作为 configure 数据，不在各平台重复手势算法。仅查看允许本地画布操作；Flutter 新增同 ABI 的 CanvasView。详见 [SPEC-005](specs/005-touch-display-and-gestures.md) 与 [交付记录](research/2026-10-08-canvas-completion.md)。
+
 ## 已实现的主链路
 
 ```mermaid

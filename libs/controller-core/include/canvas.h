@@ -18,6 +18,10 @@ int32_t controller_canvas_event_v1(ControllerCanvas *canvas, const char *event_j
     ControllerInputSink sink, void *context);
 /* Returned state is owned and must be freed with controller_free_string. */
 char *controller_canvas_state_v1(ControllerCanvas *canvas);
+/* Clear local pressed/touch state and disable input after the caller has
+ * already revoked authorization or released remote input. Keeps view and mode.
+ * Use a "release" event with a sink when remote keys/buttons must be released. */
+void controller_canvas_suspend_v1(ControllerCanvas *canvas);
 void controller_canvas_free_v1(ControllerCanvas *canvas);
 
 #ifdef __cplusplus

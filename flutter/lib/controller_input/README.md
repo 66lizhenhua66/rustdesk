@@ -35,6 +35,24 @@ packaging, symbol retention, signing and device validation are still pending;
 Windows controller library bundling is also pending. Windows host `SendInput`
 is a separate controlled-device role.
 
+`ControllerCanvasEngine` binds `include/canvas.h` and exposes the Rust-owned
+viewport transform, gesture state, and `nextTickMs`. `ControllerCanvasView` is a
+reusable full-viewport widget: supply the current remote image dimensions, the
+strict session's actual input grant as `inputEnabled`, and the existing decoded
+frame through `remoteFrameBuilder`. It reads real `MediaQuery` padding and adds
+the caller's top/bottom overlay heights before configuring the canvas. Pointer
+positions come from the unscaled viewport `Listener`; the decoded frame is
+painted at the Rust-reported image rectangle and clipped to its safe rectangle.
+The view shows the reset control and drag-ready hint, schedules only the Rust
+requested single-shot tick, and releases input on focus loss, hiding, and
+unmount. The owner forwards confirmed IME commits through `engine.commitText`
+and can use `engine.setTouchMode` for direct/pointer mode. It must revoke the
+session grant or disconnect before disposing the engine. If the session is
+already revoked, call `engine.suspend()` to clear local pressed state without a
+remote sink call. The engine's required `onFailure` must disable the real
+session input or disconnect it. This widget is not yet mounted in a production
+remote-control page; native packaging and device acceptance remain separate.
+
 Run the native smoke tests from `rustdesk/` after building controller-core:
 
 ```powershell

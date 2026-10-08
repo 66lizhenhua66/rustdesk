@@ -1,5 +1,5 @@
 import { inputMethod } from '@kit.IMEKit';
-import { SystemInputCommand } from '../model/InputModels';
+import type { SystemInputCommand } from '../model/InputModels';
 
 export class RemoteInputMethod {
   private send: (command: SystemInputCommand) => boolean;
@@ -120,8 +120,16 @@ export class RemoteInputMethod {
           this.dispatch({ kind: 'key', code: 'Shift', down: false });
         }
         return;
-      default:
+      case inputMethod.EnterKeyType.UNSPECIFIED:
+      case inputMethod.EnterKeyType.GO:
+      case inputMethod.EnterKeyType.SEARCH:
+      case inputMethod.EnterKeyType.SEND:
+      case inputMethod.EnterKeyType.DONE:
+      case inputMethod.EnterKeyType.NEWLINE:
         this.tapKey('Enter');
+        return;
+      default:
+        return;
     }
   };
   private moveCursor = (direction: inputMethod.Direction): void => {

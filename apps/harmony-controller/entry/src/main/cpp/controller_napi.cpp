@@ -591,8 +591,7 @@ napi_value SetInputEnabled(napi_env env, napi_callback_info info) {
     auto job = ActiveSession(env, id);
     if (job && !enabled) {
         controller_input_reset_v1(job->input);
-        controller_canvas_free_v1(job->canvas);
-        job->canvas = nullptr;
+        controller_canvas_suspend_v1(job->canvas);
     }
     const int32_t status = job ? controller_session_set_input_enabled_v1(job->session, static_cast<uint8_t>(enabled)) : 1;
     napi_create_int32(env, status, &result);
@@ -626,8 +625,7 @@ napi_value SendSystemInputEvent(napi_env env, napi_callback_info info) {
             status = controller_canvas_event_v1(job->canvas, event.c_str(), QueueCanvasInput, job->session);
         }
         if (status != 0) {
-            controller_canvas_free_v1(job->canvas);
-            job->canvas = nullptr;
+            controller_canvas_suspend_v1(job->canvas);
             if (controller_session_set_input_enabled_v1(job->session, 0) != 0) {
                 controller_session_cancel(job->session);
             }
@@ -646,7 +644,10 @@ napi_value ResetSystemInput(napi_env env, napi_callback_info info) {
         Error(env, "INVALID_ARGUMENT", "Expected a task ID"); return nullptr;
     }
     auto job = ActiveSession(env, id);
-    if (job) { controller_input_reset_v1(job->input); }
+    if (job) {
+        controller_input_reset_v1(job->input);
+        controller_canvas_suspend_v1(job->canvas);
+    }
     napi_get_undefined(env, &result);
     return result;
 }
