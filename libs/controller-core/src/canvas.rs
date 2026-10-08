@@ -275,6 +275,7 @@ impl ControllerCanvas {
         {
             c.enabled = false;
         }
+        let initialize_pointer = c.enabled && (!self.enabled || !self.valid);
         let changed = self.geometry_changed(&c);
         if !changed {
             if self.enabled && !c.enabled {
@@ -284,6 +285,9 @@ impl ControllerCanvas {
                 }
             }
             self.enabled = c.enabled;
+            if initialize_pointer {
+                return self.initialize_pointer(sink, ctx);
+            }
             return 0;
         }
         let old_center = if changed && self.valid && self.scale() > 0.0 {
@@ -355,6 +359,9 @@ impl ControllerCanvas {
             }
         }
         self.enabled = c.enabled;
+        if initialize_pointer {
+            return self.initialize_pointer(sink, ctx);
+        }
         0
     }
     fn cancel(&mut self, sink: Option<ControllerInputSink>, ctx: *mut c_void) -> i32 {
@@ -473,6 +480,18 @@ impl ControllerCanvas {
     }
     fn pointer_mouse(&mut self, action: &str, button: &str, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
         self.input_event(json!({"kind":"mouse","action":action,"button":button,"x":self.cursor_x,"y":self.cursor_y,"width":self.remote_w,"height":self.remote_h}), sink, ctx)
+    }
+    fn initialize_pointer(&mut self, sink: Option<ControllerInputSink>, ctx: *mut c_void) -> i32 {
+        if !self.touch_mode || !self.enabled || !self.valid || self.safe_w <= 0.0 || self.safe_h <= 0.0 {
+            return 0;
+        }
+        let Some(sink) = sink else { return 0 };
+        let Some((x, y)) = self.local_to_remote_clamped(self.viewport_w / 2.0, self.viewport_h / 2.0) else {
+            return 0;
+        };
+        self.cursor_x = x;
+        self.cursor_y = y;
+        self.pointer_mouse("move", "", sink, ctx)
     }
     fn pointer_wheel(&mut self, dx: f64, dy: f64, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
         self.input_event(json!({"kind":"wheel","action":"update","x":self.cursor_x,"y":self.cursor_y,"dx":dx,"dy":dy,"discrete":true,"width":self.remote_w,"height":self.remote_h}), sink, ctx)
@@ -833,7 +852,7 @@ impl ControllerCanvas {
                 let dx = self.cursor_x.round() as i32 - old_x.round() as i32;
                 let dy = self.cursor_y.round() as i32 - old_y.round() as i32;
                 if s.hit && self.enabled && (dx != 0 || dy != 0) {
-                    let status = self.emit_raw(json!({"kind":"move_relative","dx":dx,"dy":dy}), sink, ctx);
+                    let status = self.pointer_mouse("move", "", sink, ctx);
                     if status != 0 { return status; }
                 }
                 s.last = p;
@@ -854,17 +873,6 @@ impl ControllerCanvas {
             }
         }
         0
-    }
-    fn emit_raw(&mut self, v: Value, sink: ControllerInputSink, ctx: *mut c_void) -> i32 {
-        if !self.enabled || !self.valid {
-            return 0;
-        }
-        let Ok(raw) = CString::new(v.to_string()) else {
-            return 1;
-        };
-        let status = unsafe { (sink)(ctx, raw.as_ptr()) };
-        if status != 0 { self.fail_input(); }
-        status
     }
     fn tick(&mut self, time: u64, _sink: ControllerInputSink, _ctx: *mut c_void) -> i32 {
         if self.gesture.single.is_none() {
@@ -930,12 +938,13 @@ impl ControllerCanvas {
             }
             "touch_mode" => match v.get("mode").and_then(Value::as_str) {
                 Some("pointer") => {
-                    if !self.touch_mode {
-                        let status = self.cancel(Some(sink), ctx);
-                        if status != 0 { return status; }
+                    if self.touch_mode {
+                        return 0;
                     }
+                    let status = self.cancel(Some(sink), ctx);
+                    if status != 0 { return status; }
                     self.touch_mode = true;
-                    0
+                    self.initialize_pointer(Some(sink), ctx)
                 }
                 Some("direct") => {
                     if self.touch_mode {

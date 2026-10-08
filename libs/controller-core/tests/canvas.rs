@@ -198,14 +198,14 @@ fn read_only_pan_has_no_drag_timer_or_remote_commands() {
 }
 
 #[test]
-fn pointer_mode_moves_relatively_and_keeps_pinch_local() {
+fn pointer_mode_moves_to_absolute_target_and_keeps_pinch_local() {
     let mut c = Canvas::new();
     assert_eq!(c.event(config(true)), 0);
     assert_eq!(c.event(json!({"kind":"touch_mode","mode":"pointer"})), 0);
     c.1.values.clear();
     assert_eq!(c.event(touch("down", &[(1, 200.0, 150.0)], &[(1, 200.0, 150.0)], 0)), 0);
     assert_eq!(c.event(touch("move", &[(1, 212.0, 150.0)], &[(1, 212.0, 150.0)], 20)), 0);
-    assert!(c.1.values.iter().any(|v| v["kind"] == "move_relative" && v["dx"] == 7));
+    assert_eq!(c.1.values, vec![json!({"kind":"move","x":35002,"y":32768})]);
     assert_eq!(c.event(touch("up", &[], &[(1, 212.0, 150.0)], 40)), 0);
     assert!(c.1.values.iter().all(|v| v["kind"] != "button"));
     c.1.values.clear();
@@ -214,6 +214,67 @@ fn pointer_mode_moves_relatively_and_keeps_pinch_local() {
     assert_eq!(c.event(touch("move", &[(1, 100.0, 150.0), (2, 300.0, 150.0)], &[(1, 100.0, 150.0), (2, 300.0, 150.0)], 120)), 0);
     assert_eq!(c.state()["zoom"], 2.0);
     assert!(c.1.values.iter().all(|v| v["kind"] != "button" && v["kind"] != "wheel"));
+}
+
+#[test]
+fn pointer_mode_initializes_at_visible_center_only_when_selected() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.event(touch("down", &[(1, 150.0, 150.0), (2, 250.0, 150.0)], &[], 0)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 100.0, 150.0), (2, 300.0, 150.0)], &[], 20)), 0);
+    assert_eq!(c.event(touch("up", &[], &[], 30)), 0);
+    assert_eq!(c.event(touch("down", &[(3, 200.0, 150.0)], &[], 40)), 0);
+    assert_eq!(c.event(touch("move", &[(3, 235.2, 150.0)], &[], 60)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(3, 235.2, 150.0)], 80)), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(json!({"kind":"touch_mode","mode":"pointer"})), 0);
+    assert_eq!(c.1.values, vec![json!({"kind":"move","x":29491,"y":32768})]);
+    c.1.values.clear();
+    assert_eq!(c.event(json!({"kind":"touch_mode","mode":"pointer"})), 0);
+    assert!(c.1.values.is_empty());
+}
+
+#[test]
+fn pointer_slide_from_letterbox_and_tap_use_the_same_target() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.event(json!({"kind":"touch_mode","mode":"pointer"})), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(1, 100.0, 40.0)], &[], 0)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 135.2, 40.0)], &[], 20)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(1, 135.2, 40.0)], 40)), 0);
+    let target = json!({"kind":"move","x":39321,"y":32768});
+    assert_eq!(c.1.values, vec![target.clone()]);
+    c.1.values.clear();
+    assert_eq!(c.event(touch("down", &[(2, 300.0, 260.0)], &[], 100)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(2, 300.0, 260.0)], 150)), 0);
+    assert_eq!(c.1.values, vec![target.clone(), json!({"kind":"button","button":"left","down":true}),
+        target, json!({"kind":"button","button":"left","down":false})]);
+}
+
+#[test]
+fn pointer_permission_grant_initializes_without_resetting_later_configures() {
+    let mut c = Canvas::new();
+    assert_eq!(c.event(config(false)), 0);
+    assert_eq!(c.event(json!({"kind":"touch_mode","mode":"pointer"})), 0);
+    assert!(c.1.values.is_empty());
+    assert_eq!(c.event(config(true)), 0);
+    assert_eq!(c.1.values, vec![json!({"kind":"move","x":32768,"y":32768})]);
+    assert_eq!(c.event(touch("down", &[(1, 200.0, 150.0)], &[], 0)), 0);
+    assert_eq!(c.event(touch("move", &[(1, 235.2, 150.0)], &[], 20)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(1, 235.2, 150.0)], 40)), 0);
+    c.1.values.clear();
+    assert_eq!(c.event(config(true)), 0);
+    let mut resized = config(true);
+    resized["viewportWidth"] = json!(450);
+    assert_eq!(c.event(resized), 0);
+    assert!(c.1.values.is_empty());
+    assert_eq!(c.event(touch("down", &[(2, 200.0, 150.0)], &[], 100)), 0);
+    assert_eq!(c.event(touch("up", &[], &[(2, 200.0, 150.0)], 150)), 0);
+    assert_eq!(c.1.values[0], json!({"kind":"move","x":39321,"y":32768}));
+    c.1.values.clear();
+    assert_eq!(c.event(config(false)), 0);
+    assert!(c.1.values.is_empty());
 }
 
 #[test]

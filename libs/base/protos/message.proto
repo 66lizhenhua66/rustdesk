@@ -86,6 +86,24 @@ message LoginRequest {
   string avatar = 17;
   uint32 ord_input_version = 18;
   OrdAccessRequest ord_access = 19;
+  OrdVideoSettings ord_video_settings = 20;
+}
+
+message OrdVideoSettings {
+  uint32 version = 1;
+  // Keep even the smallest request above the secure transport's short-plaintext cutoff.
+  fixed64 request_id = 2;
+  string quality = 3;
+  uint32 fps = 4;
+}
+
+message OrdVideoState {
+  uint32 version = 1;
+  fixed64 request_id = 2;
+  string quality = 3;
+  uint32 fps = 4;
+  uint32 width = 5;
+  uint32 height = 6;
 }
 
 message OrdAccessRequest {
@@ -1119,5 +1137,7 @@ message Message {
     OrdInputEvent ord_input_event = 35;
     OrdInputRequest ord_input_request = 36;
     OrdAccessGrant ord_access_grant = 37;
+    OrdVideoSettings ord_video_settings = 38;
+    OrdVideoState ord_video_state = 39;
   }
 }

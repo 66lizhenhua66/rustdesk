@@ -14,6 +14,10 @@ export interface ControllerEvent {
   videoWidth?: number;
   videoHeight?: number;
   videoCodec?: string;
+  videoQuality?: string;
+  videoFps?: number;
+  videoSettingsSupported?: boolean;
+  videoRequestId?: number;
   frames?: number;
   bytes?: number;
   renderedFrames?: number;
@@ -41,6 +45,7 @@ declare const controller: {
   resetInput(taskId: number): void;
   canvasState(taskId: number): string;
   setInputEnabled(taskId: number, enabled: boolean): number;
+  setVideoSettings(taskId: number, settingsJson: string): number;
   cancel(taskId: number): boolean;
   dispose(): void;
 };

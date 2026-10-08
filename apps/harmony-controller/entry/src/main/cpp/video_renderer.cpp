@@ -12,8 +12,8 @@
 
 namespace {
 constexpr size_t kMaxFrameBytes = 2 * 1024 * 1024;
-constexpr uint32_t kMaxWidth = 1280;
-constexpr uint32_t kMaxHeight = 720;
+constexpr uint32_t kMaxWidth = 2560;
+constexpr uint32_t kMaxHeight = 1440;
 
 bool ValidDimensions(uint32_t width, uint32_t height) {
     return width >= 2 && height >= 2 && width <= kMaxWidth && height <= kMaxHeight &&
@@ -127,8 +127,13 @@ bool VideoRenderer::Submit(const uint8_t* data, size_t size, uint32_t width, uin
         !ValidDimensions(width, height) || size > UINT_MAX) return false;
     const bool encodedKey = (data[0] & 1) == 0;
     if (key != encodedKey || (!sawKey_ && !key) ||
-        (key && !ValidKeyHeader(data, size, width, height)) ||
-        (sawKey_ && (width != width_ || height != height_))) return false;
+        (key && !ValidKeyHeader(data, size, width, height))) return false;
+    if (sawKey_ && (width != width_ || height != height_)) {
+        if (!key || vpx_codec_destroy(&codec_) != VPX_CODEC_OK) return false;
+        codec_ = {};
+        decoderReady_ = false;
+        sawKey_ = false;
+    }
     if (!decoderReady_) {
         if (vpx_codec_dec_init(&codec_, vpx_codec_vp8_dx(), nullptr, 0) != VPX_CODEC_OK) return false;
         decoderReady_ = true;

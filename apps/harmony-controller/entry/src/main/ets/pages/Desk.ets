@@ -6,6 +6,7 @@ import { Profile, ScreenState, initialScreenState, projectScreenEvent, endedScre
   screenIsLive, splitEndpoint, joinEndpoint, canConnectProfile, buildScreenRequest, connectionPathLabel } from '../model/DeskModels';
 import { canRequestSystemInput, canSendSystemInput } from '../model/InputModels';
 import { connectionCandidates, selectedConnectionProfile } from '../model/DeviceIdModels';
+import { VideoPreferences, validVideoPreferences, readVideoPreferences, videoQualityLabel } from '../model/VideoModels';
 import { AccessStatus, accessStatus, buildTrustedScreenRequest, credentialForTarget, parsePairingGrant,
   secretRequest } from '../model/AccessModels';
 import { loadIdentity, saveIdentity, loadAccess, readAccess, saveAccess, removeAccess } from '../service/CredentialStore';
@@ -75,6 +76,8 @@ struct Desk {
   @State private sessionKey: number = 0;
   @State private enterControl: boolean = true;
   @State private sessionControl: boolean = true;
+  @State private videoQuality: string = 'balanced';
+  @State private videoFps: number = 15;
   @State private screen: ScreenState = new ScreenState();
   @State private accessBusy: boolean = false;
   @State private accessStatuses: Record<string, AccessStatus> = {};
@@ -180,6 +183,7 @@ struct Desk {
       }
       const favoriteRaw = await store.get('desk_favorites', '[]');
       const recentRaw = await store.get('desk_recent', '[]');
+      const videoSaved = readVideoPreferences(String(await store.get('desk_video_preferences', '')));
       const favorites = JSON.parse(String(favoriteRaw)) as string[];
       const recent = JSON.parse(String(recentRaw)) as RecentConnection[];
       if (!Array.isArray(favorites) || !Array.isArray(recent)) { throw new Error('工作台记录格式无效'); }
@@ -190,6 +194,8 @@ struct Desk {
       this.refreshAccessStatuses(normalized, owner);
       this.favorites = favorites;
       this.recent = recent.slice(0, 30);
+      this.videoQuality = videoSaved.quality;
+      this.videoFps = videoSaved.fps;
       this.storeError = '';
       if (!normalized.some((p: Profile) => p.id === this.selectedId)) {
         this.selectedId = '';
@@ -492,7 +498,8 @@ struct Desk {
         credentials = secretRequest(accessMode, identity.seed, stored, profile);
       }
       if (!this.sameTarget(profile, owner) || this.surfaceId !== surfaceId) { return; }
-      const request = accessMode ? buildTrustedScreenRequest(profile) : buildScreenRequest(profile);
+      const video: VideoPreferences = { quality: this.videoQuality, fps: this.videoFps };
+      const request = accessMode ? buildTrustedScreenRequest(profile) : buildScreenRequest(profile, video);
       const callback = (event: ControllerEvent): void => {
         if (!this.visible || owner !== this.generation || event.taskId !== this.task) { return; }
         if (accessMode === 'pair' && event.state === 'access_paired') {
@@ -523,6 +530,12 @@ struct Desk {
     if (!this.sameTarget(profile, owner) || event.taskId !== this.task) { return; }
     const wasApproved = this.screen.approved;
     this.screen = projectScreenEvent(this.screen, event);
+    if (event.state === 'video_settings' && this.screen.videoSettingsSupported &&
+      validVideoPreferences(this.screen.videoQuality, this.screen.videoFps)) {
+      this.videoQuality = this.screen.videoQuality;
+      this.videoFps = this.screen.videoFps;
+      this.rememberVideoPreferences();
+    }
     if (!wasApproved && this.screen.approved) { this.recordConnection(profile); }
     if (!screenIsLive(this.screen)) {
       this.generation++;
@@ -599,6 +612,30 @@ struct Desk {
     if (!this.visible || this.task <= 0 || !this.sessionOpen || !this.screen.approved || !screenIsLive(this.screen)) { return 2; }
     try { return controller.sendInputEvent(this.task, event); }
     catch { return 1; }
+  }
+
+  private async rememberVideoPreferences(): Promise<void> {
+    if (!this.store) { return; }
+    const settings: VideoPreferences = { quality: this.videoQuality, fps: this.videoFps };
+    try {
+      await this.store.put('desk_video_preferences', JSON.stringify(settings));
+      await this.store.flush();
+    } catch { this.notice = '画质选择已生效，但未能保存为下次连接的默认值。'; }
+  }
+
+  private setVideoPreferences(quality: string, fps: number): number {
+    if (!validVideoPreferences(quality, fps)) { return 3; }
+    if (!this.visible || !this.sessionOpen || this.task <= 0 || !this.screen.approved ||
+      !this.screen.videoSettingsSupported || this.currentAccessMode) { return 2; }
+    const settings: VideoPreferences = { quality: quality, fps: fps };
+    try {
+      const result = controller.setVideoSettings(this.task, JSON.stringify(settings));
+      if (result === 0) {
+        this.screen = projectScreenEvent(this.screen, { taskId: this.task, state: 'video_settings_requested',
+          code: '', message: '', verified: true, authenticated: true, authorized: this.screen.inputGranted });
+      }
+      return result;
+    } catch { return 1; }
   }
 
   private resetInput(): void {
@@ -880,7 +917,18 @@ struct Desk {
       this.setting('进入模式', '默认控制，可选仅查看；批准后直接在远程画面操作')
       this.setting('文字输入', '外接键盘直接输入；键盘按钮调起系统输入法，确认文字后自动发送')
       this.setting('画面显示', '保持比例，适应窗口；单主屏')
-      this.setting('画面质量', 'VP8 软件视频 · 最大 1280 × 720 · 约 8 fps 上限；画质切换尚未实现')
+      this.setting('画面质量', '省流 720p / 标准 1080p / 高清 1440p，帧率上限 10 / 15 / 30；普通会话内可切换')
+      Row({ space: 10 }) {
+        Select([{ value: '省流 · 720p' }, { value: '标准 · 1080p' }, { value: '高清 · 1440p' }])
+          .value(videoQualityLabel(this.videoQuality)).enabled(!screenIsLive(this.screen))
+          .onSelect((index: number) => {
+            this.videoQuality = index === 0 ? 'low' : index === 2 ? 'high' : 'balanced';
+            this.rememberVideoPreferences();
+          })
+        Select([{ value: '10 FPS' }, { value: '15 FPS' }, { value: '30 FPS' }])
+          .value(`${this.videoFps} FPS`).enabled(!screenIsLive(this.screen))
+          .onSelect((index: number) => { this.videoFps = index === 0 ? 10 : index === 2 ? 30 : 15; this.rememberVideoPreferences(); })
+      }.width('100%')
       this.setting('文件、剪贴板与声音', '尚未实现，不随连接自动开放')
       this.setting('离开应用', '离开前台会断开；再次连接需要重新批准')
     }.width('100%').padding(24).alignItems(HorizontalAlign.Start).backgroundColor('#FFFFFF').borderRadius(18)
@@ -1023,6 +1071,7 @@ struct Desk {
             onInputEvent: (event: string) => this.sendSystemInputEvent(event), onResetInput: () => this.resetInput(),
             onCanvasState: () => this.canvasState(),
             onSetInputEnabled: (enabled: boolean) => this.setInputEnabled(enabled),
+            onVideoSettings: (quality: string, fps: number) => this.setVideoPreferences(quality, fps),
             onRetry: () => { if (this.sessionProfile) {
               if (this.currentAccessMode) { this.connectTrusted(this.sessionProfile, this.currentAccessMode); }
               else { this.connect(this.sessionProfile, '', this.sessionControl); }

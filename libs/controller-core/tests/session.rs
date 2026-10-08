@@ -32,6 +32,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sodiumoxide::crypto::{box_, sign};
 
+#[path = "support/video_settings.rs"]
+mod video_settings;
+
 unsafe extern "C" fn collect(event: *const c_char, user: *mut c_void) {
     let events = &mut *(user as *mut Vec<Value>);
     events.push(serde_json::from_str(CStr::from_ptr(event).to_str().unwrap()).unwrap());
@@ -68,6 +71,30 @@ fn demo_api_validates_handshake_and_input_before_connecting() {
         1
     );
     controller_session_destroy(task);
+}
+
+#[test]
+fn video_settings_request_requires_a_valid_pair_and_control_mode() {
+    let base: Value = serde_json::from_str(request("127.0.0.1:1").to_str().unwrap()).unwrap();
+    for (quality, fps, mode, valid) in [
+        (Some(json!("balanced")), Some(json!(15)), "secure_control", true),
+        (Some(json!("low")), Some(json!(10)), "secure_control", true),
+        (Some(json!("high")), Some(json!(30)), "secure_control", true),
+        (Some(json!("balanced")), None, "secure_control", false),
+        (None, Some(json!(15)), "secure_control", false),
+        (Some(json!("ultra")), Some(json!(15)), "secure_control", false),
+        (Some(json!("high")), Some(json!(60)), "secure_control", false),
+        (Some(Value::Null), Some(Value::Null), "secure_control", false),
+        (Some(json!("balanced")), Some(json!(15)), "secure_video", false),
+    ] {
+        let mut value = base.clone();
+        value["expectedPeer"] = json!(mode);
+        if let Some(quality) = quality { value["videoQuality"] = quality; }
+        if let Some(fps) = fps { value["videoFps"] = fps; }
+        let task = controller_connection_create(CString::new(value.to_string()).unwrap().as_ptr(), c"".as_ptr(), 100);
+        assert_eq!(!task.is_null(), valid, "{value}");
+        controller_session_destroy(task);
+    }
 }
 
 #[test]

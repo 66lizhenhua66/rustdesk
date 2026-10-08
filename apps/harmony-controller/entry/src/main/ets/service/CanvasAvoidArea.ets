@@ -35,10 +35,11 @@ export class CanvasAvoidArea {
       for (const type of [window.AvoidAreaType.TYPE_SYSTEM, window.AvoidAreaType.TYPE_CUTOUT,
         window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR, window.AvoidAreaType.TYPE_KEYBOARD]) {
         const area = this.owner.getWindowAvoidArea(type);
-        this.add(regions, 'left', area.leftRect);
-        this.add(regions, 'top', area.topRect);
-        this.add(regions, 'right', area.rightRect);
-        this.add(regions, 'bottom', area.bottomRect);
+        const kind = type === window.AvoidAreaType.TYPE_KEYBOARD ? 'keyboard' : 'system';
+        this.add(regions, 'left', area.leftRect, kind);
+        this.add(regions, 'top', area.topRect, kind);
+        this.add(regions, 'right', area.rightRect, kind);
+        this.add(regions, 'bottom', area.bottomRect, kind);
       }
       this.changed(regions, '');
     } catch {
@@ -53,9 +54,9 @@ export class CanvasAvoidArea {
     this.owner = undefined;
   }
 
-  private add(regions: CanvasAvoidRegion[], edge: string, rect: window.Rect): void {
+  private add(regions: CanvasAvoidRegion[], edge: string, rect: window.Rect, kind: string): void {
     if (rect.width <= 0 || rect.height <= 0) { return; }
-    regions.push({ edge: edge, x: this.ui.px2vp(rect.left), y: this.ui.px2vp(rect.top),
+    regions.push({ edge: edge, kind: kind, x: this.ui.px2vp(rect.left), y: this.ui.px2vp(rect.top),
       width: this.ui.px2vp(rect.width), height: this.ui.px2vp(rect.height) });
   }
 }

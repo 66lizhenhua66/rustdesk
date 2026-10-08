@@ -32,6 +32,18 @@ export interface CanvasRect {
 
 export interface CanvasAvoidRegion extends CanvasRect {
   edge: string;
+  kind?: string;
+}
+
+export function canvasViewportAboveKeyboard(viewport: CanvasRect, regions: CanvasAvoidRegion[]): CanvasRect {
+  let height = viewport.height;
+  for (const rect of regions) {
+    if (rect.kind !== 'keyboard' || rect.edge !== 'bottom' || rect.width <= 0 || rect.height <= 0 ||
+      Math.min(viewport.x + viewport.width, rect.x + rect.width) <= Math.max(viewport.x, rect.x) ||
+      rect.y + rect.height <= viewport.y) { continue; }
+    height = Math.min(height, Math.max(0, rect.y - viewport.y));
+  }
+  return { x: viewport.x, y: viewport.y, width: viewport.width, height: height };
 }
 
 // Both the viewport and OS rectangles use window-local logical coordinates.

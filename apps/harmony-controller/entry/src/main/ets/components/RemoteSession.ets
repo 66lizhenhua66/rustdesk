@@ -1,12 +1,13 @@
 import { ScreenState, connectionPathLabel, screenIsLive } from '../model/DeskModels';
 import { SystemInputCommand } from '../model/InputModels';
+import { videoQualityLabel } from '../model/VideoModels';
 import { SessionInputController, InputSessionState } from '../input/SessionInputController';
 import { HarmonyInputAdapter } from '../input/HarmonyInputAdapter';
 import { RemoteInputMethod } from '../service/RemoteInputMethod';
 import { CanvasAvoidArea } from '../service/CanvasAvoidArea';
 import { SessionKeepScreenOn } from '../service/SessionKeepScreenOn';
 import { createSessionKeepScreenOn } from '../service/HarmonyKeepScreenOn';
-import { CanvasInsets, CanvasAvoidRegion, remainingCanvasInsets } from '../input/CanvasModels';
+import { CanvasInsets, CanvasAvoidRegion, canvasViewportAboveKeyboard, remainingCanvasInsets } from '../input/CanvasModels';
 import { SessionOrbDrag, SessionToolsLayout, sessionToolsLayout, SESSION_ORB_SIZE,
   SESSION_ORB_DRAG_THRESHOLD } from '../model/SessionToolsModels';
 
@@ -29,10 +30,14 @@ export struct RemoteSession {
   onCanvasState: () => string = () => '{}';
   onReleaseInput: () => void = () => {};
   onSetInputEnabled: (enabled: boolean) => number = () => 1;
+  onVideoSettings: (quality: string, fps: number) => number = () => 1;
   @State private areaWidth: number = 390;
   @State private areaHeight: number = 720;
+  @State private viewportHeight: number = 720;
   @State private toolsOpen: boolean = false;
   @State private detailsOpen: boolean = false;
+  @State private videoSettingsOpen: boolean = false;
+  @State private videoSettingsNotice: string = '';
   @State private orbPosition: number = 0.5;
   @State private inputState: InputSessionState = new InputSessionState();
   @State private safeInsets: CanvasInsets = new CanvasInsets();
@@ -88,9 +93,12 @@ export struct RemoteSession {
   }
 
   private updateCanvasLayout(): void {
-    this.safeInsets = remainingCanvasInsets({ x: this.viewportX, y: this.viewportY,
+    const viewport = canvasViewportAboveKeyboard({ x: this.viewportX, y: this.viewportY,
       width: this.areaWidth, height: this.areaHeight }, this.avoidRegions);
-    this.inputController?.setViewport(this.areaWidth, this.areaHeight, this.safeInsets);
+    this.viewportHeight = viewport.height;
+    this.safeInsets = remainingCanvasInsets(viewport, this.avoidRegions.filter((region: CanvasAvoidRegion) =>
+      region.kind !== 'keyboard'));
+    this.inputController?.setViewport(this.areaWidth, this.viewportHeight, this.safeInsets);
   }
 
   private inputStatus(): string {
@@ -106,19 +114,53 @@ export struct RemoteSession {
 
   private toggleTools(): void {
     if (this.toolsOpen) { this.closeTools(); return; }
-    this.inputController?.blur();
+    this.inputController?.release();
     this.detailsOpen = false;
     this.toolsOpen = true;
+    this.videoSettingsOpen = false;
   }
 
   private closeTools(): void {
     this.toolsOpen = false;
     this.detailsOpen = false;
+    this.videoSettingsOpen = false;
     this.inputController?.focus();
   }
 
   private toolsLayout(): SessionToolsLayout {
-    return sessionToolsLayout(this.areaWidth, this.areaHeight, this.safeInsets, this.orbPosition, this.detailsOpen);
+    return sessionToolsLayout(this.areaWidth, this.viewportHeight, this.safeInsets, this.orbPosition,
+      this.detailsOpen || this.videoSettingsOpen);
+  }
+
+  private changeVideoSettings(quality: string, fps: number): void {
+    this.inputController?.release();
+    const result = this.onVideoSettings(quality, fps);
+    this.videoSettingsNotice = result === 0 ? '' : result === 4 ? '正在等待上一项设置生效。' :
+      result === 2 ? '此会话尚不支持画质切换，请更新被控端后重新连接。' : '画质请求未能提交，请稍后重试。';
+  }
+
+  @Builder
+  private videoSettingsPanel() {
+    Column({ space: 14 }) {
+      Text(this.screen.videoSettingsPending ? '正在切换，等待被控端确认…' :
+        `${videoQualityLabel(this.screen.videoQuality)} · ${this.screen.width} × ${this.screen.height}`)
+        .fontSize(12).fontColor('#426A4D').width('100%')
+      Text('画质').fontSize(12).fontColor('#778780').width('100%')
+      Select([{ value: '省流 · 720p' }, { value: '标准 · 1080p' }, { value: '高清 · 1440p' }])
+        .selected(this.screen.videoQuality === 'low' ? 0 : this.screen.videoQuality === 'high' ? 2 : 1)
+        .value(videoQualityLabel(this.screen.videoQuality)).width('100%')
+        .enabled(this.screen.videoSettingsSupported && !!this.screen.videoQuality && !this.screen.videoSettingsPending)
+        .onSelect((index: number) => this.changeVideoSettings(index === 0 ? 'low' : index === 2 ? 'high' : 'balanced', this.screen.videoFps))
+      Text('帧率上限').fontSize(12).fontColor('#778780').width('100%')
+      Select([{ value: '10 FPS' }, { value: '15 FPS' }, { value: '30 FPS' }])
+        .selected(this.screen.videoFps === 10 ? 0 : this.screen.videoFps === 30 ? 2 : 1)
+        .value(`${this.screen.videoFps} FPS`).width('100%')
+        .enabled(this.screen.videoSettingsSupported && !!this.screen.videoQuality && !this.screen.videoSettingsPending)
+        .onSelect((index: number) => this.changeVideoSettings(this.screen.videoQuality, index === 0 ? 10 : index === 2 ? 30 : 15))
+      Text('分辨率保持远端比例，不超过所选档位。实际帧率取决于画面变化和设备性能。')
+        .fontSize(11).fontColor('#778780').lineHeight(18).width('100%')
+      if (this.videoSettingsNotice) { Text(this.videoSettingsNotice).fontSize(12).fontColor('#A8443C').width('100%') }
+    }.width('100%').alignItems(HorizontalAlign.Start)
   }
 
   private orbTouch(event: TouchEvent): void {
@@ -126,7 +168,7 @@ export struct RemoteSession {
     if (event.type === TouchType.Cancel) { this.orbDrag.cancel(); return; }
     for (const point of event.changedTouches) {
       if (event.type === TouchType.Down) {
-        this.inputController?.blur();
+        this.inputController?.release();
         this.orbDrag.begin(point.id, point.windowY, this.toolsLayout().orbY);
       } else if (event.type === TouchType.Move) {
         const position = this.orbDrag.move(point.id, point.windowY, this.toolsLayout());
@@ -156,7 +198,7 @@ export struct RemoteSession {
     return this.screen.width > 0 && this.screen.height > 0 ? this.screen.width / this.screen.height : 16 / 9;
   }
 
-  private surfaceWidth(): number { return Math.max(1, Math.min(this.areaWidth, this.areaHeight * this.ratio())); }
+  private surfaceWidth(): number { return Math.max(1, Math.min(this.areaWidth, this.viewportHeight * this.ratio())); }
   private surfaceHeight(): number { return this.surfaceWidth() / this.ratio(); }
 
   private canvasWidth(): number { return this.inputState.canvas.imageWidth > 0 ? this.inputState.canvas.imageWidth / this.inputState.canvas.zoom : this.surfaceWidth(); }
@@ -227,9 +269,30 @@ export struct RemoteSession {
       .shadow({ radius: 10, color: '#33000000', offsetY: 3 })
       .position({ x: this.toolsLayout().orbX, y: this.toolsLayout().orbY })
       .accessibilityText(this.toolsOpen ? '收起会话工具' : '展开会话工具，可上下拖动')
+      .focusOnTouch(false)
       .hitTestBehavior(HitTestMode.Block)
       .onTouch((event: TouchEvent) => this.orbTouch(event))
       .onClick(() => this.toggleTools(), SESSION_ORB_DRAG_THRESHOLD)
+  }
+
+  @Builder
+  private keyboardButton() {
+    Button({ type: ButtonType.Normal }) {
+      Image($r('app.media.desk_session_keyboard')).width(21).height(21)
+    }.width(SESSION_ORB_SIZE).height(SESSION_ORB_SIZE)
+      .backgroundColor(this.inputState.keyboardOpen ? '#DDECD7' : '#F9FCF7')
+      .border({ width: 1, color: '#DCE6DC' }).borderRadius(SESSION_ORB_SIZE / 2).clip(true)
+      .shadow({ radius: 10, color: '#33000000', offsetY: 3 })
+      .position({ x: this.toolsLayout().keyboardX, y: this.toolsLayout().keyboardY })
+      .enabled(this.readyForInput()).focusOnTouch(false)
+      .accessibilityText(this.inputState.keyboardOpen ? '收起系统键盘' : '打开系统键盘')
+      .hitTestBehavior(HitTestMode.Block)
+      .onTouch((event: TouchEvent) => event.stopPropagation())
+      .onClick(() => {
+        this.toolsOpen = false;
+        this.detailsOpen = false;
+        this.inputController?.toggleKeyboard();
+      })
   }
 
   @Builder
@@ -237,14 +300,6 @@ export struct RemoteSession {
     Column({ space: 8 }) {
       this.modeSwitch()
       Row({ space: 8 }) {
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 5 }) {
-            Image($r('app.media.desk_session_keyboard')).width(18).height(18)
-            Text('键盘').fontSize(12).fontColor('#426A4D')
-          }
-        }.layoutWeight(1).height(44).borderRadius(8).backgroundColor('#EEF3E9')
-          .enabled(this.readyForInput()).accessibilityText('打开系统键盘')
-          .onClick(() => { this.toolsOpen = false; this.inputController?.toggleKeyboard(); })
         Button(this.inputState.canvas.touchMode === 'pointer' ? '指针模式' : '触屏模式', { type: ButtonType.Normal })
           .layoutWeight(1).height(44).fontSize(12).fontColor('#426A4D').borderRadius(8).backgroundColor('#EEF3E9')
           .accessibilityText(this.inputState.canvas.touchMode === 'pointer' ? '切换到触屏模式' : '切换到指针模式')
@@ -252,6 +307,10 @@ export struct RemoteSession {
             this.inputController?.setTouchMode(this.inputState.canvas.touchMode === 'pointer' ? 'direct' : 'pointer');
             this.closeTools();
           })
+        Button('画质 / FPS', { type: ButtonType.Normal })
+          .layoutWeight(1).height(44).fontSize(12).fontColor('#426A4D').borderRadius(8).backgroundColor('#EEF3E9')
+          .enabled(this.screen.videoSettingsSupported)
+          .onClick(() => { this.videoSettingsOpen = true; this.detailsOpen = false; this.videoSettingsNotice = ''; })
       }.width('100%')
       Row({ space: 8 }) {
         Button('还原画面', { type: ButtonType.Normal }).layoutWeight(1).height(44).fontSize(12)
@@ -276,7 +335,7 @@ export struct RemoteSession {
   @Builder
   private toolsBackdrop() {
     Column() {
-    }.width('100%').height('100%').backgroundColor(Color.Transparent)
+    }.width('100%').height(this.viewportHeight).position({ x: 0, y: 0 }).backgroundColor(Color.Transparent)
       .hitTestBehavior(HitTestMode.Block)
       .onTouch((event: TouchEvent) => event.stopPropagation())
       .onMouse((event: MouseEvent) => event.stopPropagation())
@@ -296,17 +355,19 @@ export struct RemoteSession {
   private toolsPanel() {
     Column() {
       Row() {
-        if (this.detailsOpen) {
-          this.iconButton($r('app.media.desk_session_back'), '返回会话工具', () => { this.detailsOpen = false; })
+        if (this.detailsOpen || this.videoSettingsOpen) {
+          this.iconButton($r('app.media.desk_session_back'), '返回会话工具', () => { this.detailsOpen = false; this.videoSettingsOpen = false; })
         }
-        Text(this.detailsOpen ? '状态详情' : this.deviceName || '远程设备')
+        Text(this.videoSettingsOpen ? '画质与帧率' : this.detailsOpen ? '状态详情' : this.deviceName || '远程设备')
           .fontSize(13).fontWeight(FontWeight.Medium).fontColor('#20352F').layoutWeight(1)
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         this.iconButton($r('app.media.desk_session_close'), '关闭会话工具', () => this.closeTools())
-      }.padding({ left: this.detailsOpen ? 0 : 12, right: 3 }).width('100%').height(44)
+      }.padding({ left: this.detailsOpen || this.videoSettingsOpen ? 0 : 12, right: 3 }).width('100%').height(44)
       Scroll() {
         Column({ space: 8 }) {
-          if (this.detailsOpen) {
+          if (this.videoSettingsOpen) {
+            this.videoSettingsPanel()
+          } else if (this.detailsOpen) {
             Column({ space: 7 }) {
               Text(this.inputStatus()).fontSize(13).fontWeight(FontWeight.Medium).fontColor('#196B52')
               Text('轻点左键，双指轻点右键，双指滑动滚轮；捏合缩放 1～10 倍。单指滑动画布，长按 1 秒出现提示后拖动远程对象。')
@@ -324,7 +385,8 @@ export struct RemoteSession {
             this.stat('实际接收 / 呈现', () => `${this.screen.frames} 帧 / ${this.screen.rendered} 帧`)
             this.stat('已接收视频数据', () => `${Math.round(this.screen.bytes / 1024)} KiB`)
             this.stat('画面显示', () => `${this.inputState.canvas.zoom.toFixed(1)} 倍 · 保持远端比例`)
-            this.stat('画质', () => 'VP8 软件视频 · 画质切换尚未实现')
+            this.stat('画质', () => this.screen.videoSettingsSupported ?
+              `${videoQualityLabel(this.screen.videoQuality)} · 上限 ${this.screen.videoFps} FPS` : '兼容视频 · 720p / 8 FPS')
             Text(this.accessMode ? '此连接仅可查看。Windows 可随时撤销已登记设备。' :
               '本次批准仅用于当前连接。断开或重新连接后，需要再次在 Windows 本机批准。')
               .fontSize(12).fontColor('#778780').lineHeight(20).width('100%')
@@ -424,7 +486,7 @@ export struct RemoteSession {
             .scale({ x: this.inputState.canvas.zoom, y: this.inputState.canvas.zoom, centerX: 0, centerY: 0 })
             .position({ x: this.inputState.canvas.imageX, y: this.inputState.canvas.imageY })
             .hitTestBehavior(HitTestMode.None)
-        }.width('100%').height('100%').backgroundColor('#10181B').clip(true)
+        }.width('100%').height(this.viewportHeight).position({ x: 0, y: 0 }).backgroundColor('#10181B').clip(true)
           .id('remote-desktop-input').focusable(true).focusOnTouch(true)
           .onTouch((event: TouchEvent) => { if (!this.toolsOpen) { this.inputAdapter?.touch(event); } })
           .onMouse((event: MouseEvent) => { if (!this.toolsOpen) { this.inputAdapter?.mouse(event); } })
@@ -443,7 +505,7 @@ export struct RemoteSession {
           Text(this.safeAreaNotice || this.inputState.notice || this.inputStatus())
             .fontSize(12).fontColor('#EDF4E6').backgroundColor('#D910181B').borderRadius(8)
             .padding(8).maxLines(2).width(Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24, 320))
-            .position({ x: this.safeInsets.left + 12, y: Math.max(0, this.areaHeight - this.safeInsets.bottom - 52) })
+            .position({ x: this.safeInsets.left + 12, y: Math.max(0, this.viewportHeight - this.safeInsets.bottom - 52) })
             .hitTestBehavior(HitTestMode.None)
         }
         this.resetCanvasButton()
@@ -452,6 +514,7 @@ export struct RemoteSession {
           this.toolsPanel()
         }
         this.floatingOrb()
+        this.keyboardButton()
       }
     }.width('100%').height('100%').backgroundColor('#344B45').clip(true)
       .onAreaChange((_oldArea: Area, area: Area) => {

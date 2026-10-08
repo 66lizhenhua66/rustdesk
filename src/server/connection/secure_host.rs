@@ -99,6 +99,7 @@ impl Connection {
         let session_deadline = started + Duration::from_secs(30 * 60);
         let mut stop_tick = time::interval(Duration::from_secs(1));
         let mut video_worker: Option<secure_video::Worker> = None;
+        let mut video_settings_id = 0;
         let mut input = secure_input::Control::new(self.inner.id());
         let mut access_pending: Option<base::message_proto::OrdAccessRequest> = None;
         let mut access_active: Option<String> = None;
@@ -170,12 +171,18 @@ impl Connection {
                             self.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);
                             let video_requested = secure_host_policy::requests_video(&self.lr);
                             let input_requested = secure_host_policy::requests_input(&self.lr);
+                            let video_settings = secure_host_policy::initial_video_settings(&self.lr);
                             if video_requested && !secure_video::allowed() {
                                 self.send_secure_video_error().await;
                                 break;
                             }
                             let video_dimensions = if video_requested {
-                                let Ok(Ok(dimensions)) = tokio::task::spawn_blocking(secure_video::dimensions).await else {
+                                let result = if let Some(settings) = video_settings {
+                                    tokio::task::spawn_blocking(move || secure_video::dimensions_with_settings(settings)).await
+                                } else {
+                                    tokio::task::spawn_blocking(secure_video::dimensions).await
+                                };
+                                let Ok(Ok(dimensions)) = result else {
                                     self.send_secure_video_error().await;
                                     break;
                                 };
@@ -184,7 +191,9 @@ impl Connection {
                                 None
                             };
                             let info = if let Some(dimensions) = video_dimensions {
-                                if input_requested {
+                                if video_settings.is_some() {
+                                    secure_host_policy::approved_configurable_video_peer_info(VERSION, dimensions.width as _, dimensions.height as _)
+                                } else if input_requested {
                                     secure_host_policy::approved_control_peer_info(VERSION, dimensions.width as _, dimensions.height as _)
                                 } else {
                                     secure_host_policy::approved_video_peer_info(VERSION, dimensions.width as _, dimensions.height as _)
@@ -199,9 +208,17 @@ impl Connection {
                                 break;
                             }
                             if let Some(dimensions) = video_dimensions {
-                                let worker = if input_requested { secure_video::start_control(dimensions) } else { secure_video::start(dimensions) };
+                                let worker = if let Some(settings) = video_settings {
+                                    secure_video::start_control_with_settings(dimensions, settings)
+                                } else if input_requested { secure_video::start_control(dimensions) } else { secure_video::start(dimensions) };
                                 match worker {
-                                    Ok(worker) => video_worker = Some(worker),
+                                    Ok(worker) => {
+                                        if let Some(settings) = video_settings {
+                                            if self.stream.send(&settings.state(dimensions.width, dimensions.height)).await.is_err() { break; }
+                                            video_settings_id = settings.request_id;
+                                        }
+                                        video_worker = Some(worker);
+                                    }
                                     Err(_) => {
                                         self.send_secure_video_error().await;
                                         break;
@@ -231,22 +248,7 @@ impl Connection {
                 Some(_) = rx.recv() => {}
                 Some(_) = rx_video.recv() => {}
                 Some(_) = rx_from_authed.recv() => {}
-                frame = async {
-                    match &mut video_worker {
-                        Some(worker) => worker.receiver.recv().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    match frame {
-                        Some(Ok(message)) => {
-                            if self.stream.send(&message).await.is_err() { break; }
-                        }
-                        Some(Err(())) | None => {
-                            self.send_secure_video_error().await;
-                            break;
-                        }
-                    }
-                }
+                // Control and settings must remain responsive when the video queue stays full.
                 packet = self.stream.next() => {
                     let Some(Ok(bytes)) = packet else { break; };
                     // Upstream decrypt passes very short plaintext through. No valid strict
@@ -255,6 +257,26 @@ impl Connection {
                         break;
                     }
                     let Ok(message) = Message::parse_from_bytes(&bytes) else { break; };
+                    if secure_host_policy::classify_message(&message) == Request::VideoSettings {
+                        let Some(message::Union::OrdVideoSettings(request)) = message.union else { break; };
+                        let Some(settings) = secure_host_policy::updated_video_settings(
+                            &self.lr, self.authorized, video_settings_id, &request,
+                        ) else { break; };
+                        // The old receiver must be gone before acknowledging a new frame size.
+                        drop(video_worker.take());
+                        let Ok(Ok(dimensions)) = tokio::task::spawn_blocking(move || secure_video::dimensions_with_settings(settings)).await else {
+                            self.send_secure_video_error().await;
+                            break;
+                        };
+                        let Ok(worker) = secure_video::start_control_with_settings(dimensions, settings) else {
+                            self.send_secure_video_error().await;
+                            break;
+                        };
+                        if self.stream.send(&settings.state(dimensions.width, dimensions.height)).await.is_err() { break; }
+                        video_settings_id = settings.request_id;
+                        video_worker = Some(worker);
+                        continue;
+                    }
                     if secure_host_policy::classify_message(&message) == Request::InputRequest {
                         if !self.authorized || !secure_host_policy::requests_input(&self.lr) { break; }
                         let Some(message::Union::OrdInputRequest(request)) = message.union else { break; };
@@ -322,6 +344,22 @@ impl Connection {
                     }
                     if !self.on_secure_host_message(message).await {
                         break;
+                    }
+                }
+                frame = async {
+                    match &mut video_worker {
+                        Some(worker) => worker.receiver.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match frame {
+                        Some(Ok(message)) => {
+                            if self.stream.send(&message).await.is_err() { break; }
+                        }
+                        Some(Err(())) | None => {
+                            self.send_secure_video_error().await;
+                            break;
+                        }
                     }
                 }
             }
@@ -399,7 +437,7 @@ impl Connection {
                 true
             }
             Request::Close => false,
-            Request::Login | Request::Input | Request::InputRequest | Request::Denied => false,
+            Request::Login | Request::Input | Request::InputRequest | Request::VideoSettings | Request::Denied => false,
         }
     }
 }

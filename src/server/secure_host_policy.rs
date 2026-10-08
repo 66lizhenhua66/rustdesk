@@ -18,6 +18,9 @@ use hbb_common::{
 };
 use sha2::{Digest, Sha256};
 
+#[path = "secure_video_settings.rs"]
+pub mod video_settings;
+
 pub struct ListenConfig {
     pub address: SocketAddr,
     pub allowed: Vec<IpAddr>,
@@ -145,6 +148,7 @@ pub enum Request {
     Heartbeat,
     Input,
     InputRequest,
+    VideoSettings,
     Close,
     Denied,
 }
@@ -163,6 +167,11 @@ pub fn classify_message(message: &Message) -> Request {
         Some(message::Union::LoginRequest(_)) => Request::Login,
         Some(message::Union::TestDelay(_)) => Request::Heartbeat,
         Some(message::Union::OrdInputEvent(_)) => Request::Input,
+        Some(message::Union::OrdVideoSettings(settings))
+            if video_settings::Settings::parse(settings, 0).is_some() =>
+        {
+            Request::VideoSettings
+        }
         Some(message::Union::OrdInputRequest(request))
             if request.version == 1
                 && request.scope == "windows_primary"
@@ -191,6 +200,7 @@ pub fn valid_login(lr: &LoginRequest, id: &str) -> bool {
         && lr.hwid.is_empty() && lr.avatar.is_empty()
         && !lr.my_id.is_empty() && lr.my_id.len() <= 64 && lr.my_name.len() <= 128
         && (lr.ord_input_version == 0 || (lr.ord_input_version == 2 && requests_video(lr)))
+        && (lr.ord_video_settings.is_none() || initial_video_settings(lr).is_some())
         && lr.special_fields.unknown_fields().iter().next().is_none()
         && lr.my_id.chars().chain(lr.my_name.chars()).all(|c|
             !c.is_control() && !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
@@ -207,6 +217,42 @@ pub fn requests_video(lr: &LoginRequest) -> bool {
 
 pub fn requests_input(lr: &LoginRequest) -> bool {
     lr.ord_input_version == 2 && requests_video(lr)
+}
+
+pub fn initial_video_settings(lr: &LoginRequest) -> Option<video_settings::Settings> {
+    if !requests_input(lr) || lr.ord_access.is_some() {
+        return None;
+    }
+    video_settings::Settings::parse(lr.ord_video_settings.as_ref()?, 0)
+        .filter(|settings| settings.request_id == 1)
+}
+
+pub fn updated_video_settings(
+    lr: &LoginRequest,
+    authorized: bool,
+    previous_id: u64,
+    request: &base::message_proto::OrdVideoSettings,
+) -> Option<video_settings::Settings> {
+    if !authorized || previous_id == 0 || initial_video_settings(lr).is_none() {
+        return None;
+    }
+    video_settings::Settings::parse(request, previous_id)
+}
+
+pub fn approved_configurable_video_peer_info(version: &str, width: i32, height: i32) -> Message {
+    let mut message = approved_control_peer_info(version, width, height);
+    if let Some(message::Union::LoginResponse(login)) = message.union.as_mut() {
+        if let Some(base::message_proto::login_response::Union::PeerInfo(peer)) =
+            login.union.as_mut()
+        {
+            peer.platform_additions = serde_json::json!({
+                "ord_secure_host": 1, "media": true, "video_codec": "vp8",
+                "input_scope": "windows_primary", "input_version": 2, "video_settings_version": 1
+            })
+            .to_string();
+        }
+    }
+    message
 }
 
 pub fn permission_snapshot() -> Vec<Message> {

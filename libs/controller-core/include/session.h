@@ -26,6 +26,9 @@ ControllerSession *controller_session_create(const char *request_json, const cha
  * and requires controller_session_run_video with a non-NULL video callback.
  * "secure_control" requests versioned VP8 and separately authorized input;
  * it also requires controller_session_run_video.
+ * Its optional videoQuality (low/balanced/high) and videoFps (10/15/30) must
+ * appear together and require the peer's video settings extension. Confirmed
+ * settings arrive as video_settings events before video at the new dimensions.
  * The peer must match the selected mode; there is no automatic fallback.
  * The event includes confirmationCode while awaiting approval, and x/y/textLength
  * for demo_status. Demo input requires Keyboard permission; secure_control input
@@ -50,6 +53,13 @@ int32_t controller_session_send_input_v1(ControllerSession *task, const char *co
  * Closing input invalidates local authorization and pending input immediately.
  */
 int32_t controller_session_set_input_enabled_v1(ControllerSession *task, uint8_t enabled);
+/* JSON {"quality":"low|balanced|high","fps":10|15|30}; connected secure_control
+ * sessions with negotiated video settings only. Input authorization is not required.
+ * 0 queued, 1 inactive/wrong mode, 2 unsupported, 3 invalid JSON, 4 request pending.
+ * The video_settings event confirms the applied choice; missing confirmation fails
+ * the session after 5 seconds. No new login or input grant is requested.
+ */
+int32_t controller_session_set_video_settings_v1(ControllerSession *task, const char *settings_json);
 void controller_session_run(ControllerSession *task, ControllerSessionCallback callback, void *user);
 void controller_session_run_video(ControllerSession *task, ControllerSessionCallback callback,
     ControllerVideoCallback video_callback, void *user);

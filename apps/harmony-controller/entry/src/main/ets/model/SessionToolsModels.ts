@@ -6,6 +6,8 @@ export const SESSION_ORB_DRAG_THRESHOLD: number = 4;
 export interface SessionToolsLayout {
   orbX: number;
   orbY: number;
+  keyboardX: number;
+  keyboardY: number;
   minY: number;
   maxY: number;
   panelX: number;
@@ -25,12 +27,13 @@ export function sessionToolsLayout(width: number, height: number, insets: Canvas
   const top = insets.top + 12;
   const bottom = Math.max(top, height - insets.bottom - 12);
   const minY = top;
-  const maxY = Math.max(minY, bottom - SESSION_ORB_SIZE);
+  const maxY = Math.max(minY, bottom - SESSION_ORB_SIZE * 2 - 8);
   const orbX = Math.max(left, right - SESSION_ORB_SIZE);
   const orbY = minY + (maxY - minY) * clamp(normalizedY, 0, 1);
   const panelWidth = Math.max(1, Math.min(248, orbX - left - 8));
   const panelHeight = Math.max(1, Math.min(details ? 420 : 326, bottom - top));
-  return { orbX: orbX, orbY: orbY, minY: minY, maxY: maxY,
+  return { orbX: orbX, orbY: orbY, keyboardX: orbX, keyboardY: orbY + SESSION_ORB_SIZE + 8,
+    minY: minY, maxY: maxY,
     panelX: Math.max(left, orbX - panelWidth - 8),
     panelY: clamp(orbY + SESSION_ORB_SIZE / 2 - panelHeight / 2, top, bottom - panelHeight),
     panelWidth: panelWidth, panelHeight: panelHeight };

@@ -602,6 +602,22 @@ int32_t QueueSystemInput(void *context, const char *command) {
     return controller_session_send_input_v1(static_cast<ControllerSession *>(context), command);
 }
 
+napi_value SetVideoSettings(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2] = {}, result = nullptr;
+    uint32_t id = 0;
+    std::string settings;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 2 ||
+        !ReadBoundedInteger(env, args[0], 1, UINT32_MAX, id) ||
+        !ReadString(env, args[1], settings, 256)) {
+        Error(env, "INVALID_ARGUMENT", "Expected task ID and bounded video settings JSON"); return nullptr;
+    }
+    auto job = ActiveSession(env, id);
+    const int32_t status = job ? controller_session_set_video_settings_v1(job->session, settings.c_str()) : 1;
+    napi_create_int32(env, status, &result);
+    return result;
+}
+
 int32_t QueueCanvasInput(void *context, const char *command) {
     return controller_session_send_input_v1(static_cast<ControllerSession *>(context), command);
 }
@@ -720,6 +736,7 @@ napi_value Init(napi_env env, napi_value exports) {
         {"resetInput", nullptr, ResetSystemInput, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"canvasState", nullptr, CanvasState, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setInputEnabled", nullptr, SetInputEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setVideoSettings", nullptr, SetVideoSettings, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"dispose", nullptr, Dispose, nullptr, nullptr, nullptr, napi_default, nullptr},
     };

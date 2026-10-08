@@ -29,6 +29,7 @@ use crate::{
         Message, Misc, MouseEvent, OptionMessage, PublicKey, SupportedDecoding,
     },
     upstream_crypto::{self, Encrypt, KxTranscript, KX_VERSION_LATEST},
+    video_settings::{Settings, VideoSettings},
 };
 
 const FRAME_LIMIT: usize = 64 * 1024;
@@ -56,6 +57,10 @@ struct Request {
     peer_fingerprint: Option<String>,
     minimum_kx_version: Option<u32>,
     expected_peer: Option<PersistentPeer>,
+    #[serde(default, deserialize_with = "crate::video_settings::optional")]
+    video_quality: Option<String>,
+    #[serde(default, deserialize_with = "crate::video_settings::optional")]
+    video_fps: Option<u32>,
 }
 
 pub struct ControllerSession {
@@ -75,6 +80,7 @@ pub struct ControllerSession {
     authorized: AtomicBool,
     pending: Mutex<VecDeque<DemoInput>>,
     control_input: Mutex<ControlInputState>,
+    video_settings: Mutex<VideoSettings>,
 }
 
 pub type ControllerSessionCallback = unsafe extern "C" fn(*const c_char, *mut c_void);
@@ -156,6 +162,12 @@ fn create(
     if !demo && request.expected_peer.is_some() {
         return ptr::null_mut();
     }
+    let Ok(video_settings) = Settings::initial(request.video_quality, request.video_fps) else {
+        return ptr::null_mut();
+    };
+    if video_settings.is_some() && (!demo || request.expected_peer != Some(PersistentPeer::SecureControl)) {
+        return ptr::null_mut();
+    }
     let mode = request.mode.as_deref().unwrap_or("direct");
     let endpoint = if mode == "direct" {
         let Some(endpoint) = request
@@ -224,6 +236,7 @@ fn create(
         authorized: AtomicBool::new(false),
         pending: Mutex::new(VecDeque::new()),
         control_input: Mutex::new(ControlInputState::default()),
+        video_settings: Mutex::new(VideoSettings::new(video_settings)),
     }))
 }
 
@@ -296,6 +309,23 @@ pub extern "C" fn controller_session_send_input_v1(
         return 1;
     }
     input.queue(command)
+}
+
+#[no_mangle]
+pub extern "C" fn controller_session_set_video_settings_v1(
+    task: *mut ControllerSession,
+    settings_json: *const c_char,
+) -> i32 {
+    if settings_json.is_null() { return 3; }
+    let Ok(raw) = (unsafe { CStr::from_ptr(settings_json) }).to_str() else { return 3; };
+    let Ok(settings) = Settings::parse(raw) else { return 3; };
+    let Some(task) = (unsafe { task.as_ref() }) else { return 3; };
+    if task.expected_peer != PersistentPeer::SecureControl
+        || !task.connected.load(Ordering::Acquire) || task.cancelled.load(Ordering::Acquire)
+    { return 1; }
+    let mut video = task.video_settings.lock().unwrap();
+    if !task.connected.load(Ordering::Acquire) || task.cancelled.load(Ordering::Acquire) { return 1; }
+    video.queue(settings)
 }
 
 #[no_mangle]
@@ -893,8 +923,8 @@ fn run_secure_control(
     user: *mut c_void,
     wire: &mut Wire,
     cipher: &mut Encrypt,
-    width: u32,
-    height: u32,
+    mut width: u32,
+    mut height: u32,
 ) -> Result<(), Failure> {
     let deadline = Instant::now() + DEMO_LIFETIME;
     let mut first_frame = true;
@@ -904,6 +934,9 @@ fn run_secure_control(
     let mut last_heartbeat = Instant::now();
     let mut last_inbound = Instant::now();
     loop {
+        if task.video_settings.lock().unwrap().timed_out() {
+            return Err(Failure::failed("VIDEO_SETTINGS_TIMEOUT", "Peer did not confirm video settings"));
+        }
         if let Some(message) = wire.poll_message(task, deadline, cipher)? {
             if message
                 .special_fields
@@ -920,6 +953,9 @@ fn run_secure_control(
             let mut refresh_inbound = true;
             match message.union {
                 Some(message::message::Union::VideoFrame(video)) => {
+                    if !task.video_settings.lock().unwrap().ready() {
+                        return Err(Failure::failed("UNEXPECTED_VIDEO", "Video arrived before settings confirmation"));
+                    }
                     let Some(message::video_frame::Union::Vp8s(vp8)) = video.union else {
                         return Err(Failure::failed("INVALID_VIDEO", "Unsupported video codec"));
                     };
@@ -982,6 +1018,20 @@ fn run_secure_control(
                         );
                         last_status = Instant::now();
                     }
+                }
+                Some(message::message::Union::OrdVideoState(state))
+                    if task.video_settings.lock().unwrap().requested() =>
+                {
+                    task.video_settings.lock().unwrap().apply(&state).map_err(|_| {
+                        Failure::failed("INVALID_VIDEO_SETTINGS", "Invalid video settings confirmation")
+                    })?;
+                    width = state.width;
+                    height = state.height;
+                    first_frame = true;
+                    demo_event(callback, user, "video_settings", "VIDEO_SETTINGS", "Video settings applied",
+                        true, true, task.authorized.load(Ordering::Acquire),
+                        json!({"videoWidth":width,"videoHeight":height,"videoQuality":state.quality,
+                            "videoFps":state.fps,"videoSettingsSupported":true,"videoRequestId":state.request_id}));
                 }
                 Some(message::message::Union::OrdInputState(state)) => {
                     let state_result = {
@@ -1083,6 +1133,13 @@ fn run_secure_control(
                 "TRANSPORT_STALLED",
                 "Control peer stopped responding",
             ));
+        }
+        let video_request = { task.video_settings.lock().unwrap().take_request() };
+        if let Some(request) = video_request {
+            let mut message = Message::new();
+            message.set_ord_video_settings(request);
+            let send_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+            wire.send_message(task, send_deadline, cipher, &message)?;
         }
         let request = { task.control_input.lock().unwrap().pop_request() };
         if let Some(request) = request {
@@ -1475,6 +1532,11 @@ fn run(
             ),
             task.expected_peer == PersistentPeer::SecureControl,
         );
+        if let Some(settings) = task.video_settings.lock().unwrap().initial_request() {
+            if let Some(message::message::Union::LoginRequest(request)) = login.union.as_mut() {
+                request.ord_video_settings = MessageField::some(settings);
+            }
+        }
         if let Some(access) = access.as_mut() {
             let proof = access
                 .proof(&task.peer_id, &task.peer_key, &hash.challenge)
@@ -1563,7 +1625,16 @@ fn run(
                         if task.demo {
                             let video_size = match task.expected_peer {
                                 PersistentPeer::SecureVideo => video_dimensions(&peer),
-                                PersistentPeer::SecureControl => control_video_dimensions(&peer),
+                                PersistentPeer::SecureControl => {
+                                    let mut settings = task.video_settings.lock().unwrap();
+                                    if settings.requested() {
+                                        Some(settings.negotiate(&peer).ok_or(Failure::failed(
+                                            "UNSUPPORTED_VIDEO_SETTINGS", "Peer did not support the requested video settings",
+                                        ))?)
+                                    } else {
+                                        control_video_dimensions(&peer)
+                                    }
+                                }
                                 _ => None,
                             };
                             let Some(peer_kind) = persistent_peer(&peer.platform_additions)
@@ -1610,7 +1681,11 @@ fn run(
                                 false,
                                 if let Some((width, height)) = video_size {
                                     if peer_kind == PersistentPeer::SecureControl {
-                                        json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8","inputSupported":false})
+                                        let mut extra = json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8","inputSupported":false});
+                                        if task.video_settings.lock().unwrap().supported() {
+                                            extra["videoSettingsSupported"] = json!(true);
+                                        }
+                                        extra
                                     } else {
                                         if let Some(access) = &access {
                                             json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8","accessMode":access.mode})
@@ -1730,6 +1805,7 @@ fn run(
         pending.clear();
     }
     task.control_input.lock().unwrap().clear();
+    task.video_settings.lock().unwrap().clear();
     task.password.lock().unwrap().take();
     task.access.lock().unwrap().take();
     *task.socket.lock().unwrap() = None;
@@ -1798,6 +1874,7 @@ pub extern "C" fn controller_session_cancel(task: *mut ControllerSession) {
             pending.clear();
         }
         task.control_input.lock().unwrap().clear();
+        task.video_settings.lock().unwrap().clear();
         task.password.lock().unwrap().take();
         task.access.lock().unwrap().take();
         if let Some(socket) = task.socket.lock().unwrap().as_ref() {

@@ -34,6 +34,8 @@ use winapi::{
     },
 };
 
+use super::secure_host_policy::video_settings::Settings;
+
 const MAX_WIDTH: u32 = 1280;
 const MAX_HEIGHT: u32 = 720;
 const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
@@ -148,6 +150,16 @@ pub fn dimensions() -> ResultType<Dimensions> {
     scaled_dimensions(width, height)
 }
 
+pub fn dimensions_with_settings(settings: Settings) -> ResultType<Dimensions> {
+    check_initial_desktop()?;
+    let (dc, width, height) = primary_dc()?;
+    unsafe { DeleteDC(dc); }
+    let Some((width, height)) = settings.dimensions(width, height) else {
+        bail!("Primary display is too narrow to encode");
+    };
+    Ok(Dimensions { width, height })
+}
+
 struct Capture {
     source: HDC,
     target: HDC,
@@ -160,11 +172,15 @@ struct Capture {
 }
 
 impl Capture {
-    fn new(dimensions: Dimensions) -> ResultType<Self> {
+    fn new(dimensions: Dimensions, settings: Option<Settings>) -> ResultType<Self> {
         check_initial_desktop()?;
         let (source, width, height) = primary_dc()?;
-        let measured = scaled_dimensions(width, height);
-        if measured.as_ref().ok() != Some(&dimensions) {
+        let measured = if let Some(settings) = settings {
+            settings.dimensions(width, height).map(|(width, height)| Dimensions { width, height })
+        } else {
+            scaled_dimensions(width, height).ok()
+        };
+        if measured.as_ref() != Some(&dimensions) {
             unsafe {
                 DeleteDC(source);
             }
@@ -317,13 +333,14 @@ fn run_worker(
     tx: mpsc::Sender<Result<Message, ()>>,
     cancelled: Arc<AtomicBool>,
     show_cursor: bool,
+    settings: Option<Settings>,
 ) -> ResultType<()> {
-    let mut capture = Capture::new(dimensions)?;
+    let mut capture = Capture::new(dimensions, settings)?;
     let mut encoder = Encoder::new(
         EncoderCfg::VPX(VpxEncoderConfig {
             width: dimensions.width,
             height: dimensions.height,
-            quality: 1.0,
+            quality: settings.map_or(1.0, Settings::encoder_quality),
             codec: VpxVideoCodecId::VP8,
             keyframe_interval: Some(32),
         }),
@@ -337,6 +354,7 @@ fn run_worker(
     let mut yuv = vec![0u8; yuv_len];
     let mut previous = Vec::new();
     let started = Instant::now();
+    let frame_period = settings.map_or(FRAME_PERIOD, |value| Duration::from_secs_f64(1.0 / f64::from(value.fps)));
     while !cancelled.load(Ordering::Acquire) && !tx.is_closed() {
         let tick = Instant::now();
         let pixels = if show_cursor { capture.control_frame()? } else { capture.frame()? };
@@ -383,7 +401,7 @@ fn run_worker(
                 return Ok(());
             }
         }
-        let wait = FRAME_PERIOD.saturating_sub(tick.elapsed());
+        let wait = frame_period.saturating_sub(tick.elapsed());
         if !wait.is_zero() {
             std::thread::sleep(wait);
         }
@@ -413,7 +431,7 @@ pub fn start(dimensions: Dimensions) -> ResultType<Worker> {
     std::thread::Builder::new()
         .name("ord-secure-video".to_owned())
         .spawn(move || {
-            if let Err(error) = run_worker(dimensions, tx.clone(), flag, false) {
+            if let Err(error) = run_worker(dimensions, tx.clone(), flag, false, None) {
                 hbb_common::log::warn!("Secure video stopped: {error}");
                 let _ = tx.blocking_send(Err(()));
             }
@@ -432,7 +450,25 @@ pub fn start_control(dimensions: Dimensions) -> ResultType<Worker> {
     std::thread::Builder::new()
         .name("ord-control-video".to_owned())
         .spawn(move || {
-            if let Err(error) = run_worker(dimensions, tx.clone(), flag, true) {
+            if let Err(error) = run_worker(dimensions, tx.clone(), flag, true, None) {
+                hbb_common::log::warn!("Control video stopped: {error}");
+                if tx.blocking_send(Err(())).is_err() {
+                    hbb_common::log::trace!("Control video receiver already closed");
+                }
+            }
+        })?;
+    Ok(Worker { receiver, cancelled })
+}
+
+pub fn start_control_with_settings(dimensions: Dimensions, settings: Settings) -> ResultType<Worker> {
+    if !allowed() { bail!("Secure video is disabled locally"); }
+    let (tx, receiver) = mpsc::channel(1);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancelled);
+    std::thread::Builder::new()
+        .name("ord-control-video".to_owned())
+        .spawn(move || {
+            if let Err(error) = run_worker(dimensions, tx.clone(), flag, true, Some(settings)) {
                 hbb_common::log::warn!("Control video stopped: {error}");
                 if tx.blocking_send(Err(())).is_err() {
                     hbb_common::log::trace!("Control video receiver already closed");
@@ -539,6 +575,36 @@ mod tests {
             .unwrap();
         assert_eq!(decoded.inner().d_w, dimensions.width);
         assert_eq!(decoded.inner().d_h, dimensions.height);
+    }
+
+    #[test]
+    fn rebuilt_profile_encoders_start_with_bounded_decodable_keyframes() {
+        use scrap::vpxcodec::{VpxDecoder, VpxDecoderConfig};
+
+        for (index, quality) in ["low", "balanced", "high", "low"].into_iter().enumerate() {
+            let settings = Settings::parse(&base::message_proto::OrdVideoSettings {
+                version: 1, request_id: index as u64 + 1, quality: quality.into(), fps: 30,
+                ..Default::default()
+            }, index as u64).unwrap();
+            let (width, height) = settings.dimensions(3840, 2160).unwrap();
+            let mut encoder = Encoder::new(EncoderCfg::VPX(VpxEncoderConfig {
+                width, height, quality: settings.encoder_quality(), codec: VpxVideoCodecId::VP8,
+                keyframe_interval: Some(32),
+            }), false).unwrap();
+            let format = encoder.yuvfmt();
+            let mut yuv = vec![128u8; format.v + format.stride[2] * (format.h / 2)];
+            yuv[..format.u].fill(96);
+            let encoded = encoder.encode_to_message(EncodeInput::YUV(&yuv), 0).unwrap();
+            let Some(base::message_proto::video_frame::Union::Vp8s(frames)) = encoded.union else {
+                panic!("expected VP8");
+            };
+            assert!(!frames.frames.is_empty());
+            assert!(frames.frames[0].key);
+            assert!(frames.frames[0].data.len() <= MAX_FRAME_BYTES);
+            let mut decoder = VpxDecoder::new(VpxDecoderConfig { codec: VpxVideoCodecId::VP8 }).unwrap();
+            let decoded = decoder.decode(&frames.frames[0].data).unwrap().next().unwrap();
+            assert_eq!((decoded.inner().d_w, decoded.inner().d_h), (width, height));
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod meta;
 mod rendezvous;
 pub mod session;
 pub mod upstream_crypto;
+mod video_settings;
 
 #[path = "../../hbb_common/src/bytes_codec.rs"]
 mod bytes_codec;

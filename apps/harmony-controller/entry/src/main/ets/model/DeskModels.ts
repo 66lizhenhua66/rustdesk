@@ -1,3 +1,5 @@
+import type { VideoPreferences } from './VideoModels';
+
 export interface Profile {
   id: string;
   name: string;
@@ -27,6 +29,10 @@ export interface ScreenEvent {
   videoWidth?: number;
   videoHeight?: number;
   videoCodec?: string;
+  videoQuality?: string;
+  videoFps?: number;
+  videoSettingsSupported?: boolean;
+  videoRequestId?: number;
   frames?: number;
   bytes?: number;
   renderedFrames?: number;
@@ -47,6 +53,10 @@ export class ScreenState {
   inputGranted: boolean = false;
   width: number = 1280;
   height: number = 720;
+  videoQuality: string = '';
+  videoFps: number = 0;
+  videoSettingsSupported: boolean = false;
+  videoSettingsPending: boolean = false;
   frames: number = 0;
   rendered: number = 0;
   bytes: number = 0;
@@ -94,6 +104,10 @@ export function markInputRequest(previous: ScreenState, enabled: boolean): Scree
   state.inputGranted = previous.inputGranted;
   state.width = previous.width;
   state.height = previous.height;
+  state.videoQuality = previous.videoQuality;
+  state.videoFps = previous.videoFps;
+  state.videoSettingsSupported = previous.videoSettingsSupported;
+  state.videoSettingsPending = previous.videoSettingsPending;
   state.frames = previous.frames;
   state.rendered = previous.rendered;
   state.bytes = previous.bytes;
@@ -108,6 +122,12 @@ function failureDetail(code: string): string {
   switch (code) {
     case 'VIDEO_NOT_ENABLED':
       return '被控端尚未启用屏幕共享。请在被控端开启视频服务后重试。';
+    case 'UNSUPPORTED_VIDEO_SETTINGS':
+      return '被控端不支持画质设置，请更新 Windows 被控端后重连。';
+    case 'VIDEO_SETTINGS_TIMEOUT':
+    case 'INVALID_VIDEO_SETTINGS':
+    case 'INVALID_VIDEO_STATE':
+      return '画质切换未得到有效确认，连接已停止。请检查被控端并重新连接。';
     case 'MODE_MISMATCH':
       return '当前入口不支持此控制协议。请更新被控端，或在连接诊断中使用原只读入口。';
     case 'IDENTITY_REQUIRED':
@@ -237,6 +257,7 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
         : '本机已批准，正在等待第一帧画面；当前仅可查看。';
     state.verified = true;
     state.approved = true;
+    state.videoSettingsSupported = event.videoSettingsSupported === true;
     if (event.videoWidth !== undefined && event.videoWidth > 0) {
       state.width = event.videoWidth;
     }
@@ -259,6 +280,10 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
   state.inputGranted = previous.inputGranted;
   state.width = previous.width;
   state.height = previous.height;
+  state.videoQuality = previous.videoQuality;
+  state.videoFps = previous.videoFps;
+  state.videoSettingsSupported = previous.videoSettingsSupported;
+  state.videoSettingsPending = previous.videoSettingsPending;
   state.frames = previous.frames;
   state.rendered = previous.rendered;
   state.bytes = previous.bytes;
@@ -267,7 +292,23 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
   if (!state.approved) {
     return state;
   }
-  if (event.state === 'input_state') {
+  if (event.state === 'video_settings_requested' && state.videoSettingsSupported && !state.accessMode) {
+    state.code = previous.code;
+    state.videoSettingsPending = true;
+  } else if (event.state === 'video_settings' && event.verified && event.authenticated &&
+    event.videoSettingsSupported === true && !state.accessMode &&
+    (event.videoQuality === 'low' || event.videoQuality === 'balanced' || event.videoQuality === 'high') &&
+    (event.videoFps === 10 || event.videoFps === 15 || event.videoFps === 30) &&
+    event.videoWidth !== undefined && event.videoWidth >= 2 && event.videoWidth <= 2560 &&
+    event.videoHeight !== undefined && event.videoHeight >= 2 && event.videoHeight <= 1440) {
+    state.code = previous.code;
+    state.videoQuality = event.videoQuality;
+    state.videoFps = event.videoFps;
+    state.videoSettingsSupported = true;
+    state.videoSettingsPending = false;
+    state.width = event.videoWidth;
+    state.height = event.videoHeight;
+  } else if (event.state === 'input_state') {
     state.inputSupported = !state.accessMode && event.verified && event.authenticated && event.inputSupported === true;
     state.inputGranted = state.inputSupported && event.authorized === true;
     if (previous.code === 'INPUT_DISABLING' && state.inputGranted) { state.code = 'INPUT_DISABLING'; }
@@ -340,6 +381,8 @@ interface DirectScreenRequest {
   peerFingerprint: string | null;
   minimumKxVersion: number;
   expectedPeer: string;
+  videoQuality?: string;
+  videoFps?: number;
 }
 
 interface RoutedScreenRequest {
@@ -352,15 +395,20 @@ interface RoutedScreenRequest {
   server: string;
   serverKey: string;
   relayServer: string;
+  videoQuality?: string;
+  videoFps?: number;
 }
 
-export function buildScreenRequest(profile: Profile): string {
+export function buildScreenRequest(profile: Profile, video?: VideoPreferences): string {
   if (!canConnectProfile(profile)) { throw new Error('连接资料或可信身份不完整'); }
+  if (video && (!(video.quality === 'low' || video.quality === 'balanced' || video.quality === 'high') ||
+    !(video.fps === 10 || video.fps === 15 || video.fps === 30))) { throw new Error('画质或帧率无效'); }
   if (profile.mode === 'direct') {
     const request: DirectScreenRequest = {
       endpoint: profile.target, peerId: profile.peerId ?? '', peerPublicKey: profile.peerPublicKey ?? '',
       peerFingerprint: profile.peerFingerprint || null, minimumKxVersion: 1, expectedPeer: 'secure_control'
     };
+    if (video) { request.videoQuality = video.quality; request.videoFps = video.fps; }
     return JSON.stringify(request);
   }
   const request: RoutedScreenRequest = {
@@ -368,6 +416,7 @@ export function buildScreenRequest(profile: Profile): string {
     peerFingerprint: profile.peerFingerprint || null, minimumKxVersion: 1, expectedPeer: 'secure_control',
     server: profile.server, serverKey: profile.serverKey, relayServer: profile.relayServer ?? ''
   };
+  if (video) { request.videoQuality = video.quality; request.videoFps = video.fps; }
   return JSON.stringify(request);
 }
 
