@@ -17,7 +17,7 @@
 
 ### 2.1 安全画布
 
-先从窗口计算 `SafeRect`：扣除系统安全区、会话工具栏、底部状态条和必要的交互间距。远程画面只在 `SafeRect` 中布局；额外黑边属于本地画布背景，不属于远程坐标，也不能产生点击。
+先从窗口计算 `SafeRect`：扣除系统安全区、顶部会话工具栏和必要的交互间距。鸿蒙工具栏默认收起，底部不再为常驻说明条预留高度；额外交互间距为 8 vp。远程画面只在 `SafeRect` 中布局；额外黑边属于本地画布背景，不属于远程坐标，也不能产生点击。画布背景绘制延伸至系统避让区，消除底部白色横条，交互内容仍避让系统手势区域。
 
 ```text
 safeRect = windowRect - systemInsets - sessionOverlays
@@ -82,7 +82,7 @@ remoteY = (localY - imageOffsetY - panY) / actualScale
 
 ### 3.3 浮动按钮
 
-当 `zoomFactor > 1.0` 时，在 `SafeRect` 内显示“还原画面”按钮。点击按钮：
+当 `zoomFactor > 1.0` 时，在顶部悬浮工具栏旁显示“还原画面”按钮，不为它单独占用底部空间。点击按钮：
 
 ```text
 取消当前手势
@@ -101,7 +101,7 @@ remoteCenter = 远程画面中心
 
 共享 Rust `canvas.rs` 保存缩放、画布位置、触点和手势状态，`canvas.h` 提供版本化 C ABI。鸿蒙、Android、iOS 和 Windows 控制端各自提供窗口尺寸、安全区、系统输入法和浮动按钮；不复制手势判定。
 
-鸿蒙读取窗口的 SYSTEM、CUTOUT、NAVIGATION_INDICATOR 与 KEYBOARD 避让矩形，转换为 vp 后与 `onAreaChange.globalPosition` 对应的实际视口求交，避免重复扣除 ArkUI 已处理的安全区。工具栏高度、底部状态栏和 24vp 交互黑边在该结果上计算。画面基础尺寸保持 fit 大小，由绘制缩放呈现 1～10 倍，父容器裁剪；触摸、鼠标和滚轮绑定未缩放的整个视口，坐标与 Rust 快照使用同一原点。
+鸿蒙读取窗口的 SYSTEM、CUTOUT、NAVIGATION_INDICATOR 与 KEYBOARD 避让矩形，转换为 vp 后与 `onAreaChange.globalPosition` 对应的实际视口求交，避免重复扣除 ArkUI 已处理的安全区。顶部工具栏高度和 8 vp 交互黑边在该结果上计算；缩放提示与还原按钮上移，底部只在错误或长按拖动状态下显示短暂悬浮提示。画面基础尺寸保持 fit 大小，由绘制缩放呈现 1～10 倍，父容器裁剪；触摸、鼠标和滚轮绑定未缩放的整个视口，坐标与 Rust 快照使用同一原点。
 
 Flutter 提供 `ControllerCanvasEngine`、`FlutterCanvasInputAdapter`、`ControllerCanvasView`，共用同一 ABI，读取 MediaQuery 安全区并叠加应用工具栏区域。组件要求父布局随软键盘收缩（例如 Scaffold 默认 `resizeToAvoidBottomInset: true`）；保留覆盖式键盘的页面须先按键盘可见区域约束画布。该可复用组件尚未接入完整 Windows/Android/iOS 生产控制端页面，原生库打包、签名与设备测试是相应平台后续交付。
 

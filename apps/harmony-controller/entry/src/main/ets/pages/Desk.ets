@@ -1022,7 +1022,7 @@ struct Desk {
           Scroll() { this.editor() }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
         }.width('92%').constraintSize({ maxWidth: 600 }).height('90%').padding(24).backgroundColor('#FFFFFF').borderRadius(20)
       }
-    }.width('100%').height('100%').backgroundColor('#F6F8F5')
+    }.width('100%').height('100%').background(this.sessionOpen ? '#10181B' : '#F6F8F5')
       .onAreaChange((_old: Area, area: Area) => { this.windowWidth = Number(area.width); })
   }
 }

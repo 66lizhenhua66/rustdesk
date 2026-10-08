@@ -29,7 +29,7 @@ export struct RemoteSession {
   onSetInputEnabled: (enabled: boolean) => number = () => 1;
   @State private areaWidth: number = 390;
   @State private areaHeight: number = 720;
-  @State private toolbarCollapsed: boolean = false;
+  @State private toolbarCollapsed: boolean = true;
   @State private toolsOpen: boolean = false;
   @State private inputState: InputSessionState = new InputSessionState();
   @State private safeInsets: CanvasInsets = new CanvasInsets();
@@ -91,7 +91,7 @@ export struct RemoteSession {
     insets.left = this.safeInsets.left;
     insets.right = this.safeInsets.right;
     insets.top = this.safeInsets.top + (this.toolbarCollapsed ? 48 : (this.toolbarHeight || (this.compact() ? 111 : 60)) + 12);
-    insets.bottom = this.safeInsets.bottom + 56;
+    insets.bottom = this.safeInsets.bottom;
     this.inputController?.setViewport(this.areaWidth, this.areaHeight, insets);
   }
 
@@ -146,14 +146,14 @@ export struct RemoteSession {
   private disconnect(): void {
     this.inputController?.stop();
     this.toolsOpen = false;
-    this.toolbarCollapsed = false;
+    this.toolbarCollapsed = true;
     this.onDisconnect();
   }
 
   private retry(): void {
     this.inputController?.stop();
     this.toolsOpen = false;
-    this.toolbarCollapsed = false;
+    this.toolbarCollapsed = true;
     this.onRetry();
   }
 
@@ -256,6 +256,7 @@ export struct RemoteSession {
         Row({ space: 3 }) {
           this.iconButton($r('app.media.desk_session_back'), '返回设备，保持连接', () => this.leave())
           this.identity()
+          this.resetCanvasButton()
           this.endButtons()
         }.width('100%')
         Row() {
@@ -269,6 +270,7 @@ export struct RemoteSession {
           this.identity()
           this.modeSwitch()
           this.tools()
+          this.resetCanvasButton()
           this.endButtons()
         }.width('100%')
       }
@@ -283,19 +285,24 @@ export struct RemoteSession {
 
   @Builder
   private collapsedToolbar() {
-    Button({ type: ButtonType.Normal }) {
-      Row({ space: 9 }) {
-        Image($r('app.media.desk_session_monitor')).width(18).height(18)
-        Text(this.deviceName || '远程设备').fontSize(12).fontColor('#20352F')
-          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
-        Text(this.readyForInput() ? '控制中' : this.screen.code === 'INPUT_DISABLING' ? '关闭中' : '仅查看').fontSize(10).fontColor('#426A4D').padding(5).backgroundColor('#E3EFDB').borderRadius(5)
-        Image($r('app.media.desk_session_down')).width(16).height(16)
-      }.width('100%').padding({ left: 14, right: 14, top: 12, bottom: 12 })
-    }.width(Math.min(this.areaWidth - 24, 360)).borderRadius({ bottomLeft: 12, bottomRight: 12 })
-      .backgroundColor('#F9FCF7')
-      .position({ x: (this.areaWidth - Math.min(this.areaWidth - 24, 360)) / 2, y: this.safeInsets.top })
-      .accessibilityText('展开会话工具栏，包含断开按钮')
-      .onClick(() => { this.toolbarCollapsed = false; this.updateCanvasLayout(); })
+    Row({ space: 8 }) {
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 8 }) {
+          Image($r('app.media.desk_session_monitor')).width(18).height(18)
+          Text(`${this.inputState.canvas.zoom.toFixed(1)}× · ${this.readyForInput() ? '控制中' :
+            this.screen.code === 'INPUT_DISABLING' ? '关闭中' : '仅查看'}`).fontSize(12).fontColor('#20352F')
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+          Image($r('app.media.desk_session_down')).width(16).height(16)
+        }.padding({ left: 12, right: 12 })
+      }.height(40).layoutWeight(1).borderRadius(10).backgroundColor('#F9FCF7')
+        .accessibilityText('展开会话工具栏，包含断开按钮')
+        .onClick(() => { this.toolbarCollapsed = false; this.updateCanvasLayout(); })
+      this.resetCanvasButton()
+    }.width(Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24,
+      this.inputState.canvas.resetVisible ? 286 : 184)).height(40)
+      .position({ x: this.safeInsets.left + (this.areaWidth - this.safeInsets.left - this.safeInsets.right -
+        Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24,
+          this.inputState.canvas.resetVisible ? 286 : 184)) / 2, y: this.safeInsets.top + 4 })
   }
 
   @Builder
@@ -450,14 +457,14 @@ export struct RemoteSession {
           this.stateCard()
         }.width('100%').height('100%').backgroundColor('#344B45')
       } else {
-        Row({ space: 8 }) {
-          Text(this.safeAreaNotice || (this.inputState.notice.length > 0 && this.screen.code !== 'INPUT_DISABLING' ? this.inputState.notice :
-            `${this.inputState.canvas.zoom.toFixed(1)}× · ${this.inputStatus()}`)).fontSize(11).fontColor('#426A4D')
-            .padding({ left: 12, right: 12, top: 8, bottom: 8 }).borderRadius(8).backgroundColor('#EDF4E6')
-            .height(38).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          this.resetCanvasButton()
-        }.width(Math.max(1, this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24))
-          .position({ x: this.safeInsets.left + 12, y: Math.max(0, this.areaHeight - this.safeInsets.bottom - 50) })
+        if (this.safeAreaNotice || this.inputState.notice || this.inputState.canvas.dragReady ||
+          this.inputState.canvas.gesture === 'dragging') {
+          Text(this.safeAreaNotice || this.inputState.notice || this.inputStatus())
+            .fontSize(12).fontColor('#EDF4E6').backgroundColor('#D910181B').borderRadius(8)
+            .padding(8).maxLines(2).width(Math.min(this.areaWidth - this.safeInsets.left - this.safeInsets.right - 24, 320))
+            .position({ x: this.safeInsets.left + 12, y: Math.max(0, this.areaHeight - this.safeInsets.bottom - 52) })
+            .hitTestBehavior(HitTestMode.None)
+        }
         if (this.toolbarCollapsed) {
           this.collapsedToolbar()
         } else {
