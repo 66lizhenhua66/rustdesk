@@ -411,6 +411,12 @@ mod runtime {
         pub fn enabled(&self) -> bool {
             self.session.token.is_some()
         }
+        pub fn display_change_allowed(&self) -> bool {
+            self.enabled() && local_allowed()
+        }
+        pub fn display_capability_allowed() -> bool {
+            local_allowed()
+        }
         pub fn poisoned(&self) -> bool {
             self.session.poisoned
         }

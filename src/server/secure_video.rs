@@ -160,6 +160,13 @@ pub fn dimensions_with_settings(settings: Settings) -> ResultType<Dimensions> {
     Ok(Dimensions { width, height })
 }
 
+pub fn primary_dimensions() -> ResultType<Dimensions> {
+    check_initial_desktop()?;
+    let (dc, width, height) = primary_dc()?;
+    unsafe { DeleteDC(dc); }
+    Ok(Dimensions { width, height })
+}
+
 struct Capture {
     source: HDC,
     target: HDC,
@@ -412,6 +419,45 @@ fn run_worker(
 pub struct Worker {
     pub receiver: mpsc::Receiver<Result<Message, ()>>,
     cancelled: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Worker {
+    pub async fn stop(mut self) -> ResultType<()> {
+        self.cancelled.store(true, Ordering::Release);
+        self.receiver.close();
+        if let Some(thread) = self.thread.take() {
+            if hbb_common::tokio::task::spawn_blocking(move || thread.join()).await?.is_err() {
+                bail!("Secure video worker panicked");
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn first_frame(&mut self, dimensions: Dimensions) -> ResultType<Message> {
+        let Ok(Some(Ok(message))) = hbb_common::tokio::time::timeout(
+            Duration::from_secs(5), self.receiver.recv(),
+        ).await else {
+            bail!("Secure video did not produce its first frame");
+        };
+        let Some(base::message_proto::message::Union::VideoFrame(frame)) = &message.union else {
+            bail!("Secure video returned an invalid first frame");
+        };
+        let Some(base::message_proto::video_frame::Union::Vp8s(frames)) = &frame.union else {
+            bail!("Secure video returned an invalid first codec");
+        };
+        let Some(first) = frames.frames.first() else {
+            bail!("Secure video returned no first frame");
+        };
+        let bytes = &first.data;
+        if !first.key || bytes.len() < 10 || bytes[0] & 1 != 0
+            || bytes[3..6] != [0x9d, 0x01, 0x2a]
+            || u32::from(u16::from_le_bytes([bytes[6], bytes[7]]) & 0x3fff) != dimensions.width
+            || u32::from(u16::from_le_bytes([bytes[8], bytes[9]]) & 0x3fff) != dimensions.height {
+            bail!("Secure video first frame has unexpected dimensions");
+        }
+        Ok(message)
+    }
 }
 
 impl Drop for Worker {
@@ -428,7 +474,7 @@ pub fn start(dimensions: Dimensions) -> ResultType<Worker> {
     let (tx, receiver) = mpsc::channel(1);
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&cancelled);
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("ord-secure-video".to_owned())
         .spawn(move || {
             if let Err(error) = run_worker(dimensions, tx.clone(), flag, false, None) {
@@ -439,6 +485,7 @@ pub fn start(dimensions: Dimensions) -> ResultType<Worker> {
     Ok(Worker {
         receiver,
         cancelled,
+        thread: Some(thread),
     })
 }
 
@@ -447,7 +494,7 @@ pub fn start_control(dimensions: Dimensions) -> ResultType<Worker> {
     let (tx, receiver) = mpsc::channel(1);
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&cancelled);
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("ord-control-video".to_owned())
         .spawn(move || {
             if let Err(error) = run_worker(dimensions, tx.clone(), flag, true, None) {
@@ -457,7 +504,7 @@ pub fn start_control(dimensions: Dimensions) -> ResultType<Worker> {
                 }
             }
         })?;
-    Ok(Worker { receiver, cancelled })
+    Ok(Worker { receiver, cancelled, thread: Some(thread) })
 }
 
 pub fn start_control_with_settings(dimensions: Dimensions, settings: Settings) -> ResultType<Worker> {
@@ -465,7 +512,7 @@ pub fn start_control_with_settings(dimensions: Dimensions, settings: Settings) -
     let (tx, receiver) = mpsc::channel(1);
     let cancelled = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&cancelled);
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("ord-control-video".to_owned())
         .spawn(move || {
             if let Err(error) = run_worker(dimensions, tx.clone(), flag, true, Some(settings)) {
@@ -475,7 +522,7 @@ pub fn start_control_with_settings(dimensions: Dimensions, settings: Settings) -
                 }
             }
         })?;
-    Ok(Worker { receiver, cancelled })
+    Ok(Worker { receiver, cancelled, thread: Some(thread) })
 }
 
 #[cfg(test)]
@@ -615,10 +662,72 @@ mod tests {
         let worker = Worker {
             receiver,
             cancelled: Arc::clone(&cancelled),
+            thread: None,
         };
         let blocked = std::thread::spawn(move || tx.blocking_send(Ok(Message::new())));
         drop(worker);
         assert!(cancelled.load(Ordering::Acquire));
         assert!(blocked.join().unwrap().is_err());
+    }
+
+    #[hbb_common::tokio::test]
+    async fn stopping_worker_waits_until_the_producer_has_released_its_resources() {
+        let (tx, receiver) = mpsc::channel(1);
+        tx.try_send(Ok(Message::new())).unwrap();
+        let released = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&released);
+        let thread = std::thread::spawn(move || {
+            assert!(tx.blocking_send(Ok(Message::new())).is_err());
+            done.store(true, Ordering::Release);
+        });
+        Worker {
+            receiver,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            thread: Some(thread),
+        }.stop().await.unwrap();
+        assert!(released.load(Ordering::Acquire));
+    }
+
+    #[hbb_common::tokio::test]
+    async fn first_frame_requires_the_announced_vp8_keyframe_dimensions() {
+        let dimensions = Dimensions { width: 64, height: 48 };
+        let mut encoder = Encoder::new(EncoderCfg::VPX(VpxEncoderConfig {
+            width: dimensions.width, height: dimensions.height, quality: 1.0,
+            codec: VpxVideoCodecId::VP8, keyframe_interval: Some(32),
+        }), false).unwrap();
+        let format = encoder.yuvfmt();
+        let yuv = vec![128u8; format.v + format.stride[2] * (format.h / 2)];
+        let frame = encoder.encode_to_message(EncodeInput::YUV(&yuv), 0).unwrap();
+        let mut message = Message::new();
+        message.set_video_frame(frame);
+        let (tx, receiver) = mpsc::channel(1);
+        let mut worker = Worker { receiver, cancelled: Arc::new(AtomicBool::new(false)), thread: None };
+        tx.try_send(Ok(message.clone())).unwrap();
+        assert!(worker.first_frame(dimensions).await.is_ok());
+        tx.try_send(Ok(message)).unwrap();
+        assert!(worker.first_frame(Dimensions { width: 128, height: 96 }).await.is_err());
+    }
+
+    #[test]
+    fn native_4k_profile_produces_a_bounded_decodable_keyframe() {
+        use scrap::vpxcodec::{VpxDecoder, VpxDecoderConfig};
+        let settings = Settings::parse(&base::message_proto::OrdVideoSettings {
+            version: 2, request_id: 1, quality: "balanced".into(), fps: 15,
+            resolution_mode: "preserve".into(), ..Default::default()
+        }, 0).unwrap();
+        let (width, height) = settings.dimensions(3840, 2160).unwrap();
+        let mut encoder = Encoder::new(EncoderCfg::VPX(VpxEncoderConfig {
+            width, height, quality: settings.encoder_quality(), codec: VpxVideoCodecId::VP8,
+            keyframe_interval: Some(32),
+        }), false).unwrap();
+        let format = encoder.yuvfmt();
+        let yuv = vec![128u8; format.v + format.stride[2] * (format.h / 2)];
+        let encoded = encoder.encode_to_message(EncodeInput::YUV(&yuv), 0).unwrap();
+        let Some(base::message_proto::video_frame::Union::Vp8s(frames)) = encoded.union else { panic!("Expected VP8"); };
+        assert!(frames.frames[0].key);
+        assert!(frames.frames[0].data.len() <= MAX_FRAME_BYTES);
+        let mut decoder = VpxDecoder::new(VpxDecoderConfig { codec: VpxVideoCodecId::VP8 }).unwrap();
+        let decoded = decoder.decode(&frames.frames[0].data).unwrap().next().unwrap();
+        assert_eq!((decoded.inner().d_w, decoded.inner().d_h), (3840, 2160));
     }
 }

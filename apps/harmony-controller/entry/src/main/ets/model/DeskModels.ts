@@ -1,4 +1,4 @@
-import type { VideoPreferences } from './VideoModels';
+import type { DisplayResolution, VideoPreferences } from './VideoModels';
 
 export interface Profile {
   id: string;
@@ -33,6 +33,17 @@ export interface ScreenEvent {
   videoFps?: number;
   videoSettingsSupported?: boolean;
   videoRequestId?: number;
+  videoSettingsVersion?: number;
+  videoResolutionMode?: string;
+  videoResolutionWidth?: number;
+  videoResolutionHeight?: number;
+  desktopWidth?: number;
+  desktopHeight?: number;
+  originalWidth?: number;
+  originalHeight?: number;
+  supportedResolutions?: DisplayResolution[];
+  resolutionSyncSupported?: boolean;
+  videoSettingsError?: string;
   frames?: number;
   bytes?: number;
   renderedFrames?: number;
@@ -57,6 +68,17 @@ export class ScreenState {
   videoFps: number = 0;
   videoSettingsSupported: boolean = false;
   videoSettingsPending: boolean = false;
+  videoSettingsVersion: number = 0;
+  videoResolutionMode: string = 'preserve';
+  videoResolutionWidth: number = 1920;
+  videoResolutionHeight: number = 1080;
+  desktopWidth: number = 0;
+  desktopHeight: number = 0;
+  originalWidth: number = 0;
+  originalHeight: number = 0;
+  supportedResolutions: DisplayResolution[] = [];
+  resolutionSyncSupported: boolean = false;
+  videoSettingsError: string = '';
   frames: number = 0;
   rendered: number = 0;
   bytes: number = 0;
@@ -73,6 +95,20 @@ export function initialScreenState(requestedAccessMode: string = ''): ScreenStat
   state.title = '正在连接设备';
   state.detail = '正在准备安全连接…';
   return state;
+}
+
+function copyDisplayState(previous: ScreenState, state: ScreenState): void {
+  state.videoSettingsVersion = previous.videoSettingsVersion;
+  state.videoResolutionMode = previous.videoResolutionMode;
+  state.videoResolutionWidth = previous.videoResolutionWidth;
+  state.videoResolutionHeight = previous.videoResolutionHeight;
+  state.desktopWidth = previous.desktopWidth;
+  state.desktopHeight = previous.desktopHeight;
+  state.originalWidth = previous.originalWidth;
+  state.originalHeight = previous.originalHeight;
+  state.supportedResolutions = previous.supportedResolutions;
+  state.resolutionSyncSupported = previous.resolutionSyncSupported;
+  state.videoSettingsError = previous.videoSettingsError;
 }
 
 export function endedScreenState(detail: string, code: string = 'CANCELLED'): ScreenState {
@@ -108,6 +144,7 @@ export function markInputRequest(previous: ScreenState, enabled: boolean): Scree
   state.videoFps = previous.videoFps;
   state.videoSettingsSupported = previous.videoSettingsSupported;
   state.videoSettingsPending = previous.videoSettingsPending;
+  copyDisplayState(previous, state);
   state.frames = previous.frames;
   state.rendered = previous.rendered;
   state.bytes = previous.bytes;
@@ -258,6 +295,7 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
     state.verified = true;
     state.approved = true;
     state.videoSettingsSupported = event.videoSettingsSupported === true;
+    state.videoSettingsVersion = event.videoSettingsVersion ?? 0;
     if (event.videoWidth !== undefined && event.videoWidth > 0) {
       state.width = event.videoWidth;
     }
@@ -284,6 +322,7 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
   state.videoFps = previous.videoFps;
   state.videoSettingsSupported = previous.videoSettingsSupported;
   state.videoSettingsPending = previous.videoSettingsPending;
+  copyDisplayState(previous, state);
   state.frames = previous.frames;
   state.rendered = previous.rendered;
   state.bytes = previous.bytes;
@@ -295,12 +334,14 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
   if (event.state === 'video_settings_requested' && state.videoSettingsSupported && !state.accessMode) {
     state.code = previous.code;
     state.videoSettingsPending = true;
+    state.videoSettingsError = '';
   } else if (event.state === 'video_settings' && event.verified && event.authenticated &&
     event.videoSettingsSupported === true && !state.accessMode &&
     (event.videoQuality === 'low' || event.videoQuality === 'balanced' || event.videoQuality === 'high') &&
     (event.videoFps === 10 || event.videoFps === 15 || event.videoFps === 30) &&
-    event.videoWidth !== undefined && event.videoWidth >= 2 && event.videoWidth <= 2560 &&
-    event.videoHeight !== undefined && event.videoHeight >= 2 && event.videoHeight <= 1440) {
+    event.videoWidth !== undefined && event.videoWidth >= 2 && event.videoWidth <= 4096 &&
+    event.videoHeight !== undefined && event.videoHeight >= 2 && event.videoHeight <= 4096 &&
+    event.videoWidth * event.videoHeight <= 8294400) {
     state.code = previous.code;
     state.videoQuality = event.videoQuality;
     state.videoFps = event.videoFps;
@@ -308,6 +349,20 @@ export function projectScreenEvent(previous: ScreenState, event: ScreenEvent): S
     state.videoSettingsPending = false;
     state.width = event.videoWidth;
     state.height = event.videoHeight;
+    if (event.videoSettingsVersion === 2 &&
+      (event.videoResolutionMode === 'preserve' || event.videoResolutionMode === 'sync')) {
+      state.videoSettingsVersion = 2;
+      state.videoResolutionMode = event.videoResolutionMode;
+      state.videoResolutionWidth = event.videoResolutionWidth ?? 0;
+      state.videoResolutionHeight = event.videoResolutionHeight ?? 0;
+      state.desktopWidth = event.desktopWidth ?? 0;
+      state.desktopHeight = event.desktopHeight ?? 0;
+      state.originalWidth = event.originalWidth ?? 0;
+      state.originalHeight = event.originalHeight ?? 0;
+      state.supportedResolutions = event.supportedResolutions ?? [];
+      state.resolutionSyncSupported = event.resolutionSyncSupported === true;
+      state.videoSettingsError = event.videoSettingsError ?? '';
+    }
   } else if (event.state === 'input_state') {
     state.inputSupported = !state.accessMode && event.verified && event.authenticated && event.inputSupported === true;
     state.inputGranted = state.inputSupported && event.authorized === true;
@@ -383,6 +438,9 @@ interface DirectScreenRequest {
   expectedPeer: string;
   videoQuality?: string;
   videoFps?: number;
+  videoResolutionMode?: string;
+  videoResolutionWidth?: number;
+  videoResolutionHeight?: number;
 }
 
 interface RoutedScreenRequest {
@@ -397,6 +455,9 @@ interface RoutedScreenRequest {
   relayServer: string;
   videoQuality?: string;
   videoFps?: number;
+  videoResolutionMode?: string;
+  videoResolutionWidth?: number;
+  videoResolutionHeight?: number;
 }
 
 export function buildScreenRequest(profile: Profile, video?: VideoPreferences): string {
@@ -408,7 +469,12 @@ export function buildScreenRequest(profile: Profile, video?: VideoPreferences): 
       endpoint: profile.target, peerId: profile.peerId ?? '', peerPublicKey: profile.peerPublicKey ?? '',
       peerFingerprint: profile.peerFingerprint || null, minimumKxVersion: 1, expectedPeer: 'secure_control'
     };
-    if (video) { request.videoQuality = video.quality; request.videoFps = video.fps; }
+    if (video) {
+      request.videoQuality = video.quality; request.videoFps = video.fps;
+      request.videoResolutionMode = 'preserve';
+      request.videoResolutionWidth = video.resolutionWidth;
+      request.videoResolutionHeight = video.resolutionHeight;
+    }
     return JSON.stringify(request);
   }
   const request: RoutedScreenRequest = {
@@ -416,7 +482,12 @@ export function buildScreenRequest(profile: Profile, video?: VideoPreferences): 
     peerFingerprint: profile.peerFingerprint || null, minimumKxVersion: 1, expectedPeer: 'secure_control',
     server: profile.server, serverKey: profile.serverKey, relayServer: profile.relayServer ?? ''
   };
-  if (video) { request.videoQuality = video.quality; request.videoFps = video.fps; }
+  if (video) {
+    request.videoQuality = video.quality; request.videoFps = video.fps;
+    request.videoResolutionMode = 'preserve';
+    request.videoResolutionWidth = video.resolutionWidth;
+    request.videoResolutionHeight = video.resolutionHeight;
+  }
   return JSON.stringify(request);
 }
 

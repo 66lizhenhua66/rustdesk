@@ -224,7 +224,8 @@ pub fn initial_video_settings(lr: &LoginRequest) -> Option<video_settings::Setti
         return None;
     }
     video_settings::Settings::parse(lr.ord_video_settings.as_ref()?, 0)
-        .filter(|settings| settings.request_id == 1)
+        .filter(|settings| settings.request_id == 1
+            && (settings.version == 1 || settings.resolution_mode == "preserve"))
 }
 
 pub fn updated_video_settings(
@@ -237,6 +238,20 @@ pub fn updated_video_settings(
         return None;
     }
     video_settings::Settings::parse(request, previous_id)
+        .filter(|settings| initial_video_settings(lr).is_some_and(|initial| initial.version == settings.version))
+}
+
+pub fn approved_resolution_video_peer_info(version: &str, width: i32, height: i32) -> Message {
+    let mut message = approved_control_peer_info(version, width, height);
+    if let Some(message::Union::LoginResponse(login)) = message.union.as_mut() {
+        if let Some(base::message_proto::login_response::Union::PeerInfo(peer)) = login.union.as_mut() {
+            peer.platform_additions = serde_json::json!({
+                "ord_secure_host": 1, "media": true, "video_codec": "vp8",
+                "input_scope": "windows_primary", "input_version": 2, "video_settings_version": 2
+            }).to_string();
+        }
+    }
+    message
 }
 
 pub fn approved_configurable_video_peer_info(version: &str, width: i32, height: i32) -> Message {

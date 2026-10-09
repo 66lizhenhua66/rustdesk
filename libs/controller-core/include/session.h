@@ -29,6 +29,9 @@ ControllerSession *controller_session_create(const char *request_json, const cha
  * Its optional videoQuality (low/balanced/high) and videoFps (10/15/30) must
  * appear together and require the peer's video settings extension. Confirmed
  * settings arrive as video_settings events before video at the new dimensions.
+ * Adding videoResolutionMode/Width/Height together selects extension v2; login
+ * only permits mode "preserve". Width/height 0/0 follows the source; otherwise
+ * preserve accepts 1280x720, 1920x1080 or 2560x1440. V2 quality controls compression.
  * The peer must match the selected mode; there is no automatic fallback.
  * The event includes confirmationCode while awaiting approval, and x/y/textLength
  * for demo_status. Demo input requires Keyboard permission; secure_control input
@@ -51,13 +54,23 @@ int32_t controller_session_send_text(ControllerSession *task, const char *utf8);
 int32_t controller_session_send_input_v1(ControllerSession *task, const char *command_json);
 /* 0 queued, 1 disconnected or wrong mode, 2 unavailable, 3 invalid boolean, 4 queue full.
  * Closing input invalidates local authorization and pending input immediately.
+ * Enabling input returns 4 while a v2 video settings request is pending.
  */
 int32_t controller_session_set_input_enabled_v1(ControllerSession *task, uint8_t enabled);
 /* JSON {"quality":"low|balanced|high","fps":10|15|30}; connected secure_control
  * sessions with negotiated video settings only. Input authorization is not required.
  * 0 queued, 1 inactive/wrong mode, 2 unsupported, 3 invalid JSON, 4 request pending.
  * The video_settings event confirms the applied choice; missing confirmation fails
- * the session after 5 seconds. No new login or input grant is requested.
+ * the session after 5 seconds for v1 settings, or 20 seconds for v2 settings.
+ * V2 sessions require resolutionMode/Width/Height on every request. Mode "preserve"
+ * keeps the desktop; "sync" requires resolutionSyncSupported and a supported mode.
+ * Sync 0/0 restores the session's original desktop. Stream limits are 4096 per axis
+ * and 8294400 pixels, with even dimensions. Input is released and blocked (code 4)
+ * during v2 changes, while an existing input grant can be renewed by the host.
+ * V2 video_settings events include videoResolutionMode/Width/Height, desktopWidth/
+ * Height, originalWidth/Height, supportedResolutions [{width,height}], and
+ * resolutionSyncSupported. A nonempty videoSettingsError reports a rejected change;
+ * the event still contains actual settings and streaming continues after rollback.
  */
 int32_t controller_session_set_video_settings_v1(ControllerSession *task, const char *settings_json);
 void controller_session_run(ControllerSession *task, ControllerSessionCallback callback, void *user);

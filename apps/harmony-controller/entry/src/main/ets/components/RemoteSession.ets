@@ -1,6 +1,6 @@
 import { ScreenState, connectionPathLabel, screenIsLive } from '../model/DeskModels';
 import { SystemInputCommand } from '../model/InputModels';
-import { videoQualityLabel } from '../model/VideoModels';
+import { VideoPreferences, DisplayResolution, videoQualityLabel, resolutionLabel, videoSettingsErrorLabel } from '../model/VideoModels';
 import { SessionInputController, InputSessionState } from '../input/SessionInputController';
 import { HarmonyInputAdapter } from '../input/HarmonyInputAdapter';
 import { RemoteInputMethod } from '../service/RemoteInputMethod';
@@ -30,7 +30,7 @@ export struct RemoteSession {
   onCanvasState: () => string = () => '{}';
   onReleaseInput: () => void = () => {};
   onSetInputEnabled: (enabled: boolean) => number = () => 1;
-  onVideoSettings: (quality: string, fps: number) => number = () => 1;
+  onVideoSettings: (settings: VideoPreferences) => number = () => 1;
   @State private areaWidth: number = 390;
   @State private areaHeight: number = 720;
   @State private viewportHeight: number = 720;
@@ -38,6 +38,7 @@ export struct RemoteSession {
   @State private detailsOpen: boolean = false;
   @State private videoSettingsOpen: boolean = false;
   @State private videoSettingsNotice: string = '';
+  @State private draftVideo: VideoPreferences = new VideoPreferences();
   @State private orbPosition: number = 0.5;
   @State private inputState: InputSessionState = new InputSessionState();
   @State private safeInsets: CanvasInsets = new CanvasInsets();
@@ -132,33 +133,80 @@ export struct RemoteSession {
       this.detailsOpen || this.videoSettingsOpen);
   }
 
-  private changeVideoSettings(quality: string, fps: number): void {
+  private openVideoSettings(): void {
+    this.draftVideo = { quality: this.screen.videoQuality || 'balanced', fps: this.screen.videoFps || 15,
+      resolutionMode: this.screen.videoResolutionMode, resolutionWidth: this.screen.videoResolutionWidth,
+      resolutionHeight: this.screen.videoResolutionHeight };
+    this.videoSettingsOpen = true;
+    this.detailsOpen = false;
+    this.videoSettingsNotice = '';
+  }
+
+  private resolutionOptions(): DisplayResolution[] {
+    if (this.draftVideo.resolutionMode === 'sync') {
+      const original: DisplayResolution[] = [{ width: 0, height: 0 }];
+      return original.concat(this.screen.supportedResolutions);
+    }
+    return [{ width: 0, height: 0 }, { width: 1280, height: 720 },
+      { width: 1920, height: 1080 }, { width: 2560, height: 1440 }];
+  }
+
+  private changeVideoSettings(): void {
     this.inputController?.release();
-    const result = this.onVideoSettings(quality, fps);
+    const result = this.onVideoSettings(this.draftVideo);
     this.videoSettingsNotice = result === 0 ? '' : result === 4 ? '正在等待上一项设置生效。' :
-      result === 2 ? '此会话尚不支持画质切换，请更新被控端后重新连接。' : '画质请求未能提交，请稍后重试。';
+      result === 2 ? '请确认已开启控制且被控端支持桌面设置。' : '设置请求未能提交，请稍后重试。';
   }
 
   @Builder
   private videoSettingsPanel() {
     Column({ space: 14 }) {
       Text(this.screen.videoSettingsPending ? '正在切换，等待被控端确认…' :
-        `${videoQualityLabel(this.screen.videoQuality)} · ${this.screen.width} × ${this.screen.height}`)
+        `当前传输 ${this.screen.width} × ${this.screen.height} · ${videoQualityLabel(this.screen.videoQuality)} · ${this.screen.videoFps} FPS`)
         .fontSize(12).fontColor('#426A4D').width('100%')
-      Text('画质').fontSize(12).fontColor('#778780').width('100%')
-      Select([{ value: '省流 · 720p' }, { value: '标准 · 1080p' }, { value: '高清 · 1440p' }])
-        .selected(this.screen.videoQuality === 'low' ? 0 : this.screen.videoQuality === 'high' ? 2 : 1)
-        .value(videoQualityLabel(this.screen.videoQuality)).width('100%')
-        .enabled(this.screen.videoSettingsSupported && !!this.screen.videoQuality && !this.screen.videoSettingsPending)
-        .onSelect((index: number) => this.changeVideoSettings(index === 0 ? 'low' : index === 2 ? 'high' : 'balanced', this.screen.videoFps))
+      Text(`Windows ${this.screen.desktopWidth} × ${this.screen.desktopHeight} · 连接前 ${this.screen.originalWidth} × ${this.screen.originalHeight}`)
+        .fontSize(11).fontColor('#778780').width('100%')
+      Text('分辨率策略').fontSize(12).fontColor('#778780').width('100%')
+      Select([{ value: '保持 Windows 桌面' }, { value: '同步调整 Windows 桌面' }])
+        .selected(this.draftVideo.resolutionMode === 'sync' ? 1 : 0)
+        .value(this.draftVideo.resolutionMode === 'sync' ? '同步调整 Windows 桌面' : '保持 Windows 桌面')
+        .width('100%').enabled(!this.screen.videoSettingsPending)
+        .onSelect((index: number) => {
+          this.draftVideo.resolutionMode = index === 1 ? 'sync' : 'preserve';
+          this.draftVideo.resolutionWidth = 0;
+          this.draftVideo.resolutionHeight = 0;
+        })
+      Text(this.draftVideo.resolutionMode === 'sync' ? 'Windows 分辨率' : '传输分辨率上限')
+        .fontSize(12).fontColor('#778780').width('100%')
+      Select(this.resolutionOptions().map((mode: DisplayResolution): SelectOption => {
+        return { value: resolutionLabel(this.draftVideo.resolutionMode, mode.width, mode.height) };
+      }))
+        .value(resolutionLabel(this.draftVideo.resolutionMode, this.draftVideo.resolutionWidth, this.draftVideo.resolutionHeight))
+        .width('100%').enabled(!this.screen.videoSettingsPending)
+        .onSelect((index: number) => {
+          const mode = this.resolutionOptions()[index];
+          if (mode) { this.draftVideo.resolutionWidth = mode.width; this.draftVideo.resolutionHeight = mode.height; }
+        })
+      Text('压缩清晰度').fontSize(12).fontColor('#778780').width('100%')
+      Select([{ value: '省流' }, { value: '均衡' }, { value: '清晰' }])
+        .selected(this.draftVideo.quality === 'low' ? 0 : this.draftVideo.quality === 'high' ? 2 : 1)
+        .value(videoQualityLabel(this.draftVideo.quality)).width('100%').enabled(!this.screen.videoSettingsPending)
+        .onSelect((index: number) => { this.draftVideo.quality = index === 0 ? 'low' : index === 2 ? 'high' : 'balanced'; })
       Text('帧率上限').fontSize(12).fontColor('#778780').width('100%')
       Select([{ value: '10 FPS' }, { value: '15 FPS' }, { value: '30 FPS' }])
-        .selected(this.screen.videoFps === 10 ? 0 : this.screen.videoFps === 30 ? 2 : 1)
-        .value(`${this.screen.videoFps} FPS`).width('100%')
-        .enabled(this.screen.videoSettingsSupported && !!this.screen.videoQuality && !this.screen.videoSettingsPending)
-        .onSelect((index: number) => this.changeVideoSettings(this.screen.videoQuality, index === 0 ? 10 : index === 2 ? 30 : 15))
-      Text('分辨率保持远端比例，不超过所选档位。实际帧率取决于画面变化和设备性能。')
+        .selected(this.draftVideo.fps === 10 ? 0 : this.draftVideo.fps === 30 ? 2 : 1)
+        .value(`${this.draftVideo.fps} FPS`).width('100%').enabled(!this.screen.videoSettingsPending)
+        .onSelect((index: number) => { this.draftVideo.fps = index === 0 ? 10 : index === 2 ? 30 : 15; })
+      Text(this.draftVideo.resolutionMode === 'sync' ?
+        '将改变本机 Windows 桌面，可能短暂闪屏或重排窗口；会话结束恢复连接前设置。需开启控制。' :
+        '保持桌面不变，仅调整发送画面。若之前同步修改过桌面，切回此策略会先恢复连接前分辨率。')
         .fontSize(11).fontColor('#778780').lineHeight(18).width('100%')
+      Button(this.screen.videoSettingsPending ? '切换中…' : '应用设置', { type: ButtonType.Normal })
+        .width('100%').height(44).backgroundColor('#196B52').fontColor('#FFFFFF').borderRadius(8)
+        .enabled(this.screen.videoSettingsVersion === 2 && !this.screen.videoSettingsPending &&
+          (this.draftVideo.resolutionMode !== 'sync' || (this.screen.resolutionSyncSupported && this.screen.inputGranted)))
+        .onClick(() => this.changeVideoSettings())
+      if (this.screen.videoSettingsError) { Text(videoSettingsErrorLabel(this.screen.videoSettingsError)).fontSize(12).fontColor('#A8443C').width('100%') }
       if (this.videoSettingsNotice) { Text(this.videoSettingsNotice).fontSize(12).fontColor('#A8443C').width('100%') }
     }.width('100%').alignItems(HorizontalAlign.Start)
   }
@@ -310,7 +358,7 @@ export struct RemoteSession {
         Button('画质 / FPS', { type: ButtonType.Normal })
           .layoutWeight(1).height(44).fontSize(12).fontColor('#426A4D').borderRadius(8).backgroundColor('#EEF3E9')
           .enabled(this.screen.videoSettingsSupported)
-          .onClick(() => { this.videoSettingsOpen = true; this.detailsOpen = false; this.videoSettingsNotice = ''; })
+          .onClick(() => this.openVideoSettings())
       }.width('100%')
       Row({ space: 8 }) {
         Button('还原画面', { type: ButtonType.Normal }).layoutWeight(1).height(44).fontSize(12)

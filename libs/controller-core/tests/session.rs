@@ -34,6 +34,8 @@ use sodiumoxide::crypto::{box_, sign};
 
 #[path = "support/video_settings.rs"]
 mod video_settings;
+#[path = "support/video_resolution.rs"]
+mod video_resolution;
 
 unsafe extern "C" fn collect(event: *const c_char, user: *mut c_void) {
     let events = &mut *(user as *mut Vec<Value>);
@@ -91,6 +93,29 @@ fn video_settings_request_requires_a_valid_pair_and_control_mode() {
         value["expectedPeer"] = json!(mode);
         if let Some(quality) = quality { value["videoQuality"] = quality; }
         if let Some(fps) = fps { value["videoFps"] = fps; }
+        let task = controller_connection_create(CString::new(value.to_string()).unwrap().as_ptr(), c"".as_ptr(), 100);
+        assert_eq!(!task.is_null(), valid, "{value}");
+        controller_session_destroy(task);
+    }
+}
+
+#[test]
+fn resolution_settings_login_requires_complete_preserve_choice() {
+    let base: Value = serde_json::from_str(request("127.0.0.1:1").to_str().unwrap()).unwrap();
+    for (resolution, valid) in [
+        (json!({"videoResolutionMode":"preserve","videoResolutionWidth":0,"videoResolutionHeight":0}), true),
+        (json!({"videoResolutionMode":"preserve","videoResolutionWidth":1280,"videoResolutionHeight":720}), true),
+        (json!({"videoResolutionMode":"sync","videoResolutionWidth":1280,"videoResolutionHeight":720}), false),
+        (json!({"videoResolutionMode":"preserve","videoResolutionWidth":1280}), false),
+        (json!({"videoResolutionMode":"preserve","videoResolutionWidth":0,"videoResolutionHeight":720}), false),
+        (json!({"videoResolutionMode":"preserve","videoResolutionWidth":1600,"videoResolutionHeight":900}), false),
+        (json!({"videoResolutionMode":null,"videoResolutionWidth":0,"videoResolutionHeight":0}), false),
+    ] {
+        let mut value = base.clone();
+        value["expectedPeer"] = json!("secure_control");
+        value["videoQuality"] = json!("balanced");
+        value["videoFps"] = json!(15);
+        value.as_object_mut().unwrap().extend(resolution.as_object().unwrap().clone());
         let task = controller_connection_create(CString::new(value.to_string()).unwrap().as_ptr(), c"".as_ptr(), 100);
         assert_eq!(!task.is_null(), valid, "{value}");
         controller_session_destroy(task);

@@ -2,6 +2,10 @@ use super::super::secure_host_policy::{self, Request};
 use super::super::{secure_access, secure_access_policy, secure_input, secure_video};
 use super::*;
 
+#[path = "secure_resolution_video.rs"]
+mod secure_resolution_video;
+use secure_resolution_video::ResolutionVideo;
+
 fn approve_pending(pending: &mut bool, authorized: &mut bool, requires_2fa: bool) -> bool {
     if !*pending || *authorized || requires_2fa {
         return false;
@@ -100,6 +104,8 @@ impl Connection {
         let mut stop_tick = time::interval(Duration::from_secs(1));
         let mut video_worker: Option<secure_video::Worker> = None;
         let mut video_settings_id = 0;
+        let mut resolution_video: Option<ResolutionVideo> = None;
+        let mut input_request_id = 0;
         let mut input = secure_input::Control::new(self.inner.id());
         let mut access_pending: Option<base::message_proto::OrdAccessRequest> = None;
         let mut access_active: Option<String> = None;
@@ -176,8 +182,20 @@ impl Connection {
                                 self.send_secure_video_error().await;
                                 break;
                             }
+                            if let Some(settings) = video_settings.filter(|settings| settings.version == 2) {
+                                match ResolutionVideo::open(settings).await {
+                                    Ok(session) => resolution_video = Some(session),
+                                    Err(error) => {
+                                        log::warn!("Secure display setup failed: {error}");
+                                        self.send_secure_video_error().await;
+                                        break;
+                                    }
+                                }
+                            }
                             let video_dimensions = if video_requested {
-                                let result = if let Some(settings) = video_settings {
+                                let result = if let Some(session) = &resolution_video {
+                                    Ok(Ok(session.dimensions()))
+                                } else if let Some(settings) = video_settings {
                                     tokio::task::spawn_blocking(move || secure_video::dimensions_with_settings(settings)).await
                                 } else {
                                     tokio::task::spawn_blocking(secure_video::dimensions).await
@@ -191,7 +209,9 @@ impl Connection {
                                 None
                             };
                             let info = if let Some(dimensions) = video_dimensions {
-                                if video_settings.is_some() {
+                                if resolution_video.is_some() {
+                                    secure_host_policy::approved_resolution_video_peer_info(VERSION, dimensions.width as _, dimensions.height as _)
+                                } else if video_settings.is_some() {
                                     secure_host_policy::approved_configurable_video_peer_info(VERSION, dimensions.width as _, dimensions.height as _)
                                 } else if input_requested {
                                     secure_host_policy::approved_control_peer_info(VERSION, dimensions.width as _, dimensions.height as _)
@@ -208,6 +228,20 @@ impl Connection {
                                 break;
                             }
                             if let Some(dimensions) = video_dimensions {
+                                if let Some(session) = &mut resolution_video {
+                                    match session.start().await {
+                                        Ok((worker, state, first)) => {
+                                            video_worker = Some(worker);
+                                            if self.stream.send(&state).await.is_err() || self.stream.send(&first).await.is_err() { break; }
+                                            video_settings_id = 1;
+                                        }
+                                        Err(error) => {
+                                            log::warn!("Secure display video start failed: {error}");
+                                            self.send_secure_video_error().await;
+                                            break;
+                                        }
+                                    }
+                                } else {
                                 let worker = if let Some(settings) = video_settings {
                                     secure_video::start_control_with_settings(dimensions, settings)
                                 } else if input_requested { secure_video::start_control(dimensions) } else { secure_video::start(dimensions) };
@@ -223,6 +257,7 @@ impl Connection {
                                         self.send_secure_video_error().await;
                                         break;
                                     }
+                                }
                                 }
                             }
                             #[cfg(feature = "flutter")]
@@ -262,6 +297,30 @@ impl Connection {
                         let Some(settings) = secure_host_policy::updated_video_settings(
                             &self.lr, self.authorized, video_settings_id, &request,
                         ) else { break; };
+                        if let Some(session) = &mut resolution_video {
+                            let input_enabled = input.enabled();
+                            let display_change_allowed = input.display_change_allowed();
+                            if let Err(error) = input.revoke() {
+                                log::error!("Secure resolution switch could not release input: {error}");
+                                break;
+                            }
+                            let result = session.update(&mut video_worker, settings, display_change_allowed).await;
+                            let Ok((state, first)) = result else {
+                                if let Err(error) = result { log::error!("Secure display transaction failed: {error}"); }
+                                self.send_secure_video_error().await;
+                                break;
+                            };
+                            if input_enabled {
+                                if let Err(error) = input.grant() {
+                                    log::error!("Secure resolution switch could not renew input: {error}");
+                                    break;
+                                }
+                                if !self.send_secure_input_state(&input, input_request_id).await { break; }
+                            }
+                            if self.stream.send(&state).await.is_err() || self.stream.send(&first).await.is_err() { break; }
+                            video_settings_id = settings.request_id;
+                            continue;
+                        }
                         // The old receiver must be gone before acknowledging a new frame size.
                         drop(video_worker.take());
                         let Ok(Ok(dimensions)) = tokio::task::spawn_blocking(move || secure_video::dimensions_with_settings(settings)).await else {
@@ -280,6 +339,7 @@ impl Connection {
                     if secure_host_policy::classify_message(&message) == Request::InputRequest {
                         if !self.authorized || !secure_host_policy::requests_input(&self.lr) { break; }
                         let Some(message::Union::OrdInputRequest(request)) = message.union else { break; };
+                        input_request_id = request.request_id;
                         if let Err(error) = input.request_enabled(request.enabled) {
                             log::trace!("Secure input request was not applied: {error}");
                         }
@@ -364,6 +424,11 @@ impl Connection {
                 }
             }
         }
+        if resolution_video.is_some() {
+            if let Some(worker) = video_worker.take() {
+                if let Err(error) = worker.stop().await { log::error!("Secure video shutdown failed: {error}"); }
+            }
+        }
         if let Err(error) = input.revoke() {
             self.send_to_cm(ipc::Data::SwitchPermission { name: "ord_input_release_failed".into(), enabled: true });
             self.keyboard = false;
@@ -376,6 +441,9 @@ impl Connection {
             self.send_secure_input_state(&input, 0).await;
         }
         drop(video_worker);
+        if let Some(session) = resolution_video {
+            if let Err(error) = session.restore().await { log::error!("Secure desktop restoration failed: {error}"); }
+        }
         self.secure_login_pending = false;
         self.on_close("Secure host session ended", false).await;
     }

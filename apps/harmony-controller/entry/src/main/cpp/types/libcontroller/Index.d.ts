@@ -18,6 +18,17 @@ export interface ControllerEvent {
   videoFps?: number;
   videoSettingsSupported?: boolean;
   videoRequestId?: number;
+  videoSettingsVersion?: number;
+  videoResolutionMode?: string;
+  videoResolutionWidth?: number;
+  videoResolutionHeight?: number;
+  desktopWidth?: number;
+  desktopHeight?: number;
+  originalWidth?: number;
+  originalHeight?: number;
+  supportedResolutions?: { width: number; height: number }[];
+  resolutionSyncSupported?: boolean;
+  videoSettingsError?: string;
   frames?: number;
   bytes?: number;
   renderedFrames?: number;

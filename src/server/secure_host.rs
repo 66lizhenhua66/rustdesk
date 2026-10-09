@@ -28,6 +28,15 @@ pub async fn start() -> ResultType<()> {
         &std::env::var("ORD_SECURE_RELAY").unwrap_or_default(),
         &std::env::var("ORD_SECURE_ALLOW").unwrap_or_default(),
     )?;
+    if !is_stopped() && (config.is_some() || !std::env::var("ORD_SECURE_LISTEN").unwrap_or_default().is_empty()) {
+        match tokio::task::spawn_blocking(super::secure_display::recover_pending).await? {
+            Ok(()) => {}
+            Err(super::secure_display::DisplayError::ExternalChanged) => {
+                log::warn!("Display recovery deferred: local display settings changed");
+            }
+            Err(error) => bail!("Pending display restoration failed: {error}"),
+        }
+    }
     if let Some(config) = config {
         let (sk, pk) = Config::get_key_pair();
         IdentityHandshake::new(&Config::get_id(), &sk, &pk)?;

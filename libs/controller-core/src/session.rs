@@ -23,7 +23,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     bytes_codec::BytesCodec,
-    input::{parse_command, ControlInputState},
+    input::{parse_command, ControlInputState, InputCommand},
     protos::message::{
         self, login_response, option_message, permission_info, Hash, KeyEvent, LoginRequest,
         Message, Misc, MouseEvent, OptionMessage, PublicKey, SupportedDecoding,
@@ -61,6 +61,12 @@ struct Request {
     video_quality: Option<String>,
     #[serde(default, deserialize_with = "crate::video_settings::optional")]
     video_fps: Option<u32>,
+    #[serde(default, deserialize_with = "crate::video_settings::optional")]
+    video_resolution_mode: Option<String>,
+    #[serde(default, deserialize_with = "crate::video_settings::optional")]
+    video_resolution_width: Option<u32>,
+    #[serde(default, deserialize_with = "crate::video_settings::optional")]
+    video_resolution_height: Option<u32>,
 }
 
 pub struct ControllerSession {
@@ -162,7 +168,10 @@ fn create(
     if !demo && request.expected_peer.is_some() {
         return ptr::null_mut();
     }
-    let Ok(video_settings) = Settings::initial(request.video_quality, request.video_fps) else {
+    let Ok(video_settings) = Settings::initial(
+        request.video_quality, request.video_fps, request.video_resolution_mode,
+        request.video_resolution_width, request.video_resolution_height,
+    ) else {
         return ptr::null_mut();
     };
     if video_settings.is_some() && (!demo || request.expected_peer != Some(PersistentPeer::SecureControl)) {
@@ -304,6 +313,8 @@ pub extern "C" fn controller_session_send_input_v1(
     {
         return 1;
     }
+    let video = task.video_settings.lock().unwrap();
+    if video.resolution_pending() { return 4; }
     let mut input = task.control_input.lock().unwrap();
     if !task.connected.load(Ordering::Acquire) || task.cancelled.load(Ordering::Acquire) {
         return 1;
@@ -325,7 +336,11 @@ pub extern "C" fn controller_session_set_video_settings_v1(
     { return 1; }
     let mut video = task.video_settings.lock().unwrap();
     if !task.connected.load(Ordering::Acquire) || task.cancelled.load(Ordering::Acquire) { return 1; }
-    video.queue(settings)
+    let result = video.queue(settings);
+    if result == 0 && video.resolution_pending() {
+        task.control_input.lock().unwrap().queue(InputCommand::ReleaseAll);
+    }
+    result
 }
 
 #[no_mangle]
@@ -346,6 +361,8 @@ pub extern "C" fn controller_session_set_input_enabled_v1(
         return 1;
     }
     let result = {
+        let video = session.video_settings.lock().unwrap();
+        if enabled == 1 && video.resolution_pending() { return 4; }
         let mut input = session.control_input.lock().unwrap();
         if !session.connected.load(Ordering::Acquire) || session.cancelled.load(Ordering::Acquire) {
             return 1;
@@ -1028,10 +1045,26 @@ fn run_secure_control(
                     width = state.width;
                     height = state.height;
                     first_frame = true;
-                    demo_event(callback, user, "video_settings", "VIDEO_SETTINGS", "Video settings applied",
+                    let mut extra = json!({"videoWidth":width,"videoHeight":height,"videoQuality":state.quality,
+                        "videoFps":state.fps,"videoSettingsSupported":true,"videoRequestId":state.request_id});
+                    if state.version == 2 {
+                        extra["videoSettingsVersion"] = json!(2);
+                        extra["videoResolutionMode"] = json!(state.resolution_mode);
+                        extra["videoResolutionWidth"] = json!(state.resolution_width);
+                        extra["videoResolutionHeight"] = json!(state.resolution_height);
+                        extra["desktopWidth"] = json!(state.desktop_width);
+                        extra["desktopHeight"] = json!(state.desktop_height);
+                        extra["originalWidth"] = json!(state.original_width);
+                        extra["originalHeight"] = json!(state.original_height);
+                        extra["supportedResolutions"] = json!(state.supported_resolutions.iter().map(|resolution|
+                            json!({"width":resolution.width,"height":resolution.height})).collect::<Vec<_>>());
+                        extra["resolutionSyncSupported"] = json!(state.resolution_sync_supported);
+                        extra["videoSettingsError"] = json!(state.error_code);
+                    }
+                    demo_event(callback, user, "video_settings", "VIDEO_SETTINGS",
+                        if state.error_code.is_empty() { "Video settings applied" } else { "Video settings unchanged" },
                         true, true, task.authorized.load(Ordering::Acquire),
-                        json!({"videoWidth":width,"videoHeight":height,"videoQuality":state.quality,
-                            "videoFps":state.fps,"videoSettingsSupported":true,"videoRequestId":state.request_id}));
+                        extra);
                 }
                 Some(message::message::Union::OrdInputState(state)) => {
                     let state_result = {
@@ -1126,8 +1159,9 @@ fn run_secure_control(
                 last_inbound = Instant::now();
             }
         }
+        let response_timeout = task.video_settings.lock().unwrap().response_timeout();
         if task.control_input.lock().unwrap().allowed()
-            && last_inbound.elapsed() >= Duration::from_secs(5)
+            && last_inbound.elapsed() >= response_timeout
         {
             return Err(Failure::failed(
                 "TRANSPORT_STALLED",
@@ -1136,6 +1170,17 @@ fn run_secure_control(
         }
         let video_request = { task.video_settings.lock().unwrap().take_request() };
         if let Some(request) = video_request {
+            if request.version == 2 {
+                let release = {
+                    let mut input = task.control_input.lock().unwrap();
+                    input.queue(InputCommand::ReleaseAll);
+                    input.pop()
+                };
+                if let Some((release, token)) = release {
+                    let send_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+                    wire.send_message(task, send_deadline, cipher, &release.into_message(token))?;
+                }
+            }
             let mut message = Message::new();
             message.set_ord_video_settings(request);
             let send_deadline = deadline.min(Instant::now() + Duration::from_secs(2));
@@ -1684,6 +1729,7 @@ fn run(
                                         let mut extra = json!({"videoWidth":width,"videoHeight":height,"videoCodec":"vp8","inputSupported":false});
                                         if task.video_settings.lock().unwrap().supported() {
                                             extra["videoSettingsSupported"] = json!(true);
+                                            extra["videoSettingsVersion"] = json!(task.video_settings.lock().unwrap().version());
                                         }
                                         extra
                                     } else {

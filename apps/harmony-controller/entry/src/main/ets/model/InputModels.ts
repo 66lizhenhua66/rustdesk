@@ -49,5 +49,6 @@ export function canRequestSystemInput(screen: ScreenState, visible: boolean): bo
 
 export function canSendSystemInput(screen: ScreenState, visible: boolean, controlMode: boolean): boolean {
   return canRequestSystemInput(screen, visible) && controlMode && screen.inputGranted &&
+    !screen.videoSettingsPending &&
     screen.code !== 'INPUT_ENABLING' && screen.code !== 'INPUT_DISABLING';
 }

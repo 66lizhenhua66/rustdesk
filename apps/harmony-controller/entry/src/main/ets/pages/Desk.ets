@@ -6,7 +6,8 @@ import { Profile, ScreenState, initialScreenState, projectScreenEvent, endedScre
   screenIsLive, splitEndpoint, joinEndpoint, canConnectProfile, buildScreenRequest, connectionPathLabel } from '../model/DeskModels';
 import { canRequestSystemInput, canSendSystemInput } from '../model/InputModels';
 import { connectionCandidates, selectedConnectionProfile } from '../model/DeviceIdModels';
-import { VideoPreferences, validVideoPreferences, readVideoPreferences, videoQualityLabel } from '../model/VideoModels';
+import { VideoPreferences, validVideoPreferences, readVideoPreferences, videoQualityLabel,
+  validStreamResolution, validDisplayResolution, resolutionLabel } from '../model/VideoModels';
 import { AccessStatus, accessStatus, buildTrustedScreenRequest, credentialForTarget, parsePairingGrant,
   secretRequest } from '../model/AccessModels';
 import { loadIdentity, saveIdentity, loadAccess, readAccess, saveAccess, removeAccess } from '../service/CredentialStore';
@@ -78,6 +79,8 @@ struct Desk {
   @State private sessionControl: boolean = true;
   @State private videoQuality: string = 'balanced';
   @State private videoFps: number = 15;
+  @State private videoResolutionWidth: number = 1920;
+  @State private videoResolutionHeight: number = 1080;
   @State private screen: ScreenState = new ScreenState();
   @State private accessBusy: boolean = false;
   @State private accessStatuses: Record<string, AccessStatus> = {};
@@ -196,6 +199,8 @@ struct Desk {
       this.recent = recent.slice(0, 30);
       this.videoQuality = videoSaved.quality;
       this.videoFps = videoSaved.fps;
+      this.videoResolutionWidth = videoSaved.resolutionWidth;
+      this.videoResolutionHeight = videoSaved.resolutionHeight;
       this.storeError = '';
       if (!normalized.some((p: Profile) => p.id === this.selectedId)) {
         this.selectedId = '';
@@ -498,7 +503,8 @@ struct Desk {
         credentials = secretRequest(accessMode, identity.seed, stored, profile);
       }
       if (!this.sameTarget(profile, owner) || this.surfaceId !== surfaceId) { return; }
-      const video: VideoPreferences = { quality: this.videoQuality, fps: this.videoFps };
+      const video: VideoPreferences = { quality: this.videoQuality, fps: this.videoFps, resolutionMode: 'preserve',
+        resolutionWidth: this.videoResolutionWidth, resolutionHeight: this.videoResolutionHeight };
       const request = accessMode ? buildTrustedScreenRequest(profile) : buildScreenRequest(profile, video);
       const callback = (event: ControllerEvent): void => {
         if (!this.visible || owner !== this.generation || event.taskId !== this.task) { return; }
@@ -534,6 +540,10 @@ struct Desk {
       validVideoPreferences(this.screen.videoQuality, this.screen.videoFps)) {
       this.videoQuality = this.screen.videoQuality;
       this.videoFps = this.screen.videoFps;
+      if (this.screen.videoResolutionMode === 'preserve') {
+        this.videoResolutionWidth = this.screen.videoResolutionWidth;
+        this.videoResolutionHeight = this.screen.videoResolutionHeight;
+      }
       this.rememberVideoPreferences();
     }
     if (!wasApproved && this.screen.approved) { this.recordConnection(profile); }
@@ -616,18 +626,27 @@ struct Desk {
 
   private async rememberVideoPreferences(): Promise<void> {
     if (!this.store) { return; }
-    const settings: VideoPreferences = { quality: this.videoQuality, fps: this.videoFps };
+    const settings: VideoPreferences = { quality: this.videoQuality, fps: this.videoFps, resolutionMode: 'preserve',
+      resolutionWidth: this.videoResolutionWidth, resolutionHeight: this.videoResolutionHeight };
     try {
       await this.store.put('desk_video_preferences', JSON.stringify(settings));
       await this.store.flush();
     } catch { this.notice = '画质选择已生效，但未能保存为下次连接的默认值。'; }
   }
 
-  private setVideoPreferences(quality: string, fps: number): number {
-    if (!validVideoPreferences(quality, fps)) { return 3; }
+  private setVideoPreferences(settings: VideoPreferences): number {
+    if (!validVideoPreferences(settings.quality, settings.fps)) { return 3; }
+    if (settings.resolutionMode === 'preserve') {
+      if (!validStreamResolution(settings.resolutionWidth, settings.resolutionHeight)) { return 3; }
+    } else if (settings.resolutionMode === 'sync') {
+      if (!this.screen.inputGranted || !this.screen.resolutionSyncSupported) { return 2; }
+      if (!(settings.resolutionWidth === 0 && settings.resolutionHeight === 0) &&
+        (!validDisplayResolution(settings.resolutionWidth, settings.resolutionHeight) ||
+          !this.screen.supportedResolutions.some((mode) =>
+            mode.width === settings.resolutionWidth && mode.height === settings.resolutionHeight))) { return 3; }
+    } else { return 3; }
     if (!this.visible || !this.sessionOpen || this.task <= 0 || !this.screen.approved ||
       !this.screen.videoSettingsSupported || this.currentAccessMode) { return 2; }
-    const settings: VideoPreferences = { quality: quality, fps: fps };
     try {
       const result = controller.setVideoSettings(this.task, JSON.stringify(settings));
       if (result === 0) {
@@ -917,9 +936,18 @@ struct Desk {
       this.setting('进入模式', '默认控制，可选仅查看；批准后直接在远程画面操作')
       this.setting('文字输入', '外接键盘直接输入；键盘按钮调起系统输入法，确认文字后自动发送')
       this.setting('画面显示', '保持比例，适应窗口；单主屏')
-      this.setting('画面质量', '省流 720p / 标准 1080p / 高清 1440p，帧率上限 10 / 15 / 30；普通会话内可切换')
+      this.setting('画面质量', '分辨率、压缩清晰度与帧率独立设置；同步调整 Windows 桌面需在连接后显式选择')
+      Select([{ value: '跟随远端（最高 4K）' }, { value: '1280 × 720' },
+        { value: '1920 × 1080' }, { value: '2560 × 1440' }])
+        .value(resolutionLabel('preserve', this.videoResolutionWidth, this.videoResolutionHeight))
+        .enabled(!screenIsLive(this.screen))
+        .onSelect((index: number) => {
+          this.videoResolutionWidth = index === 1 ? 1280 : index === 2 ? 1920 : index === 3 ? 2560 : 0;
+          this.videoResolutionHeight = index === 1 ? 720 : index === 2 ? 1080 : index === 3 ? 1440 : 0;
+          this.rememberVideoPreferences();
+        })
       Row({ space: 10 }) {
-        Select([{ value: '省流 · 720p' }, { value: '标准 · 1080p' }, { value: '高清 · 1440p' }])
+        Select([{ value: '省流' }, { value: '均衡' }, { value: '清晰' }])
           .value(videoQualityLabel(this.videoQuality)).enabled(!screenIsLive(this.screen))
           .onSelect((index: number) => {
             this.videoQuality = index === 0 ? 'low' : index === 2 ? 'high' : 'balanced';
@@ -1071,7 +1099,7 @@ struct Desk {
             onInputEvent: (event: string) => this.sendSystemInputEvent(event), onResetInput: () => this.resetInput(),
             onCanvasState: () => this.canvasState(),
             onSetInputEnabled: (enabled: boolean) => this.setInputEnabled(enabled),
-            onVideoSettings: (quality: string, fps: number) => this.setVideoPreferences(quality, fps),
+            onVideoSettings: (settings: VideoPreferences) => this.setVideoPreferences(settings),
             onRetry: () => { if (this.sessionProfile) {
               if (this.currentAccessMode) { this.connectTrusted(this.sessionProfile, this.currentAccessMode); }
               else { this.connect(this.sessionProfile, '', this.sessionControl); }

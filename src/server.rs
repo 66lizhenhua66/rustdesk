@@ -84,6 +84,8 @@ pub(crate) mod secure_host_policy;
 #[cfg(all(windows, feature = "ord-secure-host"))]
 pub(crate) mod secure_video;
 #[cfg(all(windows, feature = "ord-secure-host"))]
+pub(crate) mod secure_display;
+#[cfg(all(windows, feature = "ord-secure-host"))]
 pub(crate) mod secure_input;
 mod login_failure_check;
 pub(crate) mod port_forward_mux;

@@ -12,11 +12,12 @@
 
 namespace {
 constexpr size_t kMaxFrameBytes = 2 * 1024 * 1024;
-constexpr uint32_t kMaxWidth = 2560;
-constexpr uint32_t kMaxHeight = 1440;
+constexpr uint32_t kMaxWidth = 4096;
+constexpr uint32_t kMaxHeight = 4096;
 
 bool ValidDimensions(uint32_t width, uint32_t height) {
     return width >= 2 && height >= 2 && width <= kMaxWidth && height <= kMaxHeight &&
+           uint64_t(width) * height <= 3840ULL * 2160 &&
            (width % 2) == 0 && (height % 2) == 0;
 }
 
