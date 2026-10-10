@@ -1,5 +1,7 @@
 # 项目进度
 
+最新更新（2026-10-10，Windows 安全输入按 DNF 方案收口）：安全输入键盘改用 `KEYEVENTF_SCANCODE`（`wVk=0`），补齐 DNF 基础扫描码、F 区、小键盘、左右修饰键和扩展键；触控板相对移动直接生成 `MOUSEEVENTF_MOVE`，不再读取 Windows 光标后改写成绝对坐标；Flutter Windows 被控端 runner 与链接器均要求 `requireAdministrator`。controller-core 输入 10 项、Windows secure_input 9 项、Flutter 工作台 7 项测试及 Dart analyze 通过。真实游戏/高权限窗口和鸿蒙外接键盘现场输入仍待用户验收，SendInput 可能受目标程序反作弊策略影响。见 [输入与视频验证记录](research/2026-10-09-input-and-video-validation.md)。
+
 最新更新（2026-10-09，桌面分辨率与切换恢复）：分辨率、压缩清晰度与 FPS 已解耦。默认保持 Windows 桌面、1080p/15 FPS；可选择跟随源画面（4096 单轴、8,294,400 像素以内）或 720p/1080p/1440p 传输上限，也可在已开启控制的普通会话内显式同步调整主屏支持的分辨率。补齐释放输入、停止并等待旧采集退出、临时切屏、重建并验证首关键帧、更新输入令牌、失败回退和断开恢复；异常退出通过下次启动恢复日志处理，不覆盖本机后续手动显示调整。core 152、鸿蒙 39、Windows 视频 9 项通过，双 ABI/HAP 与 Windows Debug 整包构建成功，Windows 已更新。手机无线调试连接失败，签名包待安装；真实显示模式切换、恢复与性能仍待用户验收。见 [验证与回归面](research/2026-10-09-desktop-resolution-validation.md)。
 
 最新更新（2026-10-09，键盘/指针/画质）：独立键盘悬浮入口、固定键盘占用适配及浮窗不缩图已接线；共享指针改为一致目标坐标，修复移动缓慢与点击跳位并在启用时定位真实鼠标。新增普通会话内720p/1080p/1440p和10/15/30 FPS目标上限切换，实际确认后更新画面，默认1080p/15FPS，旧路径保留720p/8FPS。core142、鸿蒙38及Windows视频6/批准1测试通过，双ABI/HAP与Windows整包构建成功，Windows已更新。手机原无线调试端口拒绝连接，签名包待安装、实际输入与显示仍待用户验收。见 [本轮验证记录](research/2026-10-09-input-and-video-validation.md)。

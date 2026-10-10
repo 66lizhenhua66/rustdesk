@@ -24,6 +24,7 @@ enum Held {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Action {
     Move(i32, i32),
+    RelativeMove(i32, i32),
     Wheel(i32, i32),
     Press(Held, bool),
 }
@@ -41,7 +42,6 @@ enum Command {
 
 trait Injector {
     fn geometry(&self) -> Result<Geometry, String>;
-    fn position(&self) -> Result<(i32, i32), String>;
     fn send(&mut self, actions: &[Action]) -> usize;
 }
 
@@ -124,29 +124,7 @@ impl<'a, I: Injector> Session<'a, I> {
             Command::RelativeMove(dx, dy)
                 if (-65535..=65535).contains(&dx) && (-65535..=65535).contains(&dy) =>
             {
-                let (x, y) = self.injector.position()?;
-                let axis = |position: i32,
-                            delta: i32,
-                            size: i32,
-                            origin: i32,
-                            extent: i32|
-                 -> Result<i32, String> {
-                    let pixel = (i64::from(position) + i64::from(delta) * i64::from(size) / 65535)
-                        .clamp(0, i64::from(size - 1));
-                    let normalized =
-                        ((pixel * 65535 + i64::from(size - 2)) / i64::from(size - 1)) as u32;
-                    absolute_coordinate(normalized, size, origin, extent)
-                };
-                vec![Action::Move(
-                    axis(x, dx, geometry.width, geometry.left, geometry.virtual_width)?,
-                    axis(
-                        y,
-                        dy,
-                        geometry.height,
-                        geometry.top,
-                        geometry.virtual_height,
-                    )?,
-                )]
+                vec![Action::RelativeMove(dx, dy)]
             }
             Command::Button(button, down) if button <= 2 => {
                 let key = Held::Button(button);
@@ -282,74 +260,133 @@ fn absolute_coordinate(value: u32, primary: i32, origin: i32, extent: i32) -> Re
 }
 
 fn semantic_key(code: &str) -> Option<Held> {
-    if code.len() == 4 && code.starts_with("Key") && code.as_bytes()[3].is_ascii_uppercase() {
-        return Some(Held::Key(u16::from(code.as_bytes()[3]), false));
-    }
-    if code.len() == 6 && code.starts_with("Digit") && code.as_bytes()[5].is_ascii_digit() {
-        return Some(Held::Key(u16::from(code.as_bytes()[5]), false));
-    }
-    if code.len() == 7 && code.starts_with("Numpad") && code.as_bytes()[6].is_ascii_digit() {
-        return Some(Held::Key(
-            0x60 + u16::from(code.as_bytes()[6] - b'0'),
-            false,
-        ));
-    }
-    let (key, extended) = match code {
-        "Backspace" => (0x08, false),
-        "Tab" => (0x09, false),
-        "Enter" => (0x0D, false),
-        "Escape" => (0x1B, false),
-        "Space" => (0x20, false),
-        "PageUp" => (0x21, true),
-        "PageDown" => (0x22, true),
-        "End" => (0x23, true),
-        "Home" => (0x24, true),
-        "ArrowLeft" => (0x25, true),
-        "ArrowUp" => (0x26, true),
-        "ArrowRight" => (0x27, true),
-        "ArrowDown" => (0x28, true),
-        "Delete" => (0x2E, true),
-        "Shift" => (0xA0, false),
-        "Control" => (0xA2, false),
-        "Alt" => (0xA4, false),
-        "F1" => (0x70, false),
-        "F2" => (0x71, false),
-        "F3" => (0x72, false),
-        "F4" => (0x73, false),
-        "F5" => (0x74, false),
-        "F6" => (0x75, false),
-        "F7" => (0x76, false),
-        "F8" => (0x77, false),
-        "F9" => (0x78, false),
-        "F10" => (0x79, false),
-        "F11" => (0x7A, false),
-        "F12" => (0x7B, false),
-        "Minus" => (0xBD, false),
-        "Equal" => (0xBB, false),
-        "BracketLeft" => (0xDB, false),
-        "BracketRight" => (0xDD, false),
-        "Backslash" => (0xDC, false),
-        "Semicolon" => (0xBA, false),
-        "Quote" => (0xDE, false),
-        "Backquote" => (0xC0, false),
-        "Comma" => (0xBC, false),
-        "Period" => (0xBE, false),
-        "Slash" => (0xBF, false),
-        "CapsLock" => (0x14, false),
-        "Insert" => (0x2D, true),
-        "NumLock" => (0x90, true),
-        "ScrollLock" => (0x91, false),
-        "MetaLeft" => (0x5B, true),
-        "MetaRight" => (0x5C, true),
-        "NumpadAdd" => (0x6B, false),
-        "NumpadSubtract" => (0x6D, false),
-        "NumpadMultiply" => (0x6A, false),
-        "NumpadDivide" => (0x6F, true),
-        "NumpadDecimal" => (0x6E, false),
-        "NumpadEnter" => (0x0D, true),
-        _ => return None,
+    let (scan, extended) = if code.len() == 4 && code.starts_with("Key") {
+        let scan = match code.as_bytes()[3] {
+            b'A' => 0x1E,
+            b'B' => 0x30,
+            b'C' => 0x2E,
+            b'D' => 0x20,
+            b'E' => 0x12,
+            b'F' => 0x21,
+            b'G' => 0x22,
+            b'H' => 0x23,
+            b'I' => 0x17,
+            b'J' => 0x24,
+            b'K' => 0x25,
+            b'L' => 0x26,
+            b'M' => 0x32,
+            b'N' => 0x31,
+            b'O' => 0x18,
+            b'P' => 0x19,
+            b'Q' => 0x10,
+            b'R' => 0x13,
+            b'S' => 0x1F,
+            b'T' => 0x14,
+            b'U' => 0x16,
+            b'V' => 0x2F,
+            b'W' => 0x11,
+            b'X' => 0x2D,
+            b'Y' => 0x15,
+            b'Z' => 0x2C,
+            _ => return None,
+        };
+        (scan, false)
+    } else if code.len() == 6 && code.starts_with("Digit") {
+        let scan = match code.as_bytes()[5] {
+            b'0' => 0x0B,
+            b'1' => 0x02,
+            b'2' => 0x03,
+            b'3' => 0x04,
+            b'4' => 0x05,
+            b'5' => 0x06,
+            b'6' => 0x07,
+            b'7' => 0x08,
+            b'8' => 0x09,
+            b'9' => 0x0A,
+            _ => return None,
+        };
+        (scan, false)
+    } else if code.len() == 7 && code.starts_with("Numpad") {
+        let scan = match code.as_bytes()[6] {
+            b'0' => 0x52,
+            b'1' => 0x4F,
+            b'2' => 0x50,
+            b'3' => 0x51,
+            b'4' => 0x4B,
+            b'5' => 0x4C,
+            b'6' => 0x4D,
+            b'7' => 0x47,
+            b'8' => 0x48,
+            b'9' => 0x49,
+            _ => return None,
+        };
+        (scan, false)
+    } else {
+        match code {
+            "Backspace" => (0x0E, false),
+            "Tab" => (0x0F, false),
+            "Enter" => (0x1C, false),
+            "Escape" => (0x01, false),
+            "Space" => (0x39, false),
+            "PageUp" => (0x49, true),
+            "PageDown" => (0x51, true),
+            "End" => (0x4F, true),
+            "Home" => (0x47, true),
+            "ArrowLeft" => (0x4B, true),
+            "ArrowUp" => (0x48, true),
+            "ArrowRight" => (0x4D, true),
+            "ArrowDown" => (0x50, true),
+            "Delete" => (0x53, true),
+            "Shift" => (0x2A, false),
+            "ShiftLeft" => (0x2A, false),
+            "ShiftRight" => (0x36, false),
+            "Control" => (0x1D, false),
+            "ControlLeft" => (0x1D, false),
+            "ControlRight" => (0x1D, true),
+            "Alt" => (0x38, false),
+            "AltLeft" => (0x38, false),
+            "AltRight" => (0x38, true),
+            "F1" => (0x3B, false),
+            "F2" => (0x3C, false),
+            "F3" => (0x3D, false),
+            "F4" => (0x3E, false),
+            "F5" => (0x3F, false),
+            "F6" => (0x40, false),
+            "F7" => (0x41, false),
+            "F8" => (0x42, false),
+            "F9" => (0x43, false),
+            "F10" => (0x44, false),
+            "F11" => (0x57, false),
+            "F12" => (0x58, false),
+            "Minus" => (0x0C, false),
+            "Equal" => (0x0D, false),
+            "BracketLeft" => (0x1A, false),
+            "BracketRight" => (0x1B, false),
+            "Backslash" => (0x2B, false),
+            "Semicolon" => (0x27, false),
+            "Quote" => (0x28, false),
+            "Backquote" => (0x29, false),
+            "Comma" => (0x33, false),
+            "Period" => (0x34, false),
+            "Slash" => (0x35, false),
+            "CapsLock" => (0x3A, false),
+            "Insert" => (0x52, true),
+            "NumLock" => (0x45, true),
+            "ScrollLock" => (0x46, false),
+            "MetaLeft" => (0x5B, true),
+            "MetaRight" => (0x5C, true),
+            "ContextMenu" => (0x5D, true),
+            "PrintScreen" => (0x37, true),
+            "NumpadAdd" => (0x4E, false),
+            "NumpadSubtract" => (0x4A, false),
+            "NumpadMultiply" => (0x37, false),
+            "NumpadDivide" => (0x35, true),
+            "NumpadDecimal" => (0x53, false),
+            "NumpadEnter" => (0x1C, true),
+            _ => return None,
+        }
     };
-    Some(Held::Key(key, extended))
+    Some(Held::Key(scan, extended))
 }
 
 fn consume_request_budget(remaining: &mut usize, enabled: bool) -> Result<(), String> {
@@ -369,19 +406,16 @@ mod runtime {
     use super::*;
     use base::message_proto::{ord_input_event, Message, OrdInputEvent, OrdInputState};
     use hbb_common::sodiumoxide;
-    use winapi::{
-        shared::windef::POINT,
-        um::{
-            wingdi::DeleteDC,
-            winuser::{
-                GetCursorPos, GetSystemMetrics, SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE,
-                KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-                MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-                MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-                MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-                MOUSEEVENTF_WHEEL, MOUSEINPUT, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
-                SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-            },
+    use winapi::um::{
+        wingdi::DeleteDC,
+        winuser::{
+            GetSystemMetrics, SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE,
+            MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+            MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+            MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+            SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN,
         },
     };
 
@@ -563,14 +597,6 @@ mod runtime {
     struct WindowsInjector;
 
     impl Injector for WindowsInjector {
-        fn position(&self) -> Result<(i32, i32), String> {
-            let mut position = POINT { x: 0, y: 0 };
-            if unsafe { GetCursorPos(&mut position) } == 0 {
-                return Err("Cursor position unavailable".into());
-            }
-            Ok((position.x, position.y))
-        }
-
         fn geometry(&self) -> Result<Geometry, String> {
             crate::server::secure_video::visible_desktop().map_err(|error| error.to_string())?;
             let (dc, width, height) =
@@ -618,16 +644,17 @@ mod runtime {
         }
     }
 
-    fn native_input(action: &Action) -> INPUT {
+    pub(super) fn native_input(action: &Action) -> INPUT {
         let mut input: INPUT = unsafe { std::mem::zeroed() };
         unsafe {
             match action {
                 Action::Press(Held::Key(key, extended), down) => {
                     input.type_ = INPUT_KEYBOARD;
                     *input.u.ki_mut() = KEYBDINPUT {
-                        wVk: *key,
-                        wScan: 0,
-                        dwFlags: (if *extended { KEYEVENTF_EXTENDEDKEY } else { 0 })
+                        wVk: 0,
+                        wScan: *key,
+                        dwFlags: KEYEVENTF_SCANCODE
+                            | (if *extended { KEYEVENTF_EXTENDEDKEY } else { 0 })
                             | (if *down { 0 } else { KEYEVENTF_KEYUP }),
                         time: 0,
                         dwExtraInfo: enigo::ENIGO_INPUT_EXTRA_VALUE,
@@ -652,6 +679,7 @@ mod runtime {
                             MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                             0,
                         ),
+                        Action::RelativeMove(x, y) => (*x, *y, MOUSEEVENTF_MOVE, 0),
                         Action::Wheel(x, y) => (
                             0,
                             0,
@@ -660,7 +688,7 @@ mod runtime {
                             } else {
                                 MOUSEEVENTF_WHEEL
                             },
-                            (if *x != 0 { *x } else { *y } * 120) as u32,
+                            (if *x != 0 { *x * 120 } else { *y * 120 }) as u32,
                         ),
                         Action::Press(Held::Button(button), down) => (
                             0,
@@ -711,9 +739,6 @@ mod tests {
         ready: bool,
     }
     impl Injector for FakeInjector {
-        fn position(&self) -> Result<(i32, i32), String> {
-            Ok((960, 540))
-        }
         fn geometry(&self) -> Result<Geometry, String> {
             if !self.ready {
                 return Err("Desktop unavailable".into());
@@ -776,7 +801,7 @@ mod tests {
             assert_eq!(owner.load(Ordering::SeqCst), 0);
             assert!(events
                 .borrow()
-                .contains(&Action::Press(Held::Key(0xA2, false), false)));
+                .contains(&Action::Press(Held::Key(0x1D, false), false)));
             assert!(events
                 .borrow()
                 .contains(&Action::Press(Held::Button(0), false)));
@@ -787,7 +812,7 @@ mod tests {
         }
         assert!(events
             .borrow()
-            .contains(&Action::Press(Held::Key(0x41, false), false)));
+            .contains(&Action::Press(Held::Key(0x1E, false), false)));
         assert_eq!(owner.load(Ordering::SeqCst), 0);
     }
 
@@ -838,7 +863,7 @@ mod tests {
         assert!(!session.apply(&[1; 16], Command::Move(0, 0)).unwrap());
         assert_eq!(
             events.borrow().last(),
-            Some(&Action::Press(Held::Key(0x41, false), false))
+            Some(&Action::Press(Held::Key(0x1E, false), false))
         );
     }
 
@@ -849,9 +874,9 @@ mod tests {
         let mut session = Session::new(1, true, &owner, injector(&events));
         session.grant([1; 16]).unwrap();
         session
-            .apply(&[1; 16], Command::RelativeMove(65535, -65535))
+            .apply(&[1; 16], Command::RelativeMove(37, -23))
             .unwrap();
-        assert_eq!(events.borrow().last(), Some(&Action::Move(65535, 0)));
+        assert_eq!(events.borrow().last(), Some(&Action::RelativeMove(37, -23)));
         assert!(session.apply(&[1; 16], Command::Move(65536, 0)).is_err());
         assert!(session.apply(&[1; 16], Command::Wheel(11, 0)).is_err());
         assert!(session
@@ -881,51 +906,67 @@ mod tests {
         let mut session = Session::new(1, true, &owner, injector(&events));
         session.grant([1; 16]).unwrap();
         for (code, key, extended) in [
-            ("F1", 0x70, false),
-            ("F2", 0x71, false),
-            ("F3", 0x72, false),
-            ("F4", 0x73, false),
-            ("F5", 0x74, false),
-            ("F6", 0x75, false),
-            ("F7", 0x76, false),
-            ("F8", 0x77, false),
-            ("F9", 0x78, false),
-            ("F10", 0x79, false),
-            ("F11", 0x7A, false),
-            ("F12", 0x7B, false),
-            ("Minus", 0xBD, false),
-            ("Equal", 0xBB, false),
-            ("BracketLeft", 0xDB, false),
-            ("BracketRight", 0xDD, false),
-            ("Backslash", 0xDC, false),
-            ("Semicolon", 0xBA, false),
-            ("Quote", 0xDE, false),
-            ("Backquote", 0xC0, false),
-            ("Comma", 0xBC, false),
-            ("Period", 0xBE, false),
-            ("Slash", 0xBF, false),
-            ("CapsLock", 0x14, false),
-            ("Insert", 0x2D, true),
-            ("NumLock", 0x90, true),
-            ("ScrollLock", 0x91, false),
+            ("F1", 0x3B, false),
+            ("F2", 0x3C, false),
+            ("F3", 0x3D, false),
+            ("F4", 0x3E, false),
+            ("F5", 0x3F, false),
+            ("F6", 0x40, false),
+            ("F7", 0x41, false),
+            ("F8", 0x42, false),
+            ("F9", 0x43, false),
+            ("F10", 0x44, false),
+            ("F11", 0x57, false),
+            ("F12", 0x58, false),
+            ("Minus", 0x0C, false),
+            ("Equal", 0x0D, false),
+            ("BracketLeft", 0x1A, false),
+            ("BracketRight", 0x1B, false),
+            ("Backslash", 0x2B, false),
+            ("Semicolon", 0x27, false),
+            ("Quote", 0x28, false),
+            ("Backquote", 0x29, false),
+            ("Comma", 0x33, false),
+            ("Period", 0x34, false),
+            ("Slash", 0x35, false),
+            ("CapsLock", 0x3A, false),
+            ("Insert", 0x52, true),
+            ("NumLock", 0x45, true),
+            ("ScrollLock", 0x46, false),
             ("MetaLeft", 0x5B, true),
             ("MetaRight", 0x5C, true),
-            ("Numpad0", 0x60, false),
-            ("Numpad1", 0x61, false),
-            ("Numpad2", 0x62, false),
-            ("Numpad3", 0x63, false),
-            ("Numpad4", 0x64, false),
-            ("Numpad5", 0x65, false),
-            ("Numpad6", 0x66, false),
-            ("Numpad7", 0x67, false),
-            ("Numpad8", 0x68, false),
-            ("Numpad9", 0x69, false),
-            ("NumpadAdd", 0x6B, false),
-            ("NumpadSubtract", 0x6D, false),
-            ("NumpadMultiply", 0x6A, false),
-            ("NumpadDivide", 0x6F, true),
-            ("NumpadDecimal", 0x6E, false),
-            ("NumpadEnter", 0x0D, true),
+            ("ShiftLeft", 0x2A, false),
+            ("ShiftRight", 0x36, false),
+            ("ControlLeft", 0x1D, false),
+            ("ControlRight", 0x1D, true),
+            ("AltLeft", 0x38, false),
+            ("AltRight", 0x38, true),
+            ("ContextMenu", 0x5D, true),
+            ("PrintScreen", 0x37, true),
+            ("ShiftLeft", 0x2A, false),
+            ("ShiftRight", 0x36, false),
+            ("ControlLeft", 0x1D, false),
+            ("ControlRight", 0x1D, true),
+            ("AltLeft", 0x38, false),
+            ("AltRight", 0x38, true),
+            ("ContextMenu", 0x5D, true),
+            ("PrintScreen", 0x37, true),
+            ("Numpad0", 0x52, false),
+            ("Numpad1", 0x4F, false),
+            ("Numpad2", 0x50, false),
+            ("Numpad3", 0x51, false),
+            ("Numpad4", 0x4B, false),
+            ("Numpad5", 0x4C, false),
+            ("Numpad6", 0x4D, false),
+            ("Numpad7", 0x47, false),
+            ("Numpad8", 0x48, false),
+            ("Numpad9", 0x49, false),
+            ("NumpadAdd", 0x4E, false),
+            ("NumpadSubtract", 0x4A, false),
+            ("NumpadMultiply", 0x37, false),
+            ("NumpadDivide", 0x35, true),
+            ("NumpadDecimal", 0x53, false),
+            ("NumpadEnter", 0x1C, true),
         ] {
             events.borrow_mut().clear();
             for down in [true, false] {
@@ -957,6 +998,27 @@ mod tests {
                     .is_err(),
                 "{code}"
             );
+        }
+    }
+
+    #[cfg(feature = "ord-secure-host")]
+    #[test]
+    fn windows_native_input_keeps_scan_codes_and_relative_deltas() {
+        use super::runtime::native_input;
+        use winapi::um::winuser::{KEYEVENTF_SCANCODE, MOUSEEVENTF_MOVE};
+
+        let key = native_input(&Action::Press(Held::Key(0x1d, false), true));
+        let relative = native_input(&Action::RelativeMove(37, -23));
+        unsafe {
+            let key = *key.u.ki();
+            assert_eq!(key.wVk, 0);
+            assert_eq!(key.wScan, 0x1d);
+            assert_eq!(key.dwFlags, KEYEVENTF_SCANCODE);
+
+            let mouse = *relative.u.mi();
+            assert_eq!(mouse.dx, 37);
+            assert_eq!(mouse.dy, -23);
+            assert_eq!(mouse.dwFlags, MOUSEEVENTF_MOVE);
         }
     }
 }

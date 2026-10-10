@@ -8,7 +8,7 @@
 
 采用严格入口专用、同步执行的 Windows SendInput adapter。旧 `Connection::input_mouse/input_key` 在严格分支没有消费者，且普通输入服务有无界队列、portable service 转发及桌面切换，不满足本轮撤权要求，故不复用这条执行链。也不把系统输入塞入 DEMO 的 800×450 指针接口。共享协议继续由 Rust 维护。
 
-第一片覆盖：主屏移动、左右/中键按下释放、点击/拖动、滚轮、常用物理按键、显式提交的 Unicode 文本。手机使用触控板与明确鼠标/滚动/键盘控件；未开放文件、剪贴板、终端、提权、无人值守、UAC/安全桌面。文本只发送用户确认后的内容，不发送输入法预编辑文本。
+第一片覆盖：主屏绝对移动、相对 `MOUSEEVENTF_MOVE`、左右/中键按下释放、点击/拖动、滚轮、DNF 兼容扫描码、显式提交的 Unicode 文本。Windows Flutter 被控端以 `requireAdministrator` 启动；运行期间不再调用额外提权、SAS、锁屏或安全桌面接口。手机使用触控板与明确鼠标/滚动/键盘控件；文件、剪贴板、终端、无人值守仍未开放。文本只发送用户确认后的内容，不发送输入法预编辑文本。
 
 ## 协议与授权
 
@@ -35,7 +35,7 @@
 负责人：core 子任务。文件：`libs/base/protos/message.proto`、`libs/controller-core/src/session.rs`、新增 `libs/controller-core/src/input.rs`（仅本切片状态/命令校验），`libs/controller-core/include/session.h`、对应现有测试文件。
 
 - [x] 增加协议和 opt-in 模式；新 PeerInfo 严格核验 VP8/单屏/input v1，旧只读路径不接受权限提升。
-- [x] 新 `controller_session_send_input_v1(session, json)`；命令明确为 move、button、wheel、key、text、release_all，拒绝未知字段、非法坐标/键/过长文本。绝对坐标为 0..65535；触控板使用 move_relative（command 10），各轴为 -65535..65535 的归一化增量，由 Windows 读取真实光标后移动并限制主屏。滚轮以一个 Windows WHEEL_DELTA 为一格，单次 dx/dy 限制为 -10..10。
+- [x] 新 `controller_session_send_input_v1(session, json)`；命令明确为 move、button、wheel、key、text、release_all，拒绝未知字段、非法坐标/键/过长文本。绝对坐标为 0..65535；触控板使用 move_relative（command 10），各轴为 -65535..65535 的相对增量，Windows 安全输入直接使用 `MOUSEEVENTF_MOVE`。滚轮以一个 Windows WHEEL_DELTA 为一格，单次 dx/dy 限制为 -10..10。
 - [x] 验证未授权不能入队、撤权清队列、重授旧令牌不生效、错误/未知状态不能启用输入、旧 DEMO 与 secure_video 行为保留。
 
 ### 3. Windows 执行与授权回执

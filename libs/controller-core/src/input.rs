@@ -86,8 +86,14 @@ fn valid_key_code(code: &str) -> bool {
                 | "PageUp"
                 | "PageDown"
                 | "Shift"
+                | "ShiftLeft"
+                | "ShiftRight"
                 | "Control"
+                | "ControlLeft"
+                | "ControlRight"
                 | "Alt"
+                | "AltLeft"
+                | "AltRight"
                 | "F1"
                 | "F2"
                 | "F3"
@@ -100,6 +106,22 @@ fn valid_key_code(code: &str) -> bool {
                 | "F10"
                 | "F11"
                 | "F12"
+                | "Numpad0"
+                | "Numpad1"
+                | "Numpad2"
+                | "Numpad3"
+                | "Numpad4"
+                | "Numpad5"
+                | "Numpad6"
+                | "Numpad7"
+                | "Numpad8"
+                | "Numpad9"
+                | "NumpadAdd"
+                | "NumpadSubtract"
+                | "NumpadMultiply"
+                | "NumpadDivide"
+                | "NumpadDecimal"
+                | "NumpadEnter"
                 | "Minus"
                 | "Equal"
                 | "BracketLeft"
@@ -117,12 +139,8 @@ fn valid_key_code(code: &str) -> bool {
                 | "ScrollLock"
                 | "MetaLeft"
                 | "MetaRight"
-                | "NumpadAdd"
-                | "NumpadSubtract"
-                | "NumpadMultiply"
-                | "NumpadDivide"
-                | "NumpadDecimal"
-                | "NumpadEnter"
+                | "ContextMenu"
+                | "PrintScreen"
         )
 }
 
@@ -387,6 +405,22 @@ mod tests {
         ));
         assert!(matches!(
             parse_command(r#"{"kind":"key","code":"Space","down":true}"#),
+            Ok(InputCommand::Key { .. })
+        ));
+        assert!(matches!(
+            parse_command(r#"{"kind":"key","code":"F6","down":true}"#),
+            Ok(InputCommand::Key { .. })
+        ));
+        assert!(matches!(
+            parse_command(r#"{"kind":"key","code":"Numpad2","down":true}"#),
+            Ok(InputCommand::Key { .. })
+        ));
+        assert!(matches!(
+            parse_command(r#"{"kind":"key","code":"ControlLeft","down":true}"#),
+            Ok(InputCommand::Key { .. })
+        ));
+        assert!(matches!(
+            parse_command(r#"{"kind":"key","code":"AltRight","down":true}"#),
             Ok(InputCommand::Key { .. })
         ));
         assert!(matches!(

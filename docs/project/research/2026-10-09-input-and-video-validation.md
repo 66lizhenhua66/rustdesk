@@ -2,6 +2,12 @@
 
 日期：2026-10-09。基线：`8d025efbc`。需求与阶段见 [实施计划](../plans/2026-10-09-input-and-video-controls.md)。
 
+## Windows 安全输入补充（2026-10-10）
+
+按 DNF 控制脚本的注入要求收口 Windows 被控端安全输入：键盘使用 `KEYEVENTF_SCANCODE` 且 `wVk=0`，扫描码覆盖字母数字、F 区、小键盘、左右修饰键和扩展键；`move_relative` 直接生成 `MOUSEEVENTF_MOVE`，不依赖被控端当前光标位置，也不把相对事件改写成绝对坐标。Flutter Windows runner 的 manifest 和 linker 均要求 `requireAdministrator`。
+
+当前验证结果：controller-core 输入测试 10/10，Windows `secure_input` 测试 9/9，Flutter 工作台测试 7/7，Dart analyze 通过；Windows Debug 构建脚本在同一轮已完成。测试只断言注入结构和状态机，不操作用户真实桌面。真实游戏、提升窗口、外接键盘以及鸿蒙 `Alt+Tab` 仍待现场验收；目标进程可能因反作弊策略过滤 `SendInput`。
+
 ## 已完成行为
 
 - 独立键盘悬浮按钮与工具浮球成组定位；按实际固定态键盘区域计算上方视口，浮窗键盘不贡献停靠占用。保留整屏背景与键盘 NONE 系统模式，应用自己计算视口，避免系统和应用重复缩放。
